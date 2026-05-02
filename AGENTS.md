@@ -7,6 +7,44 @@ This repo is self-contained: firmware, ingest API, and web viewer all live here.
 
 ---
 
+## Session Branch Management (MANDATORY — follow before anything else)
+
+A **session** maps 1-to-1 with a Copilot Chat conversation. Every session must
+have its own dedicated git branch. These rules act as lifecycle hooks since
+Copilot has no native pre/post-turn hooks.
+
+### Session start (do this first, every session)
+
+1. Run `git branch --show-current`.
+2. If on **`main`** (or `master`), create and switch to a session branch:
+   ```powershell
+   git checkout -b copilot/session-YYYYMMDD-HHMMSS
+   ```
+   Use the actual current local date-time. Example: `copilot/session-20260502-143000`
+3. If already on a `copilot/session-*` branch, stay — do not create a second one.
+4. Tell the user the active branch name.
+
+### After every turn that modifies files
+
+Run this immediately after all edits are done in the turn:
+
+```powershell
+git add -A
+git commit -m "<type>: <short description>"
+```
+
+Commit types: `feat`, `fix`, `refactor`, `docs`, `chore`.
+
+**Never skip this commit.** If nothing changed, skip silently.
+
+### Session wrap-up (when user says "done", "wrap up", "merge")
+
+1. Show a commit summary for the session branch vs main.
+2. Ask whether to merge/squash into main or leave the branch open.
+3. Never merge without explicit user confirmation.
+
+---
+
 ## Repository Structure
 
 ```
