@@ -13,6 +13,7 @@ This repo is self-contained: firmware, ingest API, and web viewer all live here.
 heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 ├── .gitignore
 ├── AGENTS.md                     # this file
+├── RADIACODE_PROTOCOL.md         # full BLE/GATT protocol reference for RadiaCode devices
 ├── README.md                     # quick-start for humans
 ├── platformio.ini                # PlatformIO build config
 ├── partitions_tracker_v2.csv     # custom flash partition table
@@ -203,6 +204,9 @@ Empty `WIFI_SSID` or `INGEST_URL` disables the Wi-Fi uploader silently.
 ## Firmware Subsystems
 
 ### BLE / RadiaCode — `radiacode.{h,cpp}`
+
+> **Full BLE protocol reference** (GATT profile, frame format, all commands,
+> DATA_BUF decoder, VS/VSFR tables, model quirks): see **[RADIACODE_PROTOCOL.md](RADIACODE_PROTOCOL.md)**
 
 - NimBLE-Arduino 1.4.x; service UUID `e63215e5-7003-49d8-96b0-b024798fb901`
 - States: `Idle → Scanning → Connecting → Initializing → Ready → Disconnected`
