@@ -1,0 +1,5 @@
+{
+  "version": "0.0.0",
+  "url": "",
+  "notes": "OTA not yet implemented in firmware. This directory is served at /firmware/ by the ingest API and reserved for future OTA support."
+}
