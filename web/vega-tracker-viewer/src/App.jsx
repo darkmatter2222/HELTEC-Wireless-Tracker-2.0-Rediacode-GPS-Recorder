@@ -266,6 +266,16 @@ export default function App() {
   function handleMerged() {
     fetchSessions().then(s => setSessions(s)).catch(e => setError(String(e)));
   }
+  function handleRestored() {
+    // Re-fetch so the restored session reappears on the map and session list.
+    fetchSessions().then(s => setSessions(s)).catch(e => setError(String(e)));
+  }
+  function handlePurged(sessionId) {
+    // Same cleanup as a hard delete: remove from all UI state.
+    setSessions(prev => prev.filter(s => s.sessionId !== sessionId));
+    setSelected(prev => { const n = new Set(prev); n.delete(sessionId); return n; });
+    setRows(prev => { const n = { ...prev }; delete n[sessionId]; return n; });
+  }
 
   // ---- toggle session (lazy-fetch rows)
   const toggleSession = useCallback(async (id) => {
@@ -681,6 +691,8 @@ export default function App() {
             onRenamed={handleRenamed}
             onDeleted={handleDeleted}
             onMerged={handleMerged}
+            onRestored={handleRestored}
+            onPurged={handlePurged}
             onError={msg => { setError(msg); setTimeout(() => setError(null), 5000); }}
           />
         )}

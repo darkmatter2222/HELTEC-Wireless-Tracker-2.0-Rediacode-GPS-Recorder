@@ -288,11 +288,14 @@ def info():
 
 
 @app.get("/sessions")
-def list_sessions(limit: int = 200):
+def list_sessions(limit: int = 200, include_deleted: bool = Query(default=False)):
     """List ingested sessions, newest first.
 
     sizeBytes is an estimate: samples * avg_doc_storageSize from collStats.
     Accurate to within ~10% for typical sessions.
+
+    By default, soft-deleted sessions (deletedAt is set) are excluded.
+    Pass ?include_deleted=true to include them.
     """
     try:
         cs = app.state.samples.command("collStats", "tracker_samples")
@@ -300,7 +303,9 @@ def list_sessions(limit: int = 200):
     except Exception:
         avg_bytes = 150.0  # fallback estimate
 
-    cur = app.state.sessions.find({}, sort=[("lastIngestMs", -1)], limit=limit)
+    # deletedAt=None matches both missing field and explicit null — both mean "active".
+    filter_q = {} if include_deleted else {"deletedAt": None}
+    cur = app.state.sessions.find(filter_q, sort=[("lastIngestMs", -1)], limit=limit)
     result = []
     for d in cur:
         samples = d.get("samples") or 0
@@ -317,6 +322,8 @@ def list_sessions(limit: int = 200):
             "firstIngestMs": d.get("firstIngestMs"),
             "lastIngestMs":  d.get("lastIngestMs"),
             "uploads":       d.get("uploads", 1),
+            "deletedAt":     d.get("deletedAt"),
+            "deletedBy":     d.get("deletedBy"),
         })
     return result
 
@@ -466,21 +473,86 @@ def rename_session(session_id: str, body: RenameBody):
 
 @app.delete("/sessions/{session_id}")
 def delete_session(session_id: str, confirm: str = Query(default="")):
-    """Delete a session and ALL its samples.  Requires confirm=DELETE_CONFIRMED.
-    The UI enforces a triple-click before sending this token.
+    """Soft-delete a session.  Sets deletedAt/deletedBy; samples are NOT removed.
+
+    Requires confirm=DELETE_CONFIRMED.  The session can be fully restored at any
+    time via PATCH /sessions/{id}/restore.  For permanent removal use
+    POST /admin/purge/{id} (session must already be soft-deleted).
     """
     if confirm != "DELETE_CONFIRMED":
         raise HTTPException(
             status_code=400,
-            detail="Pass ?confirm=DELETE_CONFIRMED to confirm permanent deletion.",
+            detail="Pass ?confirm=DELETE_CONFIRMED to confirm soft-delete.",
+        )
+    now_ms = int(time.time() * 1000)
+    result = app.state.sessions.update_one(
+        {"sessionId": session_id, "deletedAt": None},
+        {"$set": {"deletedAt": now_ms, "deletedBy": "web-ui"}},
+    )
+    if result.matched_count == 0:
+        existing = app.state.sessions.find_one(
+            {"sessionId": session_id}, projection={"deletedAt": 1}
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"session {session_id!r} not found")
+        raise HTTPException(
+            status_code=409,
+            detail=f"session {session_id!r} is already soft-deleted",
+        )
+    log.warning("soft-deleted session %s", session_id)
+    return {"softDeleted": session_id, "deletedAt": now_ms}
+
+
+@app.patch("/sessions/{session_id}/restore")
+def restore_session(session_id: str):
+    """Restore a soft-deleted session.  Clears deletedAt and deletedBy.
+    Samples are still in the database untouched — nothing was ever removed.
+    """
+    result = app.state.sessions.update_one(
+        {"sessionId": session_id, "deletedAt": {"$ne": None}},
+        {"$unset": {"deletedAt": "", "deletedBy": ""}},
+    )
+    if result.matched_count == 0:
+        existing = app.state.sessions.find_one({"sessionId": session_id})
+        if not existing:
+            raise HTTPException(status_code=404, detail=f"session {session_id!r} not found")
+        raise HTTPException(
+            status_code=409,
+            detail=f"session {session_id!r} is not soft-deleted; nothing to restore",
+        )
+    log.info("restored session %s", session_id)
+    return {"restored": session_id}
+
+
+@app.post("/admin/purge/{session_id}")
+def purge_session(session_id: str, confirm: str = Query(default="")):
+    """Permanently purge a soft-deleted session and ALL its samples.
+
+    Requires confirm=PURGE_CONFIRMED.  The session must already be soft-deleted
+    (deletedAt must be set) — this two-step requirement means accidental purges
+    require at minimum two separate API calls.
+    """
+    if confirm != "PURGE_CONFIRMED":
+        raise HTTPException(
+            status_code=400,
+            detail="Pass ?confirm=PURGE_CONFIRMED to confirm permanent purge.",
+        )
+    existing = app.state.sessions.find_one({"sessionId": session_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail=f"session {session_id!r} not found")
+    if not existing.get("deletedAt"):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"session {session_id!r} must be soft-deleted first."
+                " Call DELETE /sessions/{id} before purging."
+            ),
         )
     samples_del = app.state.samples.delete_many({"sessionId": session_id})
-    session_del = app.state.sessions.delete_one({"sessionId": session_id})
-    if session_del.deleted_count == 0:
-        raise HTTPException(status_code=404, detail=f"session {session_id!r} not found")
-    log.warning("DELETED session %s (%d samples removed)", session_id, samples_del.deleted_count)
+    app.state.sessions.delete_one({"sessionId": session_id})
+    log.warning("PURGED session %s (%d samples removed)", session_id, samples_del.deleted_count)
     return {
-        "deleted":        session_id,
+        "purged":         session_id,
         "samplesRemoved": samples_del.deleted_count,
     }
 

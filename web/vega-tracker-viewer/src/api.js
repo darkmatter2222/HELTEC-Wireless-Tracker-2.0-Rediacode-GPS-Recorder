@@ -8,8 +8,10 @@ export const API_BASE =
 
 // ---- read ------------------------------------------------------------------
 
-export async function fetchSessions() {
-  const r = await fetch(`${API_BASE}/sessions?limit=500`);
+export async function fetchSessions({ includeDeleted = false } = {}) {
+  const params = new URLSearchParams({ limit: 500 });
+  if (includeDeleted) params.set('include_deleted', 'true');
+  const r = await fetch(`${API_BASE}/sessions?${params}`);
   if (!r.ok) throw new Error(`sessions ${r.status}`);
   return r.json();
 }
@@ -49,7 +51,7 @@ export async function renameSession(sessionId, displayName) {
   return r.json();
 }
 
-/** Delete a session and all its samples (confirm="DELETE_CONFIRMED" required server-side). */
+/** Soft-delete a session (sets deletedAt; samples untouched; recoverable via restoreSession). */
 export async function deleteSession(sessionId) {
   const r = await fetch(
     `${API_BASE}/sessions/${encodeURIComponent(sessionId)}?confirm=DELETE_CONFIRMED`,
@@ -58,6 +60,33 @@ export async function deleteSession(sessionId) {
   if (!r.ok) {
     const msg = await r.text().catch(() => r.status);
     throw new Error(`delete failed: ${msg}`);
+  }
+  return r.json();
+}
+
+/** Restore a soft-deleted session (clears deletedAt; all samples still intact). */
+export async function restoreSession(sessionId) {
+  const r = await fetch(
+    `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/restore`,
+    { method: 'PATCH' }
+  );
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`restore failed: ${msg}`);
+  }
+  return r.json();
+}
+
+/** Permanently purge a session and ALL its samples.
+ *  Session must already be soft-deleted. This is irreversible. */
+export async function purgeSession(sessionId) {
+  const r = await fetch(
+    `${API_BASE}/admin/purge/${encodeURIComponent(sessionId)}?confirm=PURGE_CONFIRMED`,
+    { method: 'POST' }
+  );
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`purge failed: ${msg}`);
   }
   return r.json();
 }
