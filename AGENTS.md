@@ -223,7 +223,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.3.2`.
+Current: `0.3.3`.
 
 ---
 
@@ -497,7 +497,7 @@ All in `src/config.h` under `namespace cfg`. Edit here and recompile.
 
 | Knob                    | V2 default | V1.2 default | Notes |
 |-------------------------|------------|--------------|-------|
-| `KEEP_UPLOADS_ON_DEVICE`| `true`     | `true`       | Keep session CSV on device after successful upload; re-upload skipped within same boot via `uploadedThisBoot_` vector |
+| `KEEP_UPLOADS_ON_DEVICE`| `false`    | `false`      | Delete session CSV from device after successful upload. Set true to retain files (re-uploads are idempotent via server unique index on {sessionId,timestampMs}); re-upload within same boot is skipped via `uploadedThisBoot_` vector |
 | `SD_ENABLED`            | `false`    | `true`       | V2 uses internal LittleFS; SD disabled |
 | `SD_REQUIRED`           | `false`    | `true`       | V1.2: hard error on SD failure rather than silent LittleFS fallback |
 | `SD_INIT_RETRIES`       | 6          | 6            | cold-boot retries (LDO ramp time) |
