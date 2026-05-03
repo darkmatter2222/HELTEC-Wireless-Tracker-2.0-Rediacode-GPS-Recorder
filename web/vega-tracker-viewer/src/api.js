@@ -111,3 +111,50 @@ function _triggerDownload(url, filename) {
   a.download = filename;
   a.click();
 }
+
+// ---- database stats & backups ----------------------------------------------
+
+export async function fetchDbStats() {
+  const r = await fetch(`${API_BASE}/admin/db-stats`);
+  if (!r.ok) throw new Error(`db-stats ${r.status}`);
+  return r.json();
+}
+
+export async function fetchBackups() {
+  const r = await fetch(`${API_BASE}/admin/backups`);
+  if (!r.ok) throw new Error(`backups ${r.status}`);
+  return r.json();
+}
+
+export async function createBackup() {
+  const r = await fetch(`${API_BASE}/admin/backup`, { method: 'POST' });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`backup failed: ${msg}`);
+  }
+  return r.json();
+}
+
+export async function deleteBackup(name) {
+  const r = await fetch(
+    `${API_BASE}/admin/backup/${encodeURIComponent(name)}?confirm=DELETE_CONFIRMED`,
+    { method: 'DELETE' }
+  );
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`delete backup failed: ${msg}`);
+  }
+  return r.json();
+}
+
+export async function restoreBackup(name) {
+  const r = await fetch(
+    `${API_BASE}/admin/restore/${encodeURIComponent(name)}?confirm=RESTORE_CONFIRMED`,
+    { method: 'POST' }
+  );
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`restore failed: ${msg}`);
+  }
+  return r.json();
+}

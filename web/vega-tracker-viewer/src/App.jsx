@@ -12,6 +12,7 @@ import {
 import { SparkChart } from './SparkChart.jsx';
 import { ManagePanel } from './ManagePanel.jsx';
 import { TimelineView } from './TimelineView.jsx';
+import { DatabasePanel } from './DatabasePanel.jsx';
 
 // ---- constants -------------------------------------------------------------
 
@@ -167,6 +168,13 @@ function compactRows(raw) {
     }));
 }
 
+function fmtBytes(bytes) {
+  if (bytes == null || isNaN(bytes)) return null;
+  if (bytes < 1024)       return `${bytes} B`;
+  if (bytes < 1048576)    return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / 1048576).toFixed(2)} MB`;
+}
+
 function fmtDuration(ms) {
   if (!ms || ms < 0) return '';
   const s = Math.round(ms / 1000);
@@ -216,8 +224,28 @@ export default function App() {
   const playRef = useRef();
 
   // Sidebar panel
-  const [panel, setPanel] = useState('sessions'); // sessions | display | stats | manage
+  const [panel, setPanel] = useState('sessions'); // sessions | display | stats | manage | db
   const [searchFilter, setSearchFilter] = useState('');
+
+  // Resizable sidebar
+  const [sidebarWidth, setSidebarWidth] = useState(320);
+  const sidebarRef = useRef(null);
+
+  function startResize(e) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = sidebarRef.current ? sidebarRef.current.offsetWidth : sidebarWidth;
+    function onMove(ev) {
+      const w = Math.max(220, Math.min(600, startW + ev.clientX - startX));
+      setSidebarWidth(w);
+    }
+    function onUp() {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  }
   const [showTimeline, setShowTimeline] = useState(false);
 
   // ---- load session list once
@@ -440,7 +468,7 @@ export default function App() {
   return (
     <div className="app">
       {/* === SIDEBAR === */}
-      <aside className="sidebar">
+      <aside className="sidebar" ref={sidebarRef} style={{ width: sidebarWidth }}>
         <header className="sidebar-header">
           <div className="app-title">
             <span className="app-icon">☢</span>
@@ -451,9 +479,9 @@ export default function App() {
 
         {/* Tab bar */}
         <div className="tab-bar">
-          {['sessions', 'display', 'stats', 'manage'].map(t => (
+          {[['sessions','Sessions'],['display','Display'],['stats','Stats'],['manage','Manage'],['db','DB']].map(([t,label]) => (
             <button key={t} className={`tab ${panel === t ? 'active' : ''}`} onClick={() => setPanel(t)}>
-              {t.charAt(0).toUpperCase() + t.slice(1)}
+              {label}
             </button>
           ))}
         </div>
@@ -503,6 +531,9 @@ export default function App() {
                           <span>{dt ? dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</span>
                           <span className="badge">{s.samples ?? 0} pts</span>
                           {dur && <span className="badge">{dur}</span>}
+                          {s.sizeBytes != null && fmtBytes(s.sizeBytes) && (
+                            <span className="badge">{fmtBytes(s.sizeBytes)}</span>
+                          )}
                           {maxDoseInSession && <span className="badge dose-badge">{maxDoseInSession} µSv/h max</span>}
                         </div>
                         {s.displayName && <div className="session-sub">{s.sessionId}</div>}
@@ -653,6 +684,16 @@ export default function App() {
             onError={msg => { setError(msg); setTimeout(() => setError(null), 5000); }}
           />
         )}
+
+        {/* === DATABASE PANEL === */}
+        {panel === 'db' && (
+          <DatabasePanel
+            onError={msg => { setError(msg); setTimeout(() => setError(null), 8000); }}
+          />
+        )}
+
+        {/* Resize handle */}
+        <div className="resize-handle" onMouseDown={startResize} />
       </aside>
 
       {/* === MAP === */}
