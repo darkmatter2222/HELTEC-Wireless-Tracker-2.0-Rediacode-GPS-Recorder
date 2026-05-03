@@ -800,6 +800,42 @@ canvas {
   padding: 8px 12px 4px;
 }
 
+/* ---- Soft-delete state ------------------------------------------------- */
+
+.session-deleted {
+  opacity: 0.55;
+  background: rgba(255, 80, 80, 0.04);
+}
+.session-deleted .mgmt-name {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+.mgmt-deleted-tag {
+  font-size: 10px;
+  color: var(--error);
+  /* override the parent strikethrough on this child */
+  display: inline-block;
+  text-decoration: none;
+}
+
+.deleted-toggle-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px 8px;
+  border-bottom: 1px solid var(--border);
+}
+.deleted-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.deleted-toggle input { cursor: pointer; }
+
 .rename-input {
   flex: 1;
   background: var(--panel3);

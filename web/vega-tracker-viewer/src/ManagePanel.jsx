@@ -1,6 +1,6 @@
-// ManagePanel — data management UI: rename, delete (triple-confirm), merge, export.
+// ManagePanel — data management UI: rename, soft-delete/restore/purge, merge, export.
 import { useState, useMemo } from 'react';
-import { renameSession, deleteSession, mergeSessions, exportSession, exportBulk } from './api.js';
+import { renameSession, deleteSession, restoreSession, purgeSession, mergeSessions, exportSession, exportBulk, fetchSessions } from './api.js';
 import { sessionColor, fmtTs, fmtDose } from './colors.js';
 
 const MIN_VALID_TS_MS = 1577836800000;
@@ -62,55 +62,198 @@ function RenameRow({ session, onRenamed, onError }) {
   );
 }
 
-// ---- Delete row (triple-confirm) -----------------------------------------
-function DeleteRow({ session, onDeleted, onError }) {
-  // step 0=idle 1=first-confirm 2=second-confirm 3=deleting
-  const [step, setStep] = useState(0);
+// ---- Soft-delete / restore / purge row ------------------------------------
+function SoftDeleteRow({ session, onSoftDeleted, onRestored, onPurged, onError }) {
+  const [delStep,   setDelStep]   = useState(0); // 0=idle 1=confirm 2=deleting
+  const [purgeStep, setPurgeStep] = useState(0); // 0=idle 1=warn 2=confirm 3=purging
+  const [busy, setBusy]           = useState(false);
+  const isDeleted = !!session.deletedAt;
 
-  async function handleStep() {
-    if (step < 2) { setStep(s => s + 1); return; }
-    setStep(3);
+  async function doSoftDelete() {
+    setDelStep(2); setBusy(true);
     try {
       await deleteSession(session.sessionId);
-      onDeleted(session.sessionId);
+      onSoftDeleted(session.sessionId);
     } catch (e) {
-      onError(String(e));
-      setStep(0);
-    }
+      onError(String(e)); setDelStep(0);
+    } finally { setBusy(false); }
   }
 
-  const labels = [
-    'Delete',
-    'Confirm delete?',
-    '⚠ PERMANENTLY DELETE — FINAL CONFIRM',
-  ];
-  const classes = ['btn-sm btn-danger-outline', 'btn-sm btn-danger', 'btn-sm btn-danger-bright'];
+  async function doRestore() {
+    setBusy(true);
+    try {
+      await restoreSession(session.sessionId);
+      onRestored(session.sessionId);
+    } catch (e) {
+      onError(String(e));
+    } finally { setBusy(false); }
+  }
+
+  async function doPurge() {
+    setPurgeStep(3); setBusy(true);
+    try {
+      await purgeSession(session.sessionId);
+      onPurged(session.sessionId);
+    } catch (e) {
+      onError(String(e)); setPurgeStep(0);
+    } finally { setBusy(false); }
+  }
+
+  const deletedDate = isDeleted ? new Date(session.deletedAt).toLocaleString() : null;
 
   return (
-    <div className="mgmt-row">
+    <div className={`mgmt-row${isDeleted ? ' session-deleted' : ''}`}>
       <span className="swatch" style={{ background: sessionColor(session._idx ?? 0) }} />
       <span className="mgmt-name" title={session.sessionId}>
         {session.displayName || session.sessionId}
+        {session.displayName && !isDeleted && (
+          <span className="mgmt-sid-sub"> ({session.sessionId})</span>
+        )}
+        {isDeleted && (
+          <span className="mgmt-deleted-tag"> — deleted {deletedDate}</span>
+        )}
       </span>
-      {step === 0 && (
-        <button className="btn-sm btn-danger-outline" onClick={() => setStep(1)}>Delete</button>
-      )}
-      {step === 1 && (
+
+      {/* Active session: soft-delete with single confirm */}
+      {!isDeleted && (
         <>
-          <span className="warn-text">Confirm?</span>
-          <button className="btn-sm btn-danger" onClick={() => setStep(2)}>Yes, delete</button>
-          <button className="btn-sm" onClick={() => setStep(0)}>Cancel</button>
+          {delStep === 0 && (
+            <button className="btn-sm btn-danger-outline" onClick={() => setDelStep(1)} disabled={busy}>
+              Delete
+            </button>
+          )}
+          {delStep === 1 && (
+            <>
+              <span className="warn-text">Move to deleted? (recoverable)</span>
+              <button className="btn-sm btn-danger" onClick={doSoftDelete} disabled={busy}>Confirm</button>
+              <button className="btn-sm" onClick={() => setDelStep(0)}>Cancel</button>
+            </>
+          )}
+          {delStep === 2 && <span className="muted">Deleting…</span>}
         </>
       )}
-      {step === 2 && (
+
+      {/* Deleted session: restore or purge (purge is triple-step) */}
+      {isDeleted && (
         <>
-          <span className="warn-text">PERMANENT — all samples lost</span>
-          <button className="btn-sm btn-danger-bright" onClick={handleStep}>PERMANENTLY DELETE</button>
-          <button className="btn-sm" onClick={() => setStep(0)}>Cancel</button>
+          <button className="btn-sm btn-accent" onClick={doRestore} disabled={busy}>
+            ↺ Restore
+          </button>
+          {purgeStep === 0 && (
+            <button className="btn-sm btn-danger-outline" onClick={() => setPurgeStep(1)} disabled={busy}>
+              Purge
+            </button>
+          )}
+          {purgeStep === 1 && (
+            <>
+              <span className="warn-text">⚠ Deletes all samples — permanent</span>
+              <button className="btn-sm btn-danger" onClick={() => setPurgeStep(2)}>Continue</button>
+              <button className="btn-sm" onClick={() => setPurgeStep(0)}>Cancel</button>
+            </>
+          )}
+          {purgeStep === 2 && (
+            <>
+              <span className="warn-text">CANNOT BE UNDONE</span>
+              <button className="btn-sm btn-danger-bright" onClick={doPurge} disabled={busy}>
+                PURGE FOREVER
+              </button>
+              <button className="btn-sm" onClick={() => setPurgeStep(0)}>Cancel</button>
+            </>
+          )}
+          {purgeStep === 3 && <span className="muted">Purging…</span>}
         </>
       )}
-      {step === 3 && <span className="muted">Deleting...</span>}
     </div>
+  );
+}
+
+// ---- Delete/Restore tab ---------------------------------------------------
+function DeleteRestoreTab({ sessions, onSoftDeleted, onRestored, onPurged, onError }) {
+  const [showDeleted,    setShowDeleted]    = useState(false);
+  const [deletedList,    setDeletedList]    = useState([]);
+  const [loadingDeleted, setLoadingDeleted] = useState(false);
+
+  async function loadDeleted() {
+    setLoadingDeleted(true);
+    try {
+      const all = await fetchSessions({ includeDeleted: true });
+      setDeletedList(all.filter(s => s.deletedAt));
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setLoadingDeleted(false);
+    }
+  }
+
+  function toggleShowDeleted() {
+    if (!showDeleted) loadDeleted();
+    setShowDeleted(v => !v);
+  }
+
+  function handleSoftDeleted(sessionId) {
+    onSoftDeleted(sessionId);
+    if (showDeleted) loadDeleted();
+  }
+
+  function handleRestored(sessionId) {
+    onRestored(sessionId);
+    loadDeleted();
+  }
+
+  function handlePurged(sessionId) {
+    onPurged(sessionId);
+    setDeletedList(prev => prev.filter(s => s.sessionId !== sessionId));
+  }
+
+  return (
+    <>
+      <div className="section-head">
+        Sessions are soft-deleted — hidden from the map but never removed from the database.
+        Restore any deleted session at any time. Only Purge permanently removes data.
+      </div>
+
+      <div className="deleted-toggle-bar">
+        <label className="deleted-toggle">
+          <input type="checkbox" checked={showDeleted} onChange={toggleShowDeleted} />
+          <span>Show deleted sessions</span>
+        </label>
+        {showDeleted && deletedList.length > 0 && (
+          <span className="badge badge-failed">{deletedList.length} deleted</span>
+        )}
+      </div>
+
+      <div className="section-sub-head">Active sessions</div>
+      {sessions.length === 0 && (
+        <div className="muted" style={{ padding: '8px 12px', fontSize: 11 }}>No active sessions.</div>
+      )}
+      {sessions.map(s => (
+        <SoftDeleteRow key={s.sessionId} session={s}
+          onSoftDeleted={handleSoftDeleted}
+          onRestored={handleRestored}
+          onPurged={handlePurged}
+          onError={onError}
+        />
+      ))}
+
+      {showDeleted && (
+        <>
+          <div className="section-sub-head">
+            Deleted sessions {loadingDeleted && <span className="muted">(loading…)</span>}
+          </div>
+          {!loadingDeleted && deletedList.length === 0 && (
+            <div className="muted" style={{ padding: '8px 12px', fontSize: 11 }}>No deleted sessions.</div>
+          )}
+          {deletedList.map(s => (
+            <SoftDeleteRow key={s.sessionId} session={{ ...s, _idx: 0 }}
+              onSoftDeleted={handleSoftDeleted}
+              onRestored={handleRestored}
+              onPurged={handlePurged}
+              onError={onError}
+            />
+          ))}
+        </>
+      )}
+    </>
   );
 }
 
@@ -252,7 +395,7 @@ function ExportPanel({ sessions, onError }) {
 }
 
 // ---- Main ManagePanel component ------------------------------------------
-export function ManagePanel({ sessions, onRenamed, onDeleted, onMerged, onError }) {
+export function ManagePanel({ sessions, onRenamed, onDeleted, onMerged, onRestored, onPurged, onError }) {
   const [subTab, setSubTab] = useState('rename'); // rename | delete | merge | export
 
   return (
@@ -260,7 +403,7 @@ export function ManagePanel({ sessions, onRenamed, onDeleted, onMerged, onError 
       <div className="mgmt-subtabs">
         {[
           { key: 'rename',  label: '✏ Rename' },
-          { key: 'delete',  label: '🗑 Delete' },
+          { key: 'delete',  label: '🗑 Delete / Restore' },
           { key: 'merge',   label: '⊕ Merge' },
           { key: 'export',  label: '↓ Export' },
         ].map(t => (
@@ -284,13 +427,13 @@ export function ManagePanel({ sessions, onRenamed, onDeleted, onMerged, onError 
       )}
 
       {subTab === 'delete' && (
-        <>
-          <div className="section-head">Triple confirmation required</div>
-          {sessions.map(s => (
-            <DeleteRow key={s.sessionId} session={s}
-              onDeleted={onDeleted} onError={onError} />
-          ))}
-        </>
+        <DeleteRestoreTab
+          sessions={sessions}
+          onSoftDeleted={onDeleted}
+          onRestored={onRestored}
+          onPurged={onPurged}
+          onError={onError}
+        />
       )}
 
       {subTab === 'merge' && (
