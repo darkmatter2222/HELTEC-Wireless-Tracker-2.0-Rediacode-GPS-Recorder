@@ -41,14 +41,16 @@ html, body, #root {
 /* ---- Sidebar ---------------------------------------------------------- */
 
 .sidebar {
-  width: 340px;
-  min-width: 300px;
-  max-width: 380px;
+  width: 320px;          /* default; overridden by inline style from JS */
+  min-width: 220px;
+  max-width: 600px;
   background: var(--panel);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  position: relative;    /* needed so resize-handle can be absolute */
+  flex-shrink: 0;
 }
 
 .sidebar-header {
@@ -863,3 +865,142 @@ canvas {
 }
 
 .muted { color: var(--muted); font-size: 11px; }
+
+/* ---- Resize handle ---------------------------------------------------- */
+
+.resize-handle {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 5px;
+  height: 100%;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 20;
+  transition: background 0.15s;
+}
+.resize-handle:hover,
+.resize-handle:active {
+  background: rgba(0, 230, 118, 0.25);
+}
+
+/* ---- Database panel ---------------------------------------------------- */
+
+.db-loading {
+  padding: 12px 16px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.db-card-sub {
+  font-size: 10px;
+  color: var(--muted);
+  margin-top: 1px;
+}
+
+.db-warn-banner {
+  margin: 6px 12px;
+  padding: 8px 10px;
+  background: rgba(255, 107, 107, 0.12);
+  border: 1px solid var(--error);
+  border-radius: 4px;
+  font-size: 11px;
+  color: #ff8a80;
+}
+
+.db-ok-banner {
+  margin: 6px 12px;
+  padding: 8px 10px;
+  background: rgba(0, 230, 118, 0.08);
+  border: 1px solid var(--accent);
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.db-no-backups {
+  padding: 12px 16px;
+  font-size: 12px;
+  color: var(--muted);
+  font-style: italic;
+}
+
+.db-backup-info {
+  padding: 4px 12px 8px;
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.db-backup-info code {
+  background: var(--panel2);
+  padding: 1px 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  color: var(--accent);
+}
+
+/* ---- Backup rows ------------------------------------------------------- */
+
+.backup-row {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.backup-row:last-child { border-bottom: none; }
+
+.backup-info {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.backup-name {
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--fg);
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.backup-date {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.backup-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+
+.warn-text {
+  font-size: 10px;
+  color: var(--error);
+  font-weight: 600;
+}
+
+.btn-danger {
+  border-color: var(--error) !important;
+  color: var(--error) !important;
+  background: rgba(255, 107, 107, 0.1) !important;
+}
+.btn-danger:hover {
+  background: rgba(255, 107, 107, 0.22) !important;
+}
+
+.btn-danger-bright {
+  border-color: #ff1744 !important;
+  color: #ff1744 !important;
+  background: rgba(255, 23, 68, 0.15) !important;
+  font-weight: 700;
+}
+.btn-danger-bright:hover {
+  background: rgba(255, 23, 68, 0.28) !important;
+}

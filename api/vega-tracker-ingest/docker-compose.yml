@@ -26,6 +26,13 @@ services:
     ports:
       - "${API_PORT:-8030}:8030"
 
+    # /backups is mounted to ~/vega-tracker-backups on the host so that
+    # mongodump snapshots survive container teardowns/upgrades.
+    volumes:
+      - type: bind
+        source: /home/darkmatter2222/vega-tracker-backups
+        target: /backups
+
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

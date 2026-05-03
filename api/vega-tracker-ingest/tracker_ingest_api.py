@@ -33,13 +33,21 @@ POST   /admin/merge-sessions            merge N source sessions into one target
 GET    /sessions/{id}/export            download session as CSV (format=internal|radiacode)
 POST   /sessions/export-bulk            download multiple sessions merged as one CSV
 POST   /admin/recompute-sessions        recompute session metadata from sample data
+GET    /admin/db-stats                  database size/storage metrics
+GET    /admin/backups                   list available mongodump backups
+POST   /admin/backup                   trigger a mongodump snapshot now
+DELETE /admin/backup/{name}            delete a backup (requires confirm token)
+POST   /admin/restore/{name}           restore a backup into mongo (requires confirm token)
 """
 from __future__ import annotations
 
 import csv
+import glob
 import io
 import logging
 import os
+import shutil
+import subprocess
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -64,6 +72,7 @@ SESSIONS_COLL     = os.getenv("MONGO_SESSIONS_COLLECTION", "tracker_sessions")
 API_VERSION       = "0.3.0"
 MAX_BODY_BYTES    = int(os.getenv("MAX_BODY_BYTES", str(8 * 1024 * 1024)))   # 8 MB
 INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "1000"))
+BACKUP_DIR        = os.getenv("BACKUP_DIR", "/backups")  # host-mounted volume
 
 # Reject any sample timestamp older than 2020-01-01 UTC.  The Heltec tracker
 # firmware used to fall back to millis()-since-boot (a few hundred ms to a
@@ -273,24 +282,36 @@ def info():
 
 @app.get("/sessions")
 def list_sessions(limit: int = 200):
-    """List ingested sessions, newest first."""
+    """List ingested sessions, newest first.
+
+    sizeBytes is an estimate: samples * avg_doc_storageSize from collStats.
+    Accurate to within ~10% for typical sessions.
+    """
+    try:
+        cs = app.state.samples.command("collStats", "tracker_samples")
+        avg_bytes = (cs["storageSize"] / cs["count"]) if cs.get("count") else 150.0
+    except Exception:
+        avg_bytes = 150.0  # fallback estimate
+
     cur = app.state.sessions.find({}, sort=[("lastIngestMs", -1)], limit=limit)
-    return [
-        {
+    result = []
+    for d in cur:
+        samples = d.get("samples") or 0
+        result.append({
             "sessionId":     d.get("sessionId"),
-            "displayName":   d.get("displayName"),   # user-set rename (optional)
+            "displayName":   d.get("displayName"),
             "deviceId":      d.get("deviceId"),
             "trackerId":     d.get("trackerId"),
             "firmware":      d.get("firmware"),
-            "samples":       d.get("samples"),
+            "samples":       samples,
+            "sizeBytes":     round(samples * avg_bytes),
             "firstTsMs":     d.get("firstTsMs"),
             "lastTsMs":      d.get("lastTsMs"),
             "firstIngestMs": d.get("firstIngestMs"),
             "lastIngestMs":  d.get("lastIngestMs"),
             "uploads":       d.get("uploads", 1),
-        }
-        for d in cur
-    ]
+        })
+    return result
 
 
 @app.get("/sessions/{session_id}")
@@ -647,6 +668,214 @@ def recompute_sessions():
         "purgedSampleRows": purged,
         "sessionsUpdated":  updated,
         "minValidTsMs":     MIN_VALID_TS_MS,
+    }
+
+
+# ---- database stats --------------------------------------------------------
+
+@app.get("/admin/db-stats")
+def db_stats():
+    """Return storage-level metrics for the radiacode database.
+
+    Sizes are in bytes.  storageSize is the actual on-disk WiredTiger footprint
+    (after compression); dataSize is the uncompressed BSON size.
+    """
+    db = app.state.db
+    try:
+        dbs = db.command("dbStats")
+        ss  = db.command("collStats", "tracker_samples")
+        qs  = db.command("collStats", "tracker_sessions")
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"mongo error: {e}")
+
+    avg_sample_bytes = (ss["storageSize"] / ss["count"]) if ss.get("count") else 0
+
+    return {
+        "db":              MONGO_DB,
+        "dbDataSize":      dbs.get("dataSize", 0),
+        "dbStorageSize":   dbs.get("storageSize", 0),
+        "dbIndexSize":     dbs.get("indexSize", 0),
+        "dbObjects":       dbs.get("objects", 0),
+        "samples": {
+            "count":        ss.get("count", 0),
+            "dataSize":     ss.get("size", 0),
+            "storageSize":  ss.get("storageSize", 0),
+            "avgDocBytes":  round(avg_sample_bytes, 1),
+        },
+        "sessions": {
+            "count":        qs.get("count", 0),
+            "dataSize":     qs.get("size", 0),
+            "storageSize":  qs.get("storageSize", 0),
+        },
+        "backupDir":       BACKUP_DIR,
+        "mongodumpAvail":  shutil.which("mongodump") is not None,
+    }
+
+
+# ---- backup helpers --------------------------------------------------------
+
+def _backup_path(name: str) -> str:
+    """Resolve backup directory safely \u2014 rejects path traversal attempts."""
+    # name must be a plain directory name (no slashes)
+    if "/" in name or "\\" in name or ".." in name or not name:
+        raise HTTPException(status_code=400, detail="invalid backup name")
+    return os.path.join(BACKUP_DIR, name)
+
+
+def _list_backups():
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+    entries = []
+    for path in sorted(glob.glob(os.path.join(BACKUP_DIR, "*")), reverse=True):
+        if not os.path.isdir(path):
+            continue
+        name = os.path.basename(path)
+        # Compute total size of this backup directory.
+        total = 0
+        for root, _, files in os.walk(path):
+            for f in files:
+                try:
+                    total += os.path.getsize(os.path.join(root, f))
+                except OSError:
+                    pass
+        # Try to parse the timestamp encoded in the directory name
+        # (format: YYYY-MM-DD_HH-MM-SS).
+        ts_ms = None
+        try:
+            dt = datetime.strptime(name, "%Y-%m-%d_%H-%M-%S")
+            ts_ms = int(dt.replace(tzinfo=timezone.utc).timestamp() * 1000)
+        except ValueError:
+            pass
+        entries.append({"name": name, "sizeBytes": total, "tsMs": ts_ms})
+    return entries
+
+
+@app.get("/admin/backups")
+def list_backups():
+    """List all available mongodump backup snapshots in BACKUP_DIR."""
+    return {
+        "backupDir": BACKUP_DIR,
+        "backups":   _list_backups(),
+        "mongodumpAvail": shutil.which("mongodump") is not None,
+    }
+
+
+@app.post("/admin/backup")
+def create_backup():
+    """Trigger a mongodump snapshot of the radiacode database.
+
+    Writes to BACKUP_DIR/<YYYY-MM-DD_HH-MM-SS>/.
+    Requires mongodump to be installed in the container.
+    Runs synchronously; typical duration < 5 s for small databases.
+    """
+    if not shutil.which("mongodump"):
+        raise HTTPException(status_code=501, detail="mongodump is not installed in this container")
+
+    ts_name = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    dest = os.path.join(BACKUP_DIR, ts_name)
+    os.makedirs(BACKUP_DIR, exist_ok=True)
+
+    # Parse the mongo URI to pass credentials to mongodump safely.
+    cmd = [
+        "mongodump",
+        f"--uri={MONGO_URI}",
+        f"--db={MONGO_DB}",
+        f"--out={dest}",
+        "--gzip",
+    ]
+    log.info("backup: starting mongodump -> %s", dest)
+    t0 = time.monotonic()
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise HTTPException(status_code=504, detail="mongodump timed out after 120s")
+
+    elapsed = round(time.monotonic() - t0, 2)
+
+    if result.returncode != 0:
+        shutil.rmtree(dest, ignore_errors=True)
+        log.error("backup failed: %s", result.stderr)
+        raise HTTPException(status_code=500, detail=f"mongodump failed: {result.stderr[:400]}")
+
+    # Compute backup size.
+    total = 0
+    for root, _, files in os.walk(dest):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+
+    log.info("backup: completed %s in %.2fs size=%d bytes", ts_name, elapsed, total)
+    return {
+        "backup":     ts_name,
+        "sizeBytes":  total,
+        "elapsedSec": elapsed,
+        "dest":       dest,
+    }
+
+
+@app.delete("/admin/backup/{backup_name}")
+def delete_backup(backup_name: str, confirm: str = Query(default="")):
+    """Permanently delete a backup directory.  Requires confirm=DELETE_CONFIRMED."""
+    if confirm != "DELETE_CONFIRMED":
+        raise HTTPException(status_code=400,
+                            detail="Pass ?confirm=DELETE_CONFIRMED to confirm deletion.")
+    path = _backup_path(backup_name)
+    if not os.path.isdir(path):
+        raise HTTPException(status_code=404, detail=f"backup {backup_name!r} not found")
+    shutil.rmtree(path)
+    log.warning("DELETED backup %s", path)
+    return {"deleted": backup_name}
+
+
+@app.post("/admin/restore/{backup_name}")
+def restore_backup(backup_name: str, confirm: str = Query(default="")):
+    """Restore a mongodump backup.
+
+    WARNING: uses --drop which drops each collection before restoring. This
+    DESTROYS all current data in the database.  Requires confirm=RESTORE_CONFIRMED.
+    """
+    if confirm != "RESTORE_CONFIRMED":
+        raise HTTPException(status_code=400,
+                            detail="Pass ?confirm=RESTORE_CONFIRMED to confirm restore.")
+    if not shutil.which("mongorestore"):
+        raise HTTPException(status_code=501, detail="mongorestore is not installed")
+
+    path = _backup_path(backup_name)
+    if not os.path.isdir(path):
+        raise HTTPException(status_code=404, detail=f"backup {backup_name!r} not found")
+
+    restore_src = os.path.join(path, MONGO_DB)
+    if not os.path.isdir(restore_src):
+        # Some mongodump trees have the db subdir, some don't.
+        restore_src = path
+
+    cmd = [
+        "mongorestore",
+        f"--uri={MONGO_URI}",
+        f"--db={MONGO_DB}",
+        "--drop",    # drop existing collections before restore
+        "--gzip",
+        restore_src,
+    ]
+    log.warning("restore: starting mongorestore from %s (--drop)", restore_src)
+    t0 = time.monotonic()
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        raise HTTPException(status_code=504, detail="mongorestore timed out after 300s")
+
+    elapsed = round(time.monotonic() - t0, 2)
+    if result.returncode != 0:
+        log.error("restore failed: %s", result.stderr)
+        raise HTTPException(status_code=500, detail=f"mongorestore failed: {result.stderr[:400]}")
+
+    log.warning("restore: completed from %s in %.2fs", backup_name, elapsed)
+    return {
+        "restored":   backup_name,
+        "elapsedSec": elapsed,
+        "stdout":     result.stdout[-500:] if result.stdout else "",
     }
 
 

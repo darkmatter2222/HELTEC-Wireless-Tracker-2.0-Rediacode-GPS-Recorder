@@ -4,7 +4,12 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update && apt-get install -y --no-install-recommends curl \
+# Install curl (healthcheck) + gnupg/wget for mongo tools repo
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl gnupg wget \
+    && wget -qO /tmp/mongo-tools.deb https://fastdl.mongodb.org/tools/db/mongodb-database-tools-debian12-x86_64-100.10.0.deb \
+    && apt-get install -y --no-install-recommends /tmp/mongo-tools.deb \
+    && rm /tmp/mongo-tools.deb \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -18,6 +23,10 @@ COPY tracker_ingest_api.py .
 # in docker-compose.yml (./firmware:/firmware:ro).  Content is not baked into
 # the image so there is no COPY firmware/ here.
 RUN mkdir -p /firmware
+
+# Backup directory — host-mounted via docker-compose volumes so backups
+# survive container restarts/upgrades.  mongodump writes here.
+RUN mkdir -p /backups
 
 EXPOSE 8030
 
