@@ -223,7 +223,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.3.0`.
+Current: `0.3.2`.
 
 ---
 
@@ -497,6 +497,7 @@ All in `src/config.h` under `namespace cfg`. Edit here and recompile.
 
 | Knob                    | V2 default | V1.2 default | Notes |
 |-------------------------|------------|--------------|-------|
+| `KEEP_UPLOADS_ON_DEVICE`| `true`     | `true`       | Keep session CSV on device after successful upload; re-upload skipped within same boot via `uploadedThisBoot_` vector |
 | `SD_ENABLED`            | `false`    | `true`       | V2 uses internal LittleFS; SD disabled |
 | `SD_REQUIRED`           | `false`    | `true`       | V1.2: hard error on SD failure rather than silent LittleFS fallback |
 | `SD_INIT_RETRIES`       | 6          | 6            | cold-boot retries (LDO ramp time) |
@@ -599,6 +600,26 @@ Otherwise, iterate to completion.
   power-rail ramp time.
 - `SD_REQUIRED=true` makes storage failure a hard, visible error on the TFT
   instead of a silent downgrade to LittleFS.
+
+### Wi-Fi Upload Truncation (v0.3.2)
+
+- **Root cause**: `readSessionToString` loaded the entire CSV into an Arduino
+  `String`. On a 320 KB DRAM device a ~2300-row session (~348 KB) exhausted
+  the heap mid-String. The String silently truncated to ~750 rows; HTTPClient
+  posted the truncated body, received HTTP 200, and the file was deleted.
+  1568 rows permanently lost with no log error.
+- **Fix**: `HTTPClient::sendRequest("POST", Stream*, size_t)` streams the
+  `fs::File` directly through the TCP stack in small chunks — zero heap
+  allocation for the body. `SessionStore::openSessionStream()` returns the
+  file as a `Stream*`; `closeSessionStream()` closes it after the request.
+- **Belt-and-suspenders**: `cfg::KEEP_UPLOADS_ON_DEVICE = true` keeps the file
+  on device after a successful upload. `uploadedThisBoot_` vector in
+  `WifiUploader` prevents re-uploading within the same boot cycle.
+- **Heap logging**: every upload cycle logs `heap_free` before and after so
+  future OOM events are immediately visible in the serial log.
+- **SdFat fallback preserved**: if `openSessionStream` returns nullptr (SdFat
+  backend on V1.2 hardware), the uploader falls back to the String path with a
+  1 MB cap.
 
 ### Wi-Fi Uploader Jitter
 
