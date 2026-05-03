@@ -69,10 +69,12 @@ MONGO_URI         = os.getenv("MONGO_URI", "mongodb://mongo:27017")
 MONGO_DB          = os.getenv("MONGO_DB", "radiacode")
 SAMPLES_COLL      = os.getenv("MONGO_SAMPLES_COLLECTION", "tracker_samples")
 SESSIONS_COLL     = os.getenv("MONGO_SESSIONS_COLLECTION", "tracker_sessions")
-API_VERSION       = "0.3.0"
+BACKUPS_COLL      = "tracker_backups"    # telemetry: one doc per backup attempt
+API_VERSION       = "0.4.0"
 MAX_BODY_BYTES    = int(os.getenv("MAX_BODY_BYTES", str(8 * 1024 * 1024)))   # 8 MB
 INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "1000"))
 BACKUP_DIR        = os.getenv("BACKUP_DIR", "/backups")  # host-mounted volume
+BACKUP_KEEP_COUNT = 5  # rolling window — the cron script prunes to this many snapshots
 
 # Reject any sample timestamp older than 2020-01-01 UTC.  The Heltec tracker
 # firmware used to fall back to millis()-since-boot (a few hundred ms to a
@@ -101,11 +103,16 @@ async def lifespan(app: FastAPI):
                          name="session_ts_unique", unique=True)
     sessions.create_index([("sessionId", 1)], name="session_id_unique", unique=True)
 
-    app.state.mongo  = client
-    app.state.db     = db
+    backups = db[BACKUPS_COLL]
+    backups.create_index([("name", 1)], name="backup_name_unique", unique=True)
+    backups.create_index([("tsMs", -1)], name="backup_ts_desc")
+
+    app.state.mongo    = client
+    app.state.db       = db
     app.state.samples  = samples
     app.state.sessions = sessions
-    log.info("mongo ready; collections=%s,%s", SAMPLES_COLL, SESSIONS_COLL)
+    app.state.backups  = backups
+    log.info("mongo ready; collections=%s,%s,%s", SAMPLES_COLL, SESSIONS_COLL, BACKUPS_COLL)
     try:
         yield
     finally:
@@ -709,17 +716,64 @@ def db_stats():
         },
         "backupDir":       BACKUP_DIR,
         "mongodumpAvail":  shutil.which("mongodump") is not None,
+        "keepCount":       BACKUP_KEEP_COUNT,
+        "lastBackup":      (lambda d: {
+            "name":       d.get("name"),
+            "tsMs":       d.get("tsMs"),
+            "source":     d.get("source"),
+            "status":     d.get("status"),
+            "sizeBytes":  d.get("sizeBytes"),
+            "elapsedSec": d.get("elapsedSec"),
+        } if d else None)(
+            app.state.backups.find_one(
+                {"status": "success"},
+                sort=[("tsMs", -1)],
+                projection={"_id": 0},
+            )
+        ),
     }
 
 
 # ---- backup helpers --------------------------------------------------------
 
 def _backup_path(name: str) -> str:
-    """Resolve backup directory safely \u2014 rejects path traversal attempts."""
-    # name must be a plain directory name (no slashes)
+    """Resolve backup directory safely — rejects path traversal attempts."""
     if "/" in name or "\\" in name or ".." in name or not name:
         raise HTTPException(status_code=400, detail="invalid backup name")
     return os.path.join(BACKUP_DIR, name)
+
+
+def _dir_size(path: str) -> int:
+    """Recursively sum file sizes under a directory."""
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def _record_backup(backups_coll, name: str, ts_ms: int, size_bytes: int,
+                   elapsed_sec: float, source: str, status: str) -> None:
+    """Upsert a backup telemetry record into tracker_backups."""
+    try:
+        backups_coll.update_one(
+            {"name": name},
+            {"$set": {
+                "name":       name,
+                "tsMs":       ts_ms,
+                "sizeBytes":  size_bytes,
+                "elapsedSec": elapsed_sec,
+                "source":     source,   # "manual" | "cron"
+                "status":     status,   # "success" | "failed"
+                "scope":      "all",    # full-database dump (no --db filter)
+            }},
+            upsert=True,
+        )
+    except Exception as e:
+        log.warning("backup: failed to write telemetry to mongo: %s", e)
 
 
 def _list_backups():
@@ -729,16 +783,7 @@ def _list_backups():
         if not os.path.isdir(path):
             continue
         name = os.path.basename(path)
-        # Compute total size of this backup directory.
-        total = 0
-        for root, _, files in os.walk(path):
-            for f in files:
-                try:
-                    total += os.path.getsize(os.path.join(root, f))
-                except OSError:
-                    pass
-        # Try to parse the timestamp encoded in the directory name
-        # (format: YYYY-MM-DD_HH-MM-SS).
+        total = _dir_size(path)
         ts_ms = None
         try:
             dt = datetime.strptime(name, "%Y-%m-%d_%H-%M-%S")
@@ -751,66 +796,104 @@ def _list_backups():
 
 @app.get("/admin/backups")
 def list_backups():
-    """List all available mongodump backup snapshots in BACKUP_DIR."""
+    """List all available mongodump backup snapshots in BACKUP_DIR.
+
+    Each entry is enriched with telemetry from tracker_backups (source,
+    status, elapsedSec) when available.  Backups created before telemetry
+    was introduced show source='unknown'.
+    """
+    fs_entries = _list_backups()
+
+    # Enrich with DB telemetry (source, status, elapsed).
+    try:
+        telem_map = {
+            doc["name"]: doc
+            for doc in app.state.backups.find(
+                {"name": {"$in": [e["name"] for e in fs_entries]}},
+                projection={"_id": 0},
+            )
+        }
+    except Exception as e:
+        log.warning("list_backups: telemetry fetch failed: %s", e)
+        telem_map = {}
+
+    for entry in fs_entries:
+        telem = telem_map.get(entry["name"])
+        if telem:
+            entry["source"]     = telem.get("source", "unknown")
+            entry["status"]     = telem.get("status", "success")
+            entry["elapsedSec"] = telem.get("elapsedSec")
+        else:
+            # Pre-telemetry backup — directory exists but no DB record.
+            entry["source"]     = "unknown"
+            entry["status"]     = "success"
+            entry["elapsedSec"] = None
+
     return {
-        "backupDir": BACKUP_DIR,
-        "backups":   _list_backups(),
+        "backupDir":      BACKUP_DIR,
+        "backups":        fs_entries,
         "mongodumpAvail": shutil.which("mongodump") is not None,
+        "keepCount":      BACKUP_KEEP_COUNT,
     }
 
 
 @app.post("/admin/backup")
-def create_backup():
-    """Trigger a mongodump snapshot of the radiacode database.
+def create_backup(source: str = Query(default="manual")):
+    """Trigger a mongodump snapshot of ALL databases.
 
-    Writes to BACKUP_DIR/<YYYY-MM-DD_HH-MM-SS>/.
-    Requires mongodump to be installed in the container.
-    Runs synchronously; typical duration < 5 s for small databases.
+    Dumps every non-local database (radiacode, admin, etc.) to
+    BACKUP_DIR/<YYYY-MM-DD_HH-MM-SS>/ with gzip compression.
+
+    ?source=manual (default) — triggered from the web UI
+    ?source=cron             — triggered by the weekly cron job
+
+    Each attempt is recorded in tracker_backups for audit/telemetry.
     """
+    # Sanitise source to a known value.
+    if source not in ("manual", "cron"):
+        source = "manual"
+
     if not shutil.which("mongodump"):
         raise HTTPException(status_code=501, detail="mongodump is not installed in this container")
 
     ts_name = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
-    dest = os.path.join(BACKUP_DIR, ts_name)
+    dest    = os.path.join(BACKUP_DIR, ts_name)
+    ts_ms   = int(time.time() * 1000)
     os.makedirs(BACKUP_DIR, exist_ok=True)
 
-    # Parse the mongo URI to pass credentials to mongodump safely.
+    # No --db flag — dumps ALL databases (radiacode, admin, ...) excluding local.
     cmd = [
         "mongodump",
         f"--uri={MONGO_URI}",
-        f"--db={MONGO_DB}",
         f"--out={dest}",
         "--gzip",
     ]
-    log.info("backup: starting mongodump -> %s", dest)
+    log.info("backup: starting full mongodump (source=%s) -> %s", source, dest)
     t0 = time.monotonic()
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
     except subprocess.TimeoutExpired:
         shutil.rmtree(dest, ignore_errors=True)
-        raise HTTPException(status_code=504, detail="mongodump timed out after 120s")
+        _record_backup(app.state.backups, ts_name, ts_ms, 0, 300.0, source, "failed")
+        raise HTTPException(status_code=504, detail="mongodump timed out after 300s")
 
     elapsed = round(time.monotonic() - t0, 2)
 
     if result.returncode != 0:
         shutil.rmtree(dest, ignore_errors=True)
-        log.error("backup failed: %s", result.stderr)
+        log.error("backup failed (source=%s): %s", source, result.stderr)
+        _record_backup(app.state.backups, ts_name, ts_ms, 0, elapsed, source, "failed")
         raise HTTPException(status_code=500, detail=f"mongodump failed: {result.stderr[:400]}")
 
-    # Compute backup size.
-    total = 0
-    for root, _, files in os.walk(dest):
-        for f in files:
-            try:
-                total += os.path.getsize(os.path.join(root, f))
-            except OSError:
-                pass
-
-    log.info("backup: completed %s in %.2fs size=%d bytes", ts_name, elapsed, total)
+    total = _dir_size(dest)
+    _record_backup(app.state.backups, ts_name, ts_ms, total, elapsed, source, "success")
+    log.info("backup: completed %s source=%s in %.2fs size=%d bytes",
+             ts_name, source, elapsed, total)
     return {
         "backup":     ts_name,
         "sizeBytes":  total,
         "elapsedSec": elapsed,
+        "source":     source,
         "dest":       dest,
     }
 
@@ -831,10 +914,11 @@ def delete_backup(backup_name: str, confirm: str = Query(default="")):
 
 @app.post("/admin/restore/{backup_name}")
 def restore_backup(backup_name: str, confirm: str = Query(default="")):
-    """Restore a mongodump backup.
+    """Restore a full mongodump backup (ALL databases).
 
-    WARNING: uses --drop which drops each collection before restoring. This
-    DESTROYS all current data in the database.  Requires confirm=RESTORE_CONFIRMED.
+    WARNING: uses --drop which drops each collection before restoring.  This
+    DESTROYS all current data in every database in the dump.
+    Requires confirm=RESTORE_CONFIRMED.
     """
     if confirm != "RESTORE_CONFIRMED":
         raise HTTPException(status_code=400,
@@ -846,20 +930,16 @@ def restore_backup(backup_name: str, confirm: str = Query(default="")):
     if not os.path.isdir(path):
         raise HTTPException(status_code=404, detail=f"backup {backup_name!r} not found")
 
-    restore_src = os.path.join(path, MONGO_DB)
-    if not os.path.isdir(restore_src):
-        # Some mongodump trees have the db subdir, some don't.
-        restore_src = path
-
+    # Restore from the backup root — mongorestore recurses into per-db subdirectories.
+    # No --db flag so every database in the dump is restored.
     cmd = [
         "mongorestore",
         f"--uri={MONGO_URI}",
-        f"--db={MONGO_DB}",
         "--drop",    # drop existing collections before restore
         "--gzip",
-        restore_src,
+        path,
     ]
-    log.warning("restore: starting mongorestore from %s (--drop)", restore_src)
+    log.warning("restore: starting full mongorestore from %s (--drop)", path)
     t0 = time.monotonic()
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)

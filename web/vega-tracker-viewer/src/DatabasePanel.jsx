@@ -61,12 +61,25 @@ function BackupRow({ backup, onDeleted, onRestored, onError }) {
     ? new Date(backup.tsMs).toLocaleString()
     : backup.name;
 
+  const sourceLabel = backup.source === 'cron' ? '⏰ cron'
+                    : backup.source === 'manual' ? '👤 manual'
+                    : null;
+
   return (
     <div className="backup-row">
       <div className="backup-info">
         <span className="backup-name">{backup.name}</span>
         <span className="backup-date">{date}</span>
         <span className="badge">{fmtBytes(backup.sizeBytes)}</span>
+        {sourceLabel && (
+          <span className={`badge badge-source-${backup.source}`}>{sourceLabel}</span>
+        )}
+        {backup.status === 'failed' && (
+          <span className="badge badge-failed">✗ failed</span>
+        )}
+        {backup.elapsedSec != null && (
+          <span className="badge badge-elapsed">{fmtElapsed(backup.elapsedSec)}</span>
+        )}
       </div>
 
       <div className="backup-actions">
@@ -117,6 +130,7 @@ function BackupRow({ backup, onDeleted, onRestored, onError }) {
 export function DatabasePanel({ onError }) {
   const [stats,    setStats]    = useState(null);
   const [backups,  setBackups]  = useState(null);
+  const [bkMeta,   setBkMeta]   = useState(null);   // keepCount + lastBackup from API
   const [loading,  setLoading]  = useState(true);
   const [backing,  setBacking]  = useState(false);
   const [lastMsg,  setLastMsg]  = useState(null);
@@ -127,6 +141,7 @@ export function DatabasePanel({ onError }) {
       const [s, b] = await Promise.all([fetchDbStats(), fetchBackups()]);
       setStats(s);
       setBackups(b.backups || []);
+      setBkMeta({ keepCount: b.keepCount, lastBackup: s.lastBackup });
     } catch (e) {
       onError(String(e));
     } finally {
@@ -202,6 +217,19 @@ export function DatabasePanel({ onError }) {
         container (host-mounted volume). They survive container restarts and upgrades.
       </div>
 
+      {/* === LAST BACKUP SUMMARY === */}
+      {bkMeta?.lastBackup ? (
+        <div className="db-last-backup">
+          <span className="lb-label">Last successful backup:</span>
+          <span className="lb-time">{fmtDate(bkMeta.lastBackup.tsMs)}</span>
+          {bkMeta.lastBackup.source === 'cron' && <span className="badge badge-source-cron">⏰ cron</span>}
+          {bkMeta.lastBackup.source === 'manual' && <span className="badge badge-source-manual">👤 manual</span>}
+          <span className="badge">{fmtBytes(bkMeta.lastBackup.sizeBytes)}</span>
+        </div>
+      ) : (
+        <div className="db-last-backup lb-none">No successful backup recorded yet.</div>
+      )}
+
       {lastMsg && <div className="db-ok-banner">{lastMsg}</div>}
 
       <div style={{ padding: '8px 12px' }}>
@@ -239,9 +267,12 @@ export function DatabasePanel({ onError }) {
       {/* === CRON STATUS === */}
       <div className="section-head">Automatic Backups</div>
       <div className="db-backup-info">
-        A daily cron job runs at 03:00 UTC and keeps the 14 most recent snapshots.
-        Snapshots are stored on the host at <code>/home/darkmatter2222/vega-tracker-backups/</code>
-        and are independent of Docker — they are safe even if the container is deleted.
+        A weekly cron job runs every Sunday at 03:00 UTC and keeps the{' '}
+        <strong>{bkMeta?.keepCount ?? 5} most recent</strong> snapshots.
+        Backs up the <strong>entire database</strong> (all collections/databases).
+        Snapshots are stored on the host at{' '}
+        <code>/home/darkmatter2222/vega-tracker-backups/</code> and survive
+        container restarts and upgrades.
       </div>
     </div>
   );

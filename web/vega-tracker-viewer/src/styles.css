@@ -1004,3 +1004,55 @@ canvas {
 .btn-danger-bright:hover {
   background: rgba(255, 23, 68, 0.28) !important;
 }
+
+/* ---- Backup telemetry badges ------------------------------------------- */
+
+.badge-source-cron {
+  background: rgba(100, 180, 255, 0.15);
+  border: 1px solid rgba(100, 180, 255, 0.4);
+  color: #80c8ff;
+}
+.badge-source-manual {
+  background: rgba(180, 130, 255, 0.15);
+  border: 1px solid rgba(180, 130, 255, 0.4);
+  color: #c8a0ff;
+}
+.badge-failed {
+  background: rgba(255, 80, 80, 0.15);
+  border: 1px solid rgba(255, 80, 80, 0.4);
+  color: #ff7070;
+  font-weight: 600;
+}
+.badge-elapsed {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+
+/* ---- Last-backup summary bar ------------------------------------------- */
+
+.db-last-backup {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  padding: 6px 12px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  margin: 0 12px 8px;
+  font-size: 11px;
+}
+.lb-label {
+  color: var(--muted);
+  font-weight: 500;
+  white-space: nowrap;
+}
+.lb-time {
+  color: var(--fg);
+  font-variant-numeric: tabular-nums;
+}
+.lb-none {
+  color: var(--muted);
+  font-style: italic;
+}
