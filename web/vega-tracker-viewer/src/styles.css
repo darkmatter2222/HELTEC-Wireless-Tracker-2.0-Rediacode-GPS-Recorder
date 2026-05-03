@@ -542,3 +542,324 @@ canvas {
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-track { background: var(--panel); }
 ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+/* ---- Search row ------------------------------------------------------- */
+
+.search-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.search-input {
+  flex: 1;
+  background: var(--panel3);
+  color: var(--text);
+  border: 1px solid var(--border2);
+  border-radius: 4px;
+  padding: 5px 9px;
+  font-size: 12px;
+}
+.search-input:focus {
+  outline: none;
+  border-color: var(--accent2);
+}
+.search-input::placeholder { color: var(--muted); }
+
+/* ---- Date group header ------------------------------------------------ */
+
+.date-group-header {
+  list-style: none;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--accent2);
+  background: var(--panel2);
+  padding: 6px 14px 5px;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  margin-top: 4px;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.session-sub {
+  font-size: 10px;
+  color: var(--muted);
+  padding-left: 20px;
+  font-family: monospace;
+  margin-top: 1px;
+}
+
+/* ---- Timeline view ---------------------------------------------------- */
+
+.timeline-view {
+  position: absolute;
+  bottom: 70px; /* above scrubber */
+  left: 0;
+  right: 0;
+  background: rgba(10, 12, 15, 0.96);
+  backdrop-filter: blur(10px);
+  border-top: 1px solid var(--border2);
+  padding: 8px 14px 10px;
+  z-index: 999;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.timeline-header {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.timeline-axis {
+  position: relative;
+  height: 18px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.timeline-axis span {
+  position: absolute;
+  font-size: 9px;
+  color: var(--muted);
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+
+.timeline-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.timeline-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  border-radius: 3px;
+  padding: 2px 0;
+}
+.timeline-row:hover { background: var(--panel2); }
+
+.timeline-bar-track {
+  flex: 1;
+  position: relative;
+  height: 12px;
+  background: var(--panel3);
+  border-radius: 2px;
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.timeline-bar {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-radius: 2px;
+  opacity: 0.6;
+  transition: opacity 0.15s;
+  min-width: 3px;
+}
+.timeline-bar.selected {
+  opacity: 1;
+  box-shadow: 0 0 4px currentColor;
+}
+
+.timeline-label {
+  font-size: 10px;
+  color: var(--muted);
+  min-width: 100px;
+  max-width: 120px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: monospace;
+}
+
+/* ---- Timeline toggle button ------------------------------------------ */
+
+.timeline-toggle {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  padding: 3px 10px;
+  background: transparent;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.timeline-toggle:hover { color: var(--accent2); border-color: var(--accent2); }
+
+/* ---- Button variants -------------------------------------------------- */
+
+.btn-sm {
+  font-size: 11px;
+  padding: 4px 9px;
+  border-radius: 3px;
+  cursor: pointer;
+  background: var(--panel3);
+  color: var(--text);
+  border: 1px solid var(--border2);
+  white-space: nowrap;
+}
+.btn-sm:hover { border-color: var(--accent2); color: var(--accent2); }
+.btn-sm:disabled { opacity: 0.4; cursor: not-allowed; }
+
+.btn-accent {
+  background: rgba(0, 230, 118, 0.12) !important;
+  color: var(--accent) !important;
+  border-color: var(--accent) !important;
+}
+.btn-accent:hover {
+  background: rgba(0, 230, 118, 0.22) !important;
+}
+
+.btn-danger-outline {
+  color: var(--error) !important;
+  border-color: var(--error) !important;
+  background: transparent !important;
+}
+.btn-danger-outline:hover { background: rgba(239,83,80,0.12) !important; }
+
+.btn-danger {
+  background: rgba(239,83,80,0.2) !important;
+  color: var(--error) !important;
+  border-color: var(--error) !important;
+}
+.btn-danger:hover { background: rgba(239,83,80,0.35) !important; }
+
+.btn-danger-bright {
+  background: var(--error) !important;
+  color: #fff !important;
+  border-color: var(--red) !important;
+  font-weight: 600;
+}
+.btn-danger-bright:hover { background: var(--red) !important; }
+
+.warn-text {
+  font-size: 11px;
+  color: var(--warn);
+  font-style: italic;
+}
+
+/* ---- Manage panel ----------------------------------------------------- */
+
+.mgmt-subtabs {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+}
+.mgmt-subtabs .tab {
+  font-size: 11px;
+  padding: 8px 4px;
+  border-bottom: 2px solid transparent;
+  flex: 1;
+  text-align: center;
+}
+
+.mgmt-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.mgmt-name {
+  flex: 1;
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mgmt-sid-sub {
+  font-size: 10px;
+  color: var(--muted);
+  font-family: monospace;
+}
+
+.mgmt-sub-head {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+  padding: 8px 12px 4px;
+}
+
+.rename-input {
+  flex: 1;
+  background: var(--panel3);
+  color: var(--text);
+  border: 1px solid var(--accent2);
+  border-radius: 4px;
+  padding: 4px 8px;
+  font-size: 12px;
+}
+.rename-input:focus { outline: none; box-shadow: 0 0 0 2px rgba(41,182,246,0.25); }
+
+/* ---- Merge panel ------------------------------------------------------ */
+
+.merge-panel,
+.export-panel {
+  padding: 0 0 12px;
+}
+
+.merge-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 12px;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.merge-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.merge-check:hover { background: var(--panel2); }
+.merge-check input[type=checkbox] { accent-color: var(--accent2); }
+
+.merge-target-row {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  align-items: center;
+}
+
+/* ---- Export panel ----------------------------------------------------- */
+
+.export-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+}
+.export-row:hover { background: var(--panel2); }
+
+.export-row-btns {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.muted { color: var(--muted); font-size: 11px; }

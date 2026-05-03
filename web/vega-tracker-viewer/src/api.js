@@ -6,13 +6,15 @@ export const API_BASE =
   import.meta.env.VITE_API_URL ||
   'http://192.168.86.48:8030';
 
+// ---- read ------------------------------------------------------------------
+
 export async function fetchSessions() {
   const r = await fetch(`${API_BASE}/sessions?limit=500`);
   if (!r.ok) throw new Error(`sessions ${r.status}`);
   return r.json();
 }
 
-// Pull all rows for a session; the API pages at 1000/page so we walk it.
+// Pull all rows for a session; the API pages at 5000/page so we walk it.
 export async function fetchSessionRows(sessionId, { pageSize = 5000 } = {}) {
   let skip = 0;
   const out = [];
@@ -26,7 +28,86 @@ export async function fetchSessionRows(sessionId, { pageSize = 5000 } = {}) {
     for (const row of j.rows) out.push(row);
     if (j.rows.length < pageSize) break;
     skip += j.rows.length;
-    if (skip > 200000) break; // safety
+    if (skip > 200000) break; // safety cap
   }
   return out;
+}
+
+// ---- management ------------------------------------------------------------
+
+/** Rename a session (sets displayName field; sessionId is not changed). */
+export async function renameSession(sessionId, displayName) {
+  const r = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ displayName }),
+  });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`rename failed: ${msg}`);
+  }
+  return r.json();
+}
+
+/** Delete a session and all its samples (confirm="DELETE_CONFIRMED" required server-side). */
+export async function deleteSession(sessionId) {
+  const r = await fetch(
+    `${API_BASE}/sessions/${encodeURIComponent(sessionId)}?confirm=DELETE_CONFIRMED`,
+    { method: 'DELETE' }
+  );
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`delete failed: ${msg}`);
+  }
+  return r.json();
+}
+
+/** Merge source sessions into targetId. Sources are removed after merge. */
+export async function mergeSessions(sourceIds, targetId) {
+  const r = await fetch(`${API_BASE}/admin/merge-sessions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sourceIds, targetId }),
+  });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`merge failed: ${msg}`);
+  }
+  return r.json();
+}
+
+// ---- export ----------------------------------------------------------------
+
+/** Trigger a browser download of one session.
+  format: 'radiacode' | 'internal'  */
+export function exportSession(sessionId, format = 'radiacode') {
+  const url = `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/export?format=${format}`;
+  _triggerDownload(url, `${sessionId}_${format}.csv`);
+}
+
+/** POST bulk export — multiple sessions merged into one CSV download. */
+export async function exportBulk(ids, format = 'radiacode') {
+  const r = await fetch(`${API_BASE}/sessions/export-bulk`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ ids, format }),
+  });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`bulk export failed: ${msg}`);
+  }
+  const blob = await r.blob();
+  const filename = `bulk_export_${format}.csv`;
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
+function _triggerDownload(url, filename) {
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
 }

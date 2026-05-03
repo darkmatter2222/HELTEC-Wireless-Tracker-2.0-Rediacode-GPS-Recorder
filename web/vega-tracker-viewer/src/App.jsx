@@ -10,6 +10,8 @@ import {
   sessionColor, fmtTs, fmtDose,
 } from './colors.js';
 import { SparkChart } from './SparkChart.jsx';
+import { ManagePanel } from './ManagePanel.jsx';
+import { TimelineView } from './TimelineView.jsx';
 
 // ---- constants -------------------------------------------------------------
 
@@ -214,7 +216,9 @@ export default function App() {
   const playRef = useRef();
 
   // Sidebar panel
-  const [panel, setPanel] = useState('sessions'); // sessions | display | stats
+  const [panel, setPanel] = useState('sessions'); // sessions | display | stats | manage
+  const [searchFilter, setSearchFilter] = useState('');
+  const [showTimeline, setShowTimeline] = useState(false);
 
   // ---- load session list once
   useEffect(() => {
@@ -222,6 +226,18 @@ export default function App() {
       .then(s => { setSessions(s); setLoading(false); })
       .catch(e => { setError(String(e)); setLoading(false); });
   }, []);
+
+  function handleRenamed(sessionId, displayName) {
+    setSessions(prev => prev.map(s => s.sessionId === sessionId ? { ...s, displayName } : s));
+  }
+  function handleDeleted(sessionId) {
+    setSessions(prev => prev.filter(s => s.sessionId !== sessionId));
+    setSelected(prev => { const n = new Set(prev); n.delete(sessionId); return n; });
+    setRows(prev => { const n = { ...prev }; delete n[sessionId]; return n; });
+  }
+  function handleMerged() {
+    fetchSessions().then(s => setSessions(s)).catch(e => setError(String(e)));
+  }
 
   // ---- toggle session (lazy-fetch rows)
   const toggleSession = useCallback(async (id) => {
@@ -384,6 +400,34 @@ export default function App() {
     return arr;
   }, [filteredTraces]);
 
+  // ---- date-grouped sessions for sessions sidebar panel
+  const dateGroupedSessions = useMemo(() => {
+    const q = searchFilter.toLowerCase().trim();
+    const indexed = sessions.map((s, i) => ({ s: { ...s, _idx: i }, i }));
+    const filtered = q
+      ? indexed.filter(({ s }) => {
+          const name = (s.displayName || s.sessionId).toLowerCase();
+          return name.includes(q) || s.sessionId.toLowerCase().includes(q);
+        })
+      : indexed;
+    const groups = new Map();
+    for (const item of filtered) {
+      const { s } = item;
+      const firstOk = s.firstTsMs && s.firstTsMs >= MIN_VALID_TS_MS;
+      const dateKey = firstOk
+        ? new Date(s.firstTsMs).toLocaleDateString(undefined, {
+            weekday: 'short', year: 'numeric', month: 'short', day: 'numeric',
+          })
+        : 'Unknown date';
+      const ts = firstOk ? s.firstTsMs : 0;
+      if (!groups.has(dateKey)) groups.set(dateKey, { ts, items: [] });
+      groups.get(dateKey).items.push(item);
+    }
+    return [...groups.entries()]
+      .sort((a, b) => b[1].ts - a[1].ts)
+      .map(([date, { items }]) => ({ date, items }));
+  }, [sessions, searchFilter]);
+
   // ---- tile
   const tile = TILES[tileIdx];
 
@@ -407,7 +451,7 @@ export default function App() {
 
         {/* Tab bar */}
         <div className="tab-bar">
-          {['sessions', 'display', 'stats'].map(t => (
+          {['sessions', 'display', 'stats', 'manage'].map(t => (
             <button key={t} className={`tab ${panel === t ? 'active' : ''}`} onClick={() => setPanel(t)}>
               {t.charAt(0).toUpperCase() + t.slice(1)}
             </button>
@@ -425,38 +469,51 @@ export default function App() {
               <button onClick={selectNone}>None</button>
               <button onClick={() => setFitTrigger(x => x + 1)}>Fit</button>
             </div>
+            <div className="search-row">
+              <input className="search-input" placeholder="Filter sessions..."
+                value={searchFilter} onChange={e => setSearchFilter(e.target.value)} />
+              {searchFilter && (
+                <button className="btn-sm" onClick={() => setSearchFilter('')}
+                  style={{ flexShrink: 0 }}>✕</button>
+              )}
+            </div>
             <ul className="sessions">
-              {sessions.map((s, i) => {
-                const isSel = selected.has(s.sessionId);
-                const c = sessionColor(i);
-                const firstOk = s.firstTsMs && s.firstTsMs >= MIN_VALID_TS_MS;
-                const dt = firstOk ? new Date(s.firstTsMs) : null;
-                const lastOk = s.lastTsMs && s.lastTsMs >= MIN_VALID_TS_MS;
-                const dur = (firstOk && lastOk) ? fmtDuration(s.lastTsMs - s.firstTsMs) : null;
-                const rows = rowsBySession[s.sessionId];
-                const maxDoseInSession = rows
-                  ? Math.max(...rows.map(r => r.uSv ?? 0)).toFixed(3)
-                  : null;
-
-                return (
-                  <li key={s.sessionId} className={`session-item ${isSel ? 'sel' : ''}`}>
-                    <label className="session-label">
-                      <input type="checkbox" checked={isSel} onChange={() => toggleSession(s.sessionId)} />
-                      <span className="swatch" style={{ background: c }} />
-                      <span className="sid">{s.sessionId}</span>
-                    </label>
-                    <div className="session-meta">
-                      <span>{dt ? dt.toLocaleString() : '—'}</span>
-                      <span className="badge">{s.samples ?? 0} pts</span>
-                      {dur && <span className="badge">{dur}</span>}
-                      {maxDoseInSession && <span className="badge dose-badge">{maxDoseInSession} µSv/h max</span>}
-                    </div>
-                    {s.trackerId && (
-                      <div className="session-device">tracker {s.trackerId.slice(-8)}</div>
-                    )}
-                  </li>
-                );
-              })}
+              {dateGroupedSessions.map(group => (
+                <React.Fragment key={group.date}>
+                  <li className="date-group-header">{group.date}</li>
+                  {group.items.map(({ s, i }) => {
+                    const isSel = selected.has(s.sessionId);
+                    const c = sessionColor(i);
+                    const firstOk = s.firstTsMs && s.firstTsMs >= MIN_VALID_TS_MS;
+                    const dt = firstOk ? new Date(s.firstTsMs) : null;
+                    const lastOk = s.lastTsMs && s.lastTsMs >= MIN_VALID_TS_MS;
+                    const dur = (firstOk && lastOk) ? fmtDuration(s.lastTsMs - s.firstTsMs) : null;
+                    const rows = rowsBySession[s.sessionId];
+                    const maxDoseInSession = rows && rows.length
+                      ? Math.max(...rows.map(r => r.uSv ?? 0)).toFixed(3)
+                      : null;
+                    return (
+                      <li key={s.sessionId} className={`session-item ${isSel ? 'sel' : ''}`}>
+                        <label className="session-label">
+                          <input type="checkbox" checked={isSel} onChange={() => toggleSession(s.sessionId)} />
+                          <span className="swatch" style={{ background: c }} />
+                          <span className="sid">{s.displayName || s.sessionId}</span>
+                        </label>
+                        <div className="session-meta">
+                          <span>{dt ? dt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '—'}</span>
+                          <span className="badge">{s.samples ?? 0} pts</span>
+                          {dur && <span className="badge">{dur}</span>}
+                          {maxDoseInSession && <span className="badge dose-badge">{maxDoseInSession} µSv/h max</span>}
+                        </div>
+                        {s.displayName && <div className="session-sub">{s.sessionId}</div>}
+                        {s.trackerId && (
+                          <div className="session-device">tracker {s.trackerId.slice(-8)}</div>
+                        )}
+                      </li>
+                    );
+                  })}
+                </React.Fragment>
+              ))}
             </ul>
           </>
         )}
@@ -585,6 +642,17 @@ export default function App() {
             )}
           </div>
         )}
+
+        {/* === MANAGE PANEL === */}
+        {panel === 'manage' && (
+          <ManagePanel
+            sessions={sessions.map((s, i) => ({ ...s, _idx: i }))}
+            onRenamed={handleRenamed}
+            onDeleted={handleDeleted}
+            onMerged={handleMerged}
+            onError={msg => { setError(msg); setTimeout(() => setError(null), 5000); }}
+          />
+        )}
       </aside>
 
       {/* === MAP === */}
@@ -699,7 +767,19 @@ export default function App() {
               </span>
             </div>
           </div>
+          <button className="timeline-toggle"
+            onClick={() => setShowTimeline(v => !v)}
+            title="Toggle session timeline">
+            {showTimeline ? '▲ Timeline' : '▼ Timeline'}
+          </button>
         </div>
+        {showTimeline && (
+          <TimelineView
+            sessions={sessions.map((s, i) => ({ ...s, _idx: i }))}
+            selected={selected}
+            onToggle={id => toggleSession(id)}
+          />
+        )}
       </main>
     </div>
   );

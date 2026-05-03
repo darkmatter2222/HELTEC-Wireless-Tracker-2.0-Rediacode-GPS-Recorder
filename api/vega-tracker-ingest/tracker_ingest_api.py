@@ -23,10 +23,16 @@ POST /ingest/csv
 
 Endpoints
 ---------
-GET  /health               liveness + mongo ping
-GET  /info                 collection counts, sample-rate stats, build info
-GET  /sessions             list (sessionId, deviceId, samples, first/last ts)
-POST /ingest/csv           upload one session (see above)
+GET    /health                          liveness + mongo ping
+GET    /info                            collection counts, sample-rate stats, build info
+GET    /sessions                        list sessions
+POST   /ingest/csv                      upload one session (see above)
+PATCH  /sessions/{id}                   rename display name
+DELETE /sessions/{id}                   delete session + samples (requires confirm token)
+POST   /admin/merge-sessions            merge N source sessions into one target
+GET    /sessions/{id}/export            download session as CSV (format=internal|radiacode)
+POST   /sessions/export-bulk            download multiple sessions merged as one CSV
+POST   /admin/recompute-sessions        recompute session metadata from sample data
 """
 from __future__ import annotations
 
@@ -36,12 +42,14 @@ import logging
 import os
 import time
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Any
 
 import pymongo
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel
 from pymongo import MongoClient
 from pymongo.errors import BulkWriteError, PyMongoError
 
@@ -270,6 +278,7 @@ def list_sessions(limit: int = 200):
     return [
         {
             "sessionId":     d.get("sessionId"),
+            "displayName":   d.get("displayName"),   # user-set rename (optional)
             "deviceId":      d.get("deviceId"),
             "trackerId":     d.get("trackerId"),
             "firmware":      d.get("firmware"),
@@ -296,6 +305,296 @@ def session_detail(session_id: str, limit: int = 5000, skip: int = 0):
         d["_id"] = str(d["_id"])
         rows.append(d)
     return {"sessionId": session_id, "skip": skip, "limit": limit, "rows": rows}
+
+
+# ---- session management routes --------------------------------------------
+
+class RenameBody(BaseModel):
+    displayName: str
+
+
+class MergeBody(BaseModel):
+    sourceIds: list[str]
+    targetId:  str
+
+
+class BulkExportBody(BaseModel):
+    ids:    list[str]
+    format: str = "radiacode"
+
+
+def _session_to_radiacode_csv(rows: list[dict]) -> str:
+    """Convert sample rows to the RadiaCode track CSV format.
+
+    The RadiaCode app exports:
+        DateTime,DoseRate,DoseRateErr,TotalDose,CountRate,Latitude,Longitude,Accuracy,Comment
+        2025-01-15 10:30:00.123,0.0880,0.0088,0.0024,6.1,47.6062,-122.3321,5.20,
+
+    Where:
+        DateTime     ISO-like  YYYY-MM-DD HH:MM:SS.mmm (UTC)
+        DoseRate     µSv/h
+        DoseRateErr  error estimate ≈ DoseRate × 0.10
+        TotalDose    cumulative µSv (running integral over the track)
+        CountRate    cps
+        Latitude     decimal degrees (empty if no GPS)
+        Longitude    decimal degrees (empty if no GPS)
+        Accuracy     GPS accuracy m — estimated as hdop×5 when hdop available, else empty
+        Comment      empty
+    """
+    out = io.StringIO()
+    w = csv.writer(out, lineterminator="\n")
+    w.writerow(["DateTime", "DoseRate", "DoseRateErr", "TotalDose",
+                "CountRate", "Latitude", "Longitude", "Accuracy", "Comment"])
+    running_dose = 0.0
+    prev_ts = None
+    for row in sorted(rows, key=lambda r: r.get("timestampMs", 0)):
+        ts_ms = row.get("timestampMs")
+        usv   = row.get("uSvPerHour")
+        cps   = row.get("cps")
+        lat   = row.get("latitude")
+        lng   = row.get("longitude")
+        hdop  = row.get("hdop")
+
+        if ts_ms is None:
+            continue
+        dt_str = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime(
+            "%Y-%m-%d %H:%M:%S.") + f"{(ts_ms % 1000):03d}"
+
+        if usv is not None and prev_ts is not None:
+            interval_h = (ts_ms - prev_ts) / 3_600_000
+            running_dose += usv * interval_h
+        prev_ts = ts_ms
+
+        err  = round(usv * 0.10, 6) if usv is not None else ""
+        dose = round(running_dose, 6)
+        acc  = round(hdop * 5.0, 2) if hdop is not None else ""
+
+        lat_s = f"{lat:.6f}" if lat is not None and not (lat == 0 and lng == 0) else ""
+        lng_s = f"{lng:.6f}" if lng is not None and not (lat == 0 and lng == 0) else ""
+        if not lat_s:
+            acc = ""
+
+        w.writerow([
+            dt_str,
+            f"{usv:.6f}" if usv is not None else "",
+            err,
+            dose,
+            f"{cps:.3f}" if cps is not None else "",
+            lat_s,
+            lng_s,
+            acc,
+            "",
+        ])
+    return out.getvalue()
+
+
+def _session_to_internal_csv(rows: list[dict]) -> str:
+    """Reproduce the original firmware/tracker CSV format."""
+    out = io.StringIO()
+    w = csv.writer(out, lineterminator="\n")
+    w.writerow(["timestampMs", "uSvPerHour", "cps", "latitude", "longitude",
+                "deviceId", "speedKph", "bearingDeg", "altitudeM", "hdop"])
+    for row in sorted(rows, key=lambda r: r.get("timestampMs", 0)):
+        w.writerow([
+            row.get("timestampMs", ""),
+            row.get("uSvPerHour",  ""),
+            row.get("cps",         ""),
+            row.get("latitude",    ""),
+            row.get("longitude",   ""),
+            row.get("deviceId",    ""),
+            row.get("speedKph",    ""),
+            row.get("bearingDeg",  ""),
+            row.get("altitudeM",   ""),
+            row.get("hdop",        ""),
+        ])
+    return out.getvalue()
+
+
+def _fetch_all_rows(samples_coll, session_id: str) -> list[dict]:
+    return list(samples_coll.find(
+        {"sessionId": session_id},
+        sort=[("timestampMs", 1)],
+        projection={"_id": 0},
+    ))
+
+
+@app.patch("/sessions/{session_id}")
+def rename_session(session_id: str, body: RenameBody):
+    """Set a human-readable display name for a session.
+    The internal sessionId (sample foreign key) is never changed.
+    """
+    name = body.displayName.strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="displayName must not be empty")
+    result = app.state.sessions.update_one(
+        {"sessionId": session_id},
+        {"$set": {"displayName": name}},
+    )
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail=f"session {session_id!r} not found")
+    log.info("renamed session %s -> displayName=%r", session_id, name)
+    return {"sessionId": session_id, "displayName": name}
+
+
+@app.delete("/sessions/{session_id}")
+def delete_session(session_id: str, confirm: str = Query(default="")):
+    """Delete a session and ALL its samples.  Requires confirm=DELETE_CONFIRMED.
+    The UI enforces a triple-click before sending this token.
+    """
+    if confirm != "DELETE_CONFIRMED":
+        raise HTTPException(
+            status_code=400,
+            detail="Pass ?confirm=DELETE_CONFIRMED to confirm permanent deletion.",
+        )
+    samples_del = app.state.samples.delete_many({"sessionId": session_id})
+    session_del = app.state.sessions.delete_one({"sessionId": session_id})
+    if session_del.deleted_count == 0:
+        raise HTTPException(status_code=404, detail=f"session {session_id!r} not found")
+    log.warning("DELETED session %s (%d samples removed)", session_id, samples_del.deleted_count)
+    return {
+        "deleted":        session_id,
+        "samplesRemoved": samples_del.deleted_count,
+    }
+
+
+@app.post("/admin/merge-sessions")
+def merge_sessions(body: MergeBody):
+    """Merge one or more source sessions into a target session.
+
+    Samples from each sourceId are re-tagged with targetId and bulk-inserted
+    into the samples collection (duplicates are skipped via unique index).
+    Source sessions + their samples are then removed.
+
+    The target session metadata is recomputed from the merged samples.
+    """
+    if not body.sourceIds:
+        raise HTTPException(status_code=400, detail="sourceIds must not be empty")
+    if body.targetId in body.sourceIds:
+        raise HTTPException(status_code=400, detail="targetId must not appear in sourceIds")
+
+    samples = app.state.samples
+    sessions = app.state.sessions
+
+    # Ensure target session exists (upsert a skeleton if needed).
+    now_ms = int(time.time() * 1000)
+    sessions.update_one(
+        {"sessionId": body.targetId},
+        {"$setOnInsert": {
+            "sessionId":     body.targetId,
+            "createdMs":     now_ms,
+            "lastIngestMs":  now_ms,
+            "firstIngestMs": now_ms,
+        }},
+        upsert=True,
+    )
+
+    total_moved = 0
+    for src_id in body.sourceIds:
+        src_rows = list(samples.find({"sessionId": src_id}, projection={"_id": 0}))
+        # Re-tag all rows with targetId.
+        for r in src_rows:
+            r["sessionId"] = body.targetId
+        inserted, _ = _bulk_insert(samples, src_rows)
+        total_moved += inserted
+        # Delete source samples + session record.
+        samples.delete_many({"sessionId": src_id})
+        sessions.delete_one({"sessionId": src_id})
+        log.info("merge: moved %d rows from %s -> %s", inserted, src_id, body.targetId)
+
+    # Recompute target session metadata.
+    agg = list(samples.aggregate([
+        {"$match":  {"sessionId": body.targetId, "timestampMs": {"$gte": MIN_VALID_TS_MS}}},
+        {"$group":  {
+            "_id":       None,
+            "count":     {"$sum": 1},
+            "firstTsMs": {"$min": "$timestampMs"},
+            "lastTsMs":  {"$max": "$timestampMs"},
+        }},
+    ]))
+    if agg:
+        r = agg[0]
+        sessions.update_one(
+            {"sessionId": body.targetId},
+            {"$set": {
+                "samples":      r["count"],
+                "firstTsMs":    r["firstTsMs"],
+                "lastTsMs":     r["lastTsMs"],
+                "lastIngestMs": now_ms,
+            }},
+        )
+
+    log.info("merge complete: target=%s sources=%s totalMoved=%d",
+             body.targetId, body.sourceIds, total_moved)
+    return {
+        "targetId":   body.targetId,
+        "merged":     body.sourceIds,
+        "totalMoved": total_moved,
+    }
+
+
+@app.get("/sessions/{session_id}/export")
+def export_session(session_id: str, format: str = Query(default="radiacode")):
+    """Download session data as a CSV file.
+
+    format=radiacode  — RadiaCode track CSV (compatible with official app / upload sites)
+    format=internal   — original firmware schema (timestampMs,uSvPerHour,cps,...)
+    """
+    rows = _fetch_all_rows(app.state.samples, session_id)
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"session {session_id!r} not found or empty")
+
+    fmt = format.lower()
+    if fmt == "radiacode":
+        body = _session_to_radiacode_csv(rows)
+        filename = f"{session_id}_radiacode.csv"
+    elif fmt == "internal":
+        body = _session_to_internal_csv(rows)
+        filename = f"{session_id}_internal.csv"
+    else:
+        raise HTTPException(status_code=400, detail=f"unknown format {format!r}; use radiacode or internal")
+
+    return StreamingResponse(
+        iter([body]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.post("/sessions/export-bulk")
+async def export_bulk(request: Request):
+    """Download multiple sessions merged into a single CSV file.
+
+    Body JSON: { "ids": ["id1", "id2", ...], "format": "radiacode" }
+    The rows are sorted chronologically across all selected sessions.
+    """
+    body = await request.json()
+    ids    = body.get("ids", [])
+    fmt    = body.get("format", "radiacode").lower()
+
+    if not ids:
+        raise HTTPException(status_code=400, detail="ids must not be empty")
+
+    all_rows: list[dict] = []
+    for sid in ids:
+        all_rows.extend(_fetch_all_rows(app.state.samples, sid))
+
+    if not all_rows:
+        raise HTTPException(status_code=404, detail="no rows found for provided ids")
+
+    if fmt == "radiacode":
+        content  = _session_to_radiacode_csv(all_rows)
+        filename = "bulk_export_radiacode.csv"
+    elif fmt == "internal":
+        content  = _session_to_internal_csv(all_rows)
+        filename = "bulk_export_internal.csv"
+    else:
+        raise HTTPException(status_code=400, detail=f"unknown format {fmt!r}")
+
+    return StreamingResponse(
+        iter([content]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 @app.post("/admin/recompute-sessions")
