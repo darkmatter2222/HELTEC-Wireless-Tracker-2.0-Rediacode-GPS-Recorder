@@ -31,11 +31,12 @@ Run this immediately after all edits are done in the turn:
 ```powershell
 git add -A
 git commit -m "<type>: <short description>"
+git push --set-upstream origin HEAD
 ```
 
 Commit types: `feat`, `fix`, `refactor`, `docs`, `chore`.
 
-**Never skip this commit.** If nothing changed, skip silently.
+**Never skip this commit and push.** If nothing changed, skip silently.
 
 ### Session wrap-up (when user says "done", "wrap up", "merge")
 

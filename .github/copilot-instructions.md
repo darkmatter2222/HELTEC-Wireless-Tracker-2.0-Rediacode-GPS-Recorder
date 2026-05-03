@@ -31,6 +31,7 @@ After completing all edits or file operations in a turn, always run:
 ```powershell
 git add -A
 git commit -m "<type>: <short description of what changed this turn>"
+git push --set-upstream origin HEAD
 ```
 
 Commit message types: `feat`, `fix`, `refactor`, `docs`, `chore`.
@@ -40,8 +41,9 @@ Example commit after firmware change:
 feat(ui): add double-long-press confirmation for stop-recording
 ```
 
-**Do not skip the commit** even if the change is small or experimental. The
-user's intent is that every turn's work is captured atomically.
+**Do not skip the commit or push** even if the change is small or experimental.
+The user's intent is that every turn's work is captured atomically and pushed
+to the remote immediately.
 
 If there is nothing to commit (no files changed), skip silently — do not report "nothing to commit" unless the user asks.
 
