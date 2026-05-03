@@ -53,7 +53,7 @@ MONGO_URI         = os.getenv("MONGO_URI", "mongodb://mongo:27017")
 MONGO_DB          = os.getenv("MONGO_DB", "radiacode")
 SAMPLES_COLL      = os.getenv("MONGO_SAMPLES_COLLECTION", "tracker_samples")
 SESSIONS_COLL     = os.getenv("MONGO_SESSIONS_COLLECTION", "tracker_sessions")
-API_VERSION       = "0.2.0"
+API_VERSION       = "0.3.0"
 MAX_BODY_BYTES    = int(os.getenv("MAX_BODY_BYTES", str(8 * 1024 * 1024)))   # 8 MB
 INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "1000"))
 
@@ -150,7 +150,7 @@ def _parse_csv(body: str, session_id: str, header_device_id: str | None,
         # Skip header row.
         if row[0].strip().lower() == "timestampms":
             continue
-        # Pad to 6 cols defensively.
+        # Pad to minimum 6 cols defensively.
         while len(row) < 6:
             row.append("")
         ts   = _safe_int(row[0])
@@ -159,6 +159,13 @@ def _parse_csv(body: str, session_id: str, header_device_id: str | None,
         lat  = _safe_float(row[3])
         lng  = _safe_float(row[4])
         dev  = row[5].strip() or (header_device_id or None)
+
+        # Extended fields added in firmware 0.3.0 (columns 6-9).
+        # Pre-0.3.0 uploads have 6 columns; these default to None.
+        speed_kph   = _safe_float(row[6]) if len(row) > 6 else None
+        bearing_deg = _safe_float(row[7]) if len(row) > 7 else None
+        altitude_m  = _safe_float(row[8]) if len(row) > 8 else None
+        hdop_val    = _safe_float(row[9]) if len(row) > 9 else None
 
         if ts is None:
             rejected += 1
@@ -183,6 +190,12 @@ def _parse_csv(body: str, session_id: str, header_device_id: str | None,
             "latitude":   lat,
             "longitude":  lng,
         }
+        # Store extended telemetry only when the firmware actually sent them
+        # (non-None). This keeps documents from pre-0.3.0 uploads lean.
+        if speed_kph   is not None: doc["speedKph"]   = speed_kph
+        if bearing_deg is not None: doc["bearingDeg"] = bearing_deg
+        if altitude_m  is not None: doc["altitudeM"]  = altitude_m
+        if hdop_val    is not None: doc["hdop"]        = hdop_val
         if lat is not None and lng is not None and not (lat == 0.0 and lng == 0.0):
             doc["loc"] = {"type": "Point", "coordinates": [lng, lat]}
         out.append(doc)

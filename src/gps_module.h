@@ -17,6 +17,12 @@ public:
     double  speedKph()       { return gps_.speed.isValid() ? gps_.speed.kmph() : 0.0; }
     double  courseDeg()      { return gps_.course.isValid() ? gps_.course.deg() : -1.0; }
 
+    // Smoothed bearing in degrees [0, 360) calculated from the last
+    // cfg::BEARING_HISTORY_POINTS GPS positions. Uses the forward azimuth
+    // (great-circle bearing) between the oldest and newest ring-buffer entries.
+    // Returns -1.0 if fewer than 2 positions have been recorded yet.
+    double  bearingFromHistory();
+
     bool    hasUtc()         { return gps_.date.isValid() && gps_.time.isValid(); }
 
     // UTC epoch milliseconds, computed from GPS date+time. 0 if no fix.
@@ -48,6 +54,16 @@ private:
     uint32_t    bytesIn_ = 0;
     uint32_t    lastByteMs_ = 0;
     uint32_t    currentBaud_ = 0;
+
+    // Ring buffer for smoothed bearing calculation.
+    // Holds up to kMaxBearingHistory GPS (lat, lng) pairs. bearingHead_ is
+    // the index where the NEXT write will go; bearingCount_ tracks how many
+    // slots are filled (capped at kMaxBearingHistory).
+    static constexpr uint8_t kMaxBearingHistory = 8;
+    struct GpsPoint { double lat; double lng; };
+    GpsPoint bearingBuf_[kMaxBearingHistory];
+    uint8_t  bearingHead_  = 0;
+    uint8_t  bearingCount_ = 0;
 
     // Anchor that converts ESP32 millis() into wall-clock UTC ms. Set the
     // first time UTC is seen and re-synced periodically while a fix is live

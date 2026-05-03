@@ -126,6 +126,21 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "0.2.0";
+constexpr const char* FW_VERSION = "0.3.0";
+
+// ----------- Extended per-record telemetry fields ---------------------------
+// Each flag controls whether that GPS field is sampled and written to the CSV.
+// Disabled fields are still emitted as empty CSV columns so the 10-column
+// schema is consistent across firmware builds; old 6-column uploads from
+// earlier firmware are handled gracefully by the ingest API.
+constexpr bool FIELD_SPEED_KPH   = true;  // GPS speed over ground, km/h
+constexpr bool FIELD_BEARING_DEG = true;  // smoothed bearing, degrees [0, 360)
+constexpr bool FIELD_ALTITUDE_M  = true;  // GPS altitude above MSL, metres
+constexpr bool FIELD_HDOP        = true;  // Horizontal Dilution of Precision
+
+// Number of GPS history positions used to compute the smoothed bearing.
+// Must be between 2 and 8. At 1 Hz GPS rate, 4 = ~4-second smoothing lag,
+// which reduces jitter without lagging noticeably through normal turns.
+constexpr uint8_t BEARING_HISTORY_POINTS = 4;
 
 } // namespace cfg

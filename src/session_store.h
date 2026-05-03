@@ -34,12 +34,21 @@ public:
     bool resumeIfActive();  // re-opens last active session if marked active
 
     // Append one row. Drops silently if not recording.
+    // Extended GPS fields use sentinel values to mean "not recorded":
+    //   speedKph   < 0      -> empty column
+    //   bearingDeg < 0      -> empty column
+    //   altitudeM  < -9000  -> empty column
+    //   hdop       < 0      -> empty column
     void append(uint32_t timestampMsLow,    // for legacy tests
                 uint64_t timestampMsFull,
                 float uSvPerHour,
                 float cps,
                 bool hasGps, double lat, double lng,
-                const String& deviceId);
+                const String& deviceId,
+                float speedKph   = -1.f,
+                float bearingDeg = -1.f,
+                float altitudeM  = -9999.f,
+                float hdop       = -1.f);
 
     // Storage stats
     size_t totalBytes() const;

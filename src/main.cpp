@@ -182,7 +182,11 @@ void setup() {
 
             gStore.append(0, ts, r.uSvPerHour, r.cps,
                           gGps.hasFix(), gGps.latitude(), gGps.longitude(),
-                          id);
+                          id,
+                          cfg::FIELD_SPEED_KPH   ? (float)gGps.speedKph()          : -1.f,
+                          cfg::FIELD_BEARING_DEG ? (float)gGps.bearingFromHistory() : -1.f,
+                          cfg::FIELD_ALTITUDE_M  ? (float)gGps.altitudeMeters()     : -9999.f,
+                          cfg::FIELD_HDOP        ? (float)gGps.hdop()               : -1.f);
         },
         // onState
         [](RadiaCode::State s, const String& addr) {

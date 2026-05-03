@@ -61,3 +61,7 @@ When the user says "done", "wrap up", "merge", or similar:
 See [AGENTS.md](../AGENTS.md) for hardware pinouts, subsystem descriptions,
 build/deploy commands, code style rules, and lessons learned.
 All rules in AGENTS.md apply alongside these session rules.
+
+**Document maintenance rule**: After making any code changes in a session,
+review both AGENTS.md and this file and update them to reflect what changed.
+Both documents must stay in sync with the codebase at all times.

@@ -371,7 +371,7 @@ bool SessionStore::start() {
         String path = pathFor(activeId_);
         FsFile f = gSdFat.open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
         if (!f) { log_e("open session file failed"); activeId_ = ""; return false; }
-        f.println("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId");
+        f.println("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop");
         f.close();
         FsFile a = gSdFat.open(cfg::ACTIVE_FILE, O_WRONLY | O_CREAT | O_TRUNC);
         if (a) { a.print(activeId_); a.close(); }
@@ -383,7 +383,7 @@ bool SessionStore::start() {
 
     File f = fs_->open(pathFor(activeId_), "w", true);
     if (!f) { log_e("open session file failed"); activeId_ = ""; return false; }
-    f.println(F("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId"));
+    f.println(F("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop"));
     f.close();
 
     File a = fs_->open(cfg::ACTIVE_FILE, "w", true);
@@ -417,20 +417,31 @@ bool SessionStore::toggle() {
 void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
                           float uSvPerHour, float cps,
                           bool hasGps, double lat, double lng,
-                          const String& deviceId) {
+                          const String& deviceId,
+                          float speedKph, float bearingDeg,
+                          float altitudeM, float hdop) {
     if (!recording_ || !activeId_.length()) return;
     if (!hasUsableBackend()) return;
+
+    // Format each optional extended field; empty string when sentinel value.
+    char spd[12] = "", brg[12] = "", alt[12] = "", hdp[12] = "";
+    if (speedKph   >= 0.f)     snprintf(spd, sizeof(spd), "%.2f", speedKph);
+    if (bearingDeg >= 0.f)     snprintf(brg, sizeof(brg), "%.1f", bearingDeg);
+    if (altitudeM  > -9000.f)  snprintf(alt, sizeof(alt), "%.1f", altitudeM);
+    if (hdop       >= 0.f)     snprintf(hdp, sizeof(hdp), "%.2f", hdop);
 
     char line[cfg::MAX_LINE_BYTES];
     int len;
     if (hasGps) {
-        len = snprintf(line, sizeof(line), "%llu,%.6f,%.3f,%.7f,%.7f,%s\n",
+        len = snprintf(line, sizeof(line), "%llu,%.6f,%.3f,%.7f,%.7f,%s,%s,%s,%s,%s\n",
                        (unsigned long long)timestampMsFull,
-                       uSvPerHour, cps, lat, lng, deviceId.c_str());
+                       uSvPerHour, cps, lat, lng, deviceId.c_str(),
+                       spd, brg, alt, hdp);
     } else {
-        len = snprintf(line, sizeof(line), "%llu,%.6f,%.3f,,,%s\n",
+        len = snprintf(line, sizeof(line), "%llu,%.6f,%.3f,,,%s,%s,%s,%s,%s\n",
                        (unsigned long long)timestampMsFull,
-                       uSvPerHour, cps, deviceId.c_str());
+                       uSvPerHour, cps, deviceId.c_str(),
+                       spd, brg, alt, hdp);
     }
     if (len <= 0) return;
 

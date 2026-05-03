@@ -23,6 +23,10 @@ Copilot has no native pre/post-turn hooks.
    Use the actual current local date-time. Example: `copilot/session-20260502-143000`
 3. If already on a `copilot/session-*` branch, stay — do not create a second one.
 4. Tell the user the active branch name.
+5. **Review AGENTS.md and `.github/copilot-instructions.md`** at the start of
+   every session. Both documents must be kept in sync with the codebase.
+   After making any changes during the session, update both files to reflect
+   what changed.
 
 ### After every turn that modifies files
 
@@ -219,7 +223,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.2.0`.
+Current: `0.3.0`.
 
 ---
 
@@ -458,15 +462,26 @@ python scripts\capture_boot.py
 
 CSV on device (and what gets POSTed to the API):
 ```
-timestampMs,uSvPerHour,cps,latitude,longitude,deviceId
-1746114660123,0.142,12.0,47.6062,-122.3321,5243066020F4
+timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop
+1746114660123,0.142,12.0,47.6062,-122.3321,5243066020F4,48.23,267.3,12.4,1.20
 ```
 
 - `timestampMs`: Unix epoch ms (GPS-derived via `bestEpochMs()`)
 - `uSvPerHour`: dose rate in micro-Sieverts per hour (raw from RadiaCode)
 - `cps`: counts per second (raw from RadiaCode)
-- `latitude` / `longitude`: decimal degrees (0.0,0.0 = no GPS fix)
+- `latitude` / `longitude`: decimal degrees (empty = no GPS fix)
 - `deviceId`: RadiaCode BLE MAC without colons (e.g. `5243066020F4`)
+- `speedKph`: GPS speed over ground in km/h (empty if `FIELD_SPEED_KPH = false`)
+- `bearingDeg`: calculated bearing in degrees [0, 360), derived from last
+  `BEARING_HISTORY_POINTS` GPS positions via forward-azimuth formula
+  (empty if `FIELD_BEARING_DEG = false` or fewer than 2 history points)
+- `altitudeM`: GPS altitude above MSL in metres (empty if `FIELD_ALTITUDE_M = false`)
+- `hdop`: Horizontal Dilution of Precision — positional accuracy indicator;
+  lower is better (empty if `FIELD_HDOP = false`)
+
+Columns 6–9 are always present in the header (firmware 0.3.0+) but may be
+empty strings if the corresponding config flag is false or data is unavailable.
+Pre-0.3.0 uploads have 6 columns; the ingest API handles both formats.
 
 MongoDB stores the same fields plus:
 - `sessionId`: from `X-Session-Id` header
@@ -490,6 +505,11 @@ All in `src/config.h` under `namespace cfg`. Edit here and recompile.
 | `RADIACODE_SCAN_MS`     | 8000 ms    | 8000 ms      | auto-reconnect scan duration (manual `s` default is 15s) |
 | `UI_TICK_MS`            | 100 ms     | 100 ms       | TFT redraw cadence |
 | `HEARTBEAT_MS`          | 3000 ms    | 3000 ms      | `[HB]` serial heartbeat cadence |
+| `FIELD_SPEED_KPH`       | `true`     | `true`       | Write GPS speed (km/h) column to CSV |
+| `FIELD_BEARING_DEG`     | `true`     | `true`       | Write smoothed bearing (deg 0–360) column to CSV |
+| `FIELD_ALTITUDE_M`      | `true`     | `true`       | Write GPS altitude (m above MSL) column to CSV |
+| `FIELD_HDOP`            | `true`     | `true`       | Write HDOP accuracy indicator column to CSV |
+| `BEARING_HISTORY_POINTS`| 4          | 4            | GPS history points for bearing calc (2–8); higher = smoother, more lag |
 
 > **Note:** `default_envs = heltec_tracker_v2` — for V2 builds SD is skipped entirely at boot.
 
@@ -540,6 +560,19 @@ Otherwise, iterate to completion.
   timestamps and get deduplicated by the unique index on `{sessionId, timestampMs}`.
   Fix: `bestEpochMs()` advances via `millis()` delta through GPS outages so
   each row gets a unique, monotonically increasing timestamp.
+
+### Extended Telemetry (v0.3.0)
+
+- **Bearing is calculated from a GPS position ring buffer**, not from NMEA COG.
+  `BEARING_HISTORY_POINTS` (default 4) controls how many positions are averaged.
+  Fewer points = more responsive but noisier; more = smoother but lags turns.
+  Returns -1.0 (empty CSV column) until at least 2 positions have been recorded.
+- **Column positions 6–9 are always present in firmware 0.3.0+ CSV headers**
+  (`speedKph,bearingDeg,altitudeM,hdop`). Disabled fields emit empty strings
+  rather than omitting the column, so the schema is positionally stable.
+  Pre-0.3.0 files have 6 columns; the ingest API handles both.
+- **MongoDB documents are sparse**: extended fields are stored only when non-None
+  (i.e. not on old uploads). No schema migration needed; MongoDB is schema-less.
 
 ### Double Long-Press Stop (v0.2.0)
 
