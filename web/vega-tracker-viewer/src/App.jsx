@@ -54,6 +54,10 @@ function compactRows(raw) {
       lng: r.longitude,
       uSv: r.uSvPerHour,
       cps: r.cps,
+      spd: r.speedKph   ?? null,
+      brg: r.bearingDeg ?? null,
+      alt: r.altitudeM  ?? null,
+      hdop: r.hdop      ?? null,
     }));
 }
 
@@ -371,6 +375,10 @@ export default function App() {
                       <div>{fmtTs(p.ts)}</div>
                       <div>{fmtDose(p.uSv, nanoMode)}</div>
                       <div>{p.cps?.toFixed?.(2) ?? p.cps} cps</div>
+                      {p.spd  != null && <div>{p.spd.toFixed(1)} km/h</div>}
+                      {p.brg  != null && <div>{p.brg.toFixed(1)}&deg; bearing</div>}
+                      {p.alt  != null && <div>{p.alt.toFixed(1)} m alt</div>}
+                      {p.hdop != null && <div>HDOP {p.hdop.toFixed(2)}</div>}
                     </div>
                   </Tooltip>
                 </CircleMarker>

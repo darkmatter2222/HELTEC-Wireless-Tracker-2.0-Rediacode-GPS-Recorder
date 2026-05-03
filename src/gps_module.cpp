@@ -1,5 +1,6 @@
 #include "gps_module.h"
 #include "config.h"
+#include <math.h>
 
 namespace {
 HardwareSerial gpsSerial(cfg::GPS_UART_NUM);
@@ -56,6 +57,17 @@ void GpsModule::update() {
         gps_.encode((char)b);
         ++bytesIn_;
         lastByteMs_ = millis();
+    }
+    // Push newly-decoded position into the bearing ring buffer whenever
+    // TinyGPS++ marks the location object as updated (i.e. a new NMEA
+    // sentence with a valid fix just arrived). isUpdated() resets itself
+    // after being read, so this fires exactly once per new position sentence.
+    if (gps_.location.isUpdated() && gps_.location.isValid()) {
+        const uint8_t slots = (cfg::BEARING_HISTORY_POINTS < kMaxBearingHistory)
+                            ? cfg::BEARING_HISTORY_POINTS : kMaxBearingHistory;
+        bearingBuf_[bearingHead_] = { gps_.location.lat(), gps_.location.lng() };
+        bearingHead_ = (bearingHead_ + 1) % slots;
+        if (bearingCount_ < slots) ++bearingCount_;
     }
 }
 
@@ -127,4 +139,29 @@ uint64_t GpsModule::bestEpochMs() {
     // Project forward using the monotonic millis() clock so timestamps keep
     // advancing during GPS outages (indoors, tunnels, etc.).
     return utcAnchorMs_ + (uint64_t)(now - millisAnchor_);
+}
+
+// Forward azimuth (great-circle bearing) from oldest to newest position in
+// the ring buffer, in degrees [0, 360). Uses the standard spherical bearing
+// formula: atan2(cos(lat2)*sin(dLon), cos(lat1)*sin(lat2) - sin(lat1)*cos(lat2)*cos(dLon)).
+double GpsModule::bearingFromHistory() {
+    const uint8_t slots = (cfg::BEARING_HISTORY_POINTS < kMaxBearingHistory)
+                        ? cfg::BEARING_HISTORY_POINTS : kMaxBearingHistory;
+    if (bearingCount_ < 2) return -1.0;
+
+    // Oldest and newest indices in the circular buffer.
+    const int oldIdx = (int(bearingHead_) + int(slots) - int(bearingCount_)) % int(slots);
+    const int newIdx = (int(bearingHead_) + int(slots) - 1) % int(slots);
+
+    const double lat1 = bearingBuf_[oldIdx].lat * DEG_TO_RAD;
+    const double lon1 = bearingBuf_[oldIdx].lng * DEG_TO_RAD;
+    const double lat2 = bearingBuf_[newIdx].lat * DEG_TO_RAD;
+    const double lon2 = bearingBuf_[newIdx].lng * DEG_TO_RAD;
+
+    const double dLon = lon2 - lon1;
+    const double x    = cos(lat2) * sin(dLon);
+    const double y    = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon);
+    double deg = atan2(x, y) * RAD_TO_DEG;
+    if (deg < 0.0) deg += 360.0;
+    return deg;
 }

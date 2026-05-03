@@ -24,21 +24,69 @@ Ui            gUi;
 WifiUploader  gWifi;
 } // namespace
 
+// LiPo single-cell OCV-based discharge table (settled, ~20 °C, slow-to-moderate
+// discharge).  Source: published TI fuel-gauge reference data / Adafruit LC709203
+// equivalents.  The board has no coulomb counter, so voltage is all we have.
+// Higher resolution at the top end (4.05–4.20 V) reduces the apparent "sharp drop"
+// seen immediately after unplugging from a full charge.
+static const struct { float v; int pct; } kLipoTable[] = {
+    {4.20f, 100},
+    {4.17f,  97},
+    {4.14f,  94},
+    {4.11f,  91},
+    {4.08f,  87},
+    {4.05f,  83},
+    {4.02f,  79},
+    {3.98f,  74},
+    {3.95f,  70},
+    {3.91f,  65},
+    {3.87f,  60},
+    {3.83f,  55},
+    {3.79f,  50},
+    {3.75f,  45},
+    {3.71f,  40},
+    {3.67f,  35},
+    {3.61f,  29},
+    {3.55f,  23},
+    {3.49f,  17},
+    {3.42f,  12},
+    {3.36f,   7},
+    {3.30f,   3},
+    {3.27f,   0},
+};
+static const int kLipoTableLen = (int)(sizeof(kLipoTable) / sizeof(kLipoTable[0]));
+
 static int readBatteryPercent() {
     digitalWrite(cfg::VBAT_EN_PIN, HIGH);    // enable divider
-    delay(10);
-    const int raw = analogRead(cfg::VBAT_ADC_PIN);
+    delay(10);                               // let the RC settle
+
+    // Use analogReadMilliVolts() which applies the ESP32-S3 factory eFuse ADC
+    // calibration curve — much more accurate than raw * 3.3 / 4095.
+    // Average 4 readings to reduce noise.
+    uint32_t sumMv = 0;
+    for (int i = 0; i < 4; i++) {
+        sumMv += analogReadMilliVolts(cfg::VBAT_ADC_PIN);
+        if (i < 3) delay(2);
+    }
     digitalWrite(cfg::VBAT_EN_PIN, LOW);     // disable to save power
 
-    // ESP32-S3 ADC ~3.3V full scale at 12-bit.
-    const float volts = (raw / 4095.0f) * 3.3f * cfg::VBAT_DIV_MULT;
-    // segmented LiPo curve
-    if (volts >= 4.20f) return 100;
-    if (volts >= 4.05f) return 90 + (int)((volts - 4.05f) / 0.015f);
-    if (volts >= 3.90f) return 70 + (int)((volts - 3.90f) / 0.0075f);
-    if (volts >= 3.75f) return 40 + (int)((volts - 3.75f) / 0.005f);
-    if (volts >= 3.60f) return 10 + (int)((volts - 3.60f) / 0.005f);
-    if (volts >= 3.30f) return (int)((volts - 3.30f) / 0.030f);
+    // Reconstruct battery voltage (V), compensating for the resistor divider.
+    const float volts = (sumMv / 4.0f / 1000.0f) * cfg::VBAT_DIV_MULT;
+
+    // Clamp to table extremes.
+    if (volts >= kLipoTable[0].v)             return kLipoTable[0].pct;
+    if (volts <= kLipoTable[kLipoTableLen-1].v) return kLipoTable[kLipoTableLen-1].pct;
+
+    // Linear interpolation between the two bracketing entries.
+    for (int i = 0; i < kLipoTableLen - 1; i++) {
+        if (volts >= kLipoTable[i + 1].v) {
+            const float span = kLipoTable[i].v - kLipoTable[i + 1].v;
+            const float frac = (volts - kLipoTable[i + 1].v) / span;
+            return (int)(kLipoTable[i + 1].pct
+                        + frac * (kLipoTable[i].pct - kLipoTable[i + 1].pct)
+                        + 0.5f);
+        }
+    }
     return 0;
 }
 
@@ -134,7 +182,11 @@ void setup() {
 
             gStore.append(0, ts, r.uSvPerHour, r.cps,
                           gGps.hasFix(), gGps.latitude(), gGps.longitude(),
-                          id);
+                          id,
+                          cfg::FIELD_SPEED_KPH   ? (float)gGps.speedKph()          : -1.f,
+                          cfg::FIELD_BEARING_DEG ? (float)gGps.bearingFromHistory() : -1.f,
+                          cfg::FIELD_ALTITUDE_M  ? (float)gGps.altitudeMeters()     : -9999.f,
+                          cfg::FIELD_HDOP        ? (float)gGps.hdop()               : -1.f);
         },
         // onState
         [](RadiaCode::State s, const String& addr) {
