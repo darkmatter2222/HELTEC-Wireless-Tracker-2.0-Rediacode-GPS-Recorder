@@ -1,87 +1,544 @@
+/* =====================================================================
+   Radiological Map — UI Styles
+   Dark, technical, radiation-lab aesthetic.
+   ===================================================================== */
+
 :root {
-  --bg:        #0d0d0d;
-  --panel:    #1a1a1a;
-  --panel2:   #222;
-  --border:   #333;
-  --text:     #e6e6e6;
-  --muted:    #808080;
-  --accent:   #00e676;
-  --error:    #ff5252;
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --bg:        #0a0c0f;
+  --panel:     #111418;
+  --panel2:    #181c22;
+  --panel3:    #1f242d;
+  --border:    #2a3040;
+  --border2:   #3a4255;
+  --text:      #d8dde8;
+  --muted:     #6b7a96;
+  --accent:    #00e676;
+  --accent2:   #29b6f6;
+  --warn:      #ffb300;
+  --error:     #ef5350;
+  --red:       #ff1744;
+  font-family: "Inter", "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
 }
 
-* { box-sizing: border-box; }
-html, body, #root { margin: 0; height: 100%; background: var(--bg); color: var(--text); }
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-.app { display: flex; height: 100vh; width: 100vw; }
-
-.sidebar {
-  width: 360px; min-width: 320px; max-width: 420px;
-  background: var(--panel);
-  border-right: 1px solid var(--border);
-  display: flex; flex-direction: column;
+html, body, #root {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
   overflow: hidden;
 }
-.sidebar header {
-  padding: 14px 16px; border-bottom: 1px solid var(--border);
-}
-.sidebar h1 { margin: 0; font-size: 18px; color: var(--accent); letter-spacing: 1px; }
-.muted { color: var(--muted); font-size: 12px; }
-.error { color: var(--error); padding: 8px 16px; font-size: 12px; }
 
-.row { display: flex; gap: 8px; padding: 8px 16px; align-items: center; }
-.row label { display: flex; flex-direction: column; font-size: 11px; color: var(--muted); flex: 1; }
-.row input[type=number] {
-  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
-  padding: 4px 6px; border-radius: 4px; width: 100%;
+/* ---- Layout ----------------------------------------------------------- */
+
+.app {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
 }
+
+/* ---- Sidebar ---------------------------------------------------------- */
+
+.sidebar {
+  width: 340px;
+  min-width: 300px;
+  max-width: 380px;
+  background: var(--panel);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.sidebar-header {
+  padding: 14px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel2);
+}
+
+.app-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.app-icon {
+  font-size: 20px;
+  filter: drop-shadow(0 0 6px var(--accent));
+  animation: pulse 3s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.6; }
+}
+
+h1 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.5px;
+}
+
+.muted {
+  color: var(--muted);
+  font-size: 11px;
+  margin-top: 2px;
+}
+
+.px16 { padding: 8px 16px; }
+
+/* ---- Tab bar ---------------------------------------------------------- */
+
+.tab-bar {
+  display: flex;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel2);
+}
+
+.tab {
+  flex: 1;
+  padding: 9px 0;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.tab:hover { color: var(--text); }
+.tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+/* ---- Error banner ----------------------------------------------------- */
+
+.error-banner {
+  background: rgba(239, 83, 80, 0.15);
+  border-left: 3px solid var(--error);
+  color: var(--error);
+  padding: 8px 16px;
+  font-size: 12px;
+}
+
+/* ---- Action buttons --------------------------------------------------- */
 
 button {
-  background: var(--panel2); color: var(--text); border: 1px solid var(--border);
-  padding: 6px 12px; border-radius: 4px; cursor: pointer; font-size: 12px;
+  background: var(--panel2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  transition: background 0.15s, border-color 0.15s;
 }
-button:hover { background: #2c2c2c; border-color: var(--accent); }
 
-.sessions {
-  list-style: none; margin: 0; padding: 0;
-  overflow-y: auto;
-  flex: 1;
+button:hover {
+  background: var(--panel3);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+button.active {
+  background: rgba(0, 230, 118, 0.15);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.btn-row {
+  display: flex;
+  gap: 6px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border);
 }
-.sessions li {
-  padding: 8px 16px; border-bottom: 1px solid #222;
-}
-.sessions li.sel { background: #131; }
-.sessions label { display: flex; align-items: center; gap: 8px; cursor: pointer; font-family: monospace; font-size: 12px; }
-.sessions .swatch { width: 14px; height: 14px; border-radius: 3px; flex: 0 0 14px; }
-.sessions .sid { flex: 1; }
-.sessions .meta { padding-left: 22px; color: var(--muted); font-size: 11px; margin-top: 2px; }
 
-.controls {
-  padding: 8px 16px 16px; overflow-y: auto;
-  border-top: 1px solid var(--border);
-}
-.controls h3 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--muted); margin: 12px 0 6px; }
-.check { display: flex; align-items: center; gap: 8px; font-size: 12px; padding: 3px 0; cursor: pointer; }
-.legend { display: flex; gap: 0; height: 14px; border-radius: 3px; overflow: hidden; margin-top: 4px; }
-.legend span { flex: 1; }
-.stats { font-family: monospace; font-size: 12px; line-height: 1.6; }
-.stats b { color: var(--accent); font-weight: normal; }
+/* ---- Sessions list ---------------------------------------------------- */
 
-.map-pane { flex: 1; position: relative; }
-.map-pane > .leaflet-container { background: #111; }
+.sessions {
+  list-style: none;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.sessions::-webkit-scrollbar { width: 5px; }
+.sessions::-webkit-scrollbar-track { background: var(--panel); }
+.sessions::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+.session-item {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--border);
+  transition: background 0.1s;
+  cursor: pointer;
+}
+
+.session-item:hover { background: var(--panel2); }
+.session-item.sel   { background: rgba(0, 230, 118, 0.07); }
+
+.session-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-family: "Fira Mono", "Consolas", monospace;
+  font-size: 11.5px;
+}
+
+.swatch {
+  width: 12px;
+  height: 12px;
+  border-radius: 2px;
+  flex-shrink: 0;
+  box-shadow: 0 0 4px currentColor;
+}
+
+.sid {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.session-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 4px;
+  padding-left: 20px;
+}
+
+.badge {
+  font-size: 10px;
+  background: var(--panel3);
+  border: 1px solid var(--border2);
+  border-radius: 3px;
+  padding: 1px 5px;
+  color: var(--muted);
+}
+
+.dose-badge {
+  color: var(--warn);
+  border-color: rgba(255, 179, 0, 0.3);
+}
+
+.session-device {
+  font-size: 10px;
+  color: var(--muted);
+  padding-left: 20px;
+  margin-top: 2px;
+  font-family: monospace;
+}
+
+/* ---- Panel scroll ----------------------------------------------------- */
+
+.panel-scroll {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 0 16px;
+}
+
+.panel-scroll::-webkit-scrollbar { width: 5px; }
+.panel-scroll::-webkit-scrollbar-track { background: var(--panel); }
+.panel-scroll::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+/* ---- Section headers -------------------------------------------------- */
+
+.section-head {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: var(--muted);
+  padding: 12px 16px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+/* ---- Mode / channel grids --------------------------------------------- */
+
+.mode-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px;
+  padding: 10px 12px;
+}
+
+.mode-btn {
+  font-size: 12px;
+  padding: 8px 4px;
+  text-align: center;
+}
+
+.channel-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 5px;
+  padding: 10px 12px;
+}
+
+.channel-btn {
+  font-size: 11px;
+  padding: 6px 4px;
+  text-align: center;
+}
+
+/* ---- Tile grid -------------------------------------------------------- */
+
+.tile-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+  padding: 10px 12px;
+}
+
+.tile-btn {
+  font-size: 11px;
+  padding: 6px;
+  text-align: center;
+}
+
+/* ---- Number inputs ---------------------------------------------------- */
+
+.number-row {
+  display: flex;
+  gap: 8px;
+  padding: 8px 12px;
+  align-items: flex-end;
+}
+
+.number-row label {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 10px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  flex: 1;
+}
+
+.number-row input[type=number] {
+  background: var(--panel3);
+  color: var(--text);
+  border: 1px solid var(--border2);
+  padding: 5px 7px;
+  border-radius: 4px;
+  width: 100%;
+  font-size: 12px;
+  font-family: monospace;
+}
+
+.number-row input[type=number]:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ---- Legend bar ------------------------------------------------------- */
+
+.legend-bar {
+  display: flex;
+  height: 10px;
+  border-radius: 3px;
+  overflow: hidden;
+  margin: 0 12px 4px;
+}
+
+.legend-bar span { flex: 1; }
+
+.legend-labels {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 12px;
+  font-size: 10px;
+  color: var(--muted);
+  margin-bottom: 4px;
+}
+
+/* ---- Checkboxes ------------------------------------------------------- */
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  font-size: 12px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.check:hover { background: var(--panel2); }
+
+/* ---- Slider rows ------------------------------------------------------ */
+
+.slider-row {
+  padding: 6px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.slider-row input[type=range] { width: 100%; accent-color: var(--accent); }
+
+/* ---- Stats grid ------------------------------------------------------- */
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  padding: 10px 12px;
+}
+
+.stat-card {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.stat-card.accent {
+  border-color: rgba(0, 230, 118, 0.3);
+}
+
+.stat-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+
+.stat-value {
+  font-size: 13px;
+  font-family: "Fira Mono", monospace;
+  color: var(--text);
+}
+
+.stat-card.accent .stat-value { color: var(--accent); }
+
+/* ---- Map pane --------------------------------------------------------- */
+
+.map-pane {
+  flex: 1;
+  position: relative;
+  background: var(--bg);
+}
+
+.leaflet-container { background: #0a0c10; }
+
+/* ---- Timeline scrubber ----------------------------------------------- */
 
 .scrubber {
-  position: absolute; bottom: 0; left: 0; right: 0;
-  background: rgba(20, 20, 20, 0.92);
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background: rgba(10, 12, 15, 0.94);
+  backdrop-filter: blur(8px);
   border-top: 1px solid var(--border);
-  padding: 10px 16px;
-  display: flex; align-items: center; gap: 14px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
   z-index: 1000;
 }
-.scrubber .t-row { flex: 1; display: flex; align-items: center; gap: 10px; }
-.scrubber label { font-size: 11px; color: var(--muted); width: 50px; }
-.scrubber input[type=range] { flex: 1; }
-.scrubber .t-val { font-family: monospace; font-size: 11px; color: var(--accent); min-width: 160px; text-align: right; }
 
-.leaflet-tooltip { background: rgba(20,20,20,0.95) !important; color: var(--text) !important; border: 1px solid var(--border) !important; }
+.scrubber-btns {
+  display: flex;
+  gap: 4px;
+}
+
+.scrubber-btns button {
+  font-size: 14px;
+  padding: 5px 8px;
+}
+
+.scrubber-sliders {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.t-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.t-row > label {
+  font-size: 10px;
+  color: var(--muted);
+  width: 46px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.t-row input[type=range] {
+  flex: 1;
+  accent-color: var(--accent);
+}
+
+.t-val {
+  font-family: "Fira Mono", monospace;
+  font-size: 11px;
+  color: var(--accent);
+  min-width: 180px;
+  text-align: right;
+}
+
+/* ---- Leaflet tooltip -------------------------------------------------- */
+
+.leaflet-tooltip {
+  background: rgba(10, 12, 15, 0.97) !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border2) !important;
+  border-radius: 6px !important;
+  padding: 8px 10px !important;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.6) !important;
+}
+
+.leaflet-tooltip-top::before {
+  border-top-color: var(--border2) !important;
+}
+
+.tt { font-size: 12px; min-width: 160px; }
+.tt-head {
+  font-family: monospace;
+  font-size: 11px;
+  color: var(--accent);
+  margin-bottom: 4px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.tt-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 1px 0;
+}
+.tt-row span { color: var(--muted); }
+.tt-row b { color: var(--text); font-weight: 500; }
+
+/* ---- SparkChart canvas ----------------------------------------------- */
+
+canvas {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  margin: 0 12px;
+  width: calc(100% - 24px) !important;
+  border-radius: 4px;
+}
+
+/* ---- Scrollbar global ------------------------------------------------- */
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: var(--panel); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
