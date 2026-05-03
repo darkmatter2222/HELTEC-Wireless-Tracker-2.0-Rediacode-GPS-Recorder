@@ -55,7 +55,12 @@ constexpr uint8_t  VGNSS_CTRL_PIN = 3;     // HIGH = GPS+TFT powered
 constexpr uint8_t  BL_CTRL_PIN    = 21;    // HIGH = backlight on
 constexpr uint8_t  VBAT_EN_PIN    = 2;     // HIGH during ADC read
 constexpr uint8_t  VBAT_ADC_PIN   = 1;     // ADC1_CH0
-constexpr float    VBAT_DIV_MULT  = 5.05f; // empirically tuned (Heltec V3)
+// Resistor divider ratio: VBAT → (100 kΩ top + ~390 kΩ bottom) → GND.
+// V_adc = V_bat * 100/(100+390) ≈ V_bat/4.9; multiplier is the inverse.
+// 5.05 is the empirically measured value for Heltec Wireless Tracker V2
+// (same divider network as WiFi LoRa 32 V3).  Adjust if your multimeter
+// disagrees: multiply = V_bat_measured / V_adc_measured.
+constexpr float    VBAT_DIV_MULT  = 5.05f;
 
 // ---------------- Button (PRG) ------------------------------------------------
 constexpr uint8_t  BUTTON_PIN = 0;         // active LOW
