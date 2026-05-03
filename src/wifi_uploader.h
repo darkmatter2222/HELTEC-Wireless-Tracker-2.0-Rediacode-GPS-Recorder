@@ -18,6 +18,7 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <vector>
 
 class SessionStore;
 
@@ -64,4 +65,9 @@ private:
     volatile uint32_t uploadedCount_ = 0;
     volatile uint32_t failedCount_   = 0;
     volatile int      lastHttpStatus_ = 0;
+
+    // IDs successfully uploaded this boot. When KEEP_UPLOADS_ON_DEVICE is
+    // true we don't delete the file, so we track which sessions have already
+    // been uploaded to avoid re-posting them every 60 seconds.
+    std::vector<String> uploadedThisBoot_;
 };

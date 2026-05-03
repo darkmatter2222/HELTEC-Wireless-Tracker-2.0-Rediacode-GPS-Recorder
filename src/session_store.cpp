@@ -458,9 +458,21 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
     if (!fs_) return;
     File f = fs_->open(pathFor(activeId_), "a");
     if (!f) { log_w("append: open failed"); return; }
-    f.print(line);
+    size_t written = f.print(line);
     f.close();
+    if ((int)written < len) {
+        // LittleFS write failed or was short -- storage error. Log loudly.
+        Serial.printf("[REC] WRITE ERR: tried %d bytes wrote %u heap=%u\n",
+                      len, (unsigned)written, (unsigned)ESP.getFreeHeap());
+        return;  // do NOT count a row we didn't fully write
+    }
     ++sampleCount_;
+    // Periodic diagnostics: log sample count + heap every 100 rows so we
+    // can verify file growth vs in-memory count in the serial log.
+    if ((sampleCount_ % 100) == 0) {
+        Serial.printf("[REC] %u samples written heap=%u\n",
+                      (unsigned)sampleCount_, (unsigned)ESP.getFreeHeap());
+    }
 }
 
 size_t SessionStore::totalBytes() const {
@@ -768,9 +780,33 @@ bool SessionStore::readSessionToString(const String& id, size_t maxBytes, String
     if (!f) return false;
     if (f.size() > maxBytes) { f.close(); return false; }
     out.reserve((size_t)f.size());
+    // Read in buffered chunks -- character-by-character Arduino String growth
+    // is ~2x slower and triggers many extra reallocs on large files.
+    uint8_t buf[256];
     while (f.available()) {
-        out += (char)f.read();
+        size_t n = f.read(buf, sizeof(buf));
+        for (size_t i = 0; i < n; ++i) out += (char)buf[i];
     }
     f.close();
     return true;
+}
+
+Stream* SessionStore::openSessionStream(const String& id, size_t& outSizeBytes) {
+    // Only LittleFS and SD (fs::FS) backends expose a Stream-compatible File.
+    // SdFat uses its own FsFile type which is not an fs::File / Stream.
+    if ((backend_ == Backend::LittleFs || backend_ == Backend::Sd) && fs_) {
+        openedStreamFile_ = fs_->open(pathFor(id), "r");
+        if (!openedStreamFile_) {
+            log_w("openSessionStream: open failed for %s", id.c_str());
+            return nullptr;
+        }
+        outSizeBytes = (size_t)openedStreamFile_.size();
+        return &openedStreamFile_;
+    }
+    // SdFat: caller must fall back to readSessionToString.
+    return nullptr;
+}
+
+void SessionStore::closeSessionStream() {
+    if (openedStreamFile_) openedStreamFile_.close();
 }

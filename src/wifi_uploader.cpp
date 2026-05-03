@@ -128,12 +128,44 @@ void WifiUploader::disconnectWifi() {
 
 
 bool WifiUploader::uploadOne(const String& sessionId, size_t expectedBytes, uint32_t expectedSamples) {
-    // Cap a single body at 1 MB. The API also enforces a server-side cap.
-    constexpr size_t MAX_BODY_BYTES = 1 * 1024 * 1024;
-    String body;
-    if (!readWholeFile(*store_, sessionId, MAX_BODY_BYTES, body) || body.length() == 0) {
-        Serial.printf("[UPLOAD] %s: read failed (size=%u max=%u)\n",
-                      sessionId.c_str(), (unsigned)expectedBytes, (unsigned)MAX_BODY_BYTES);
+    Serial.printf("[UPLOAD] %s: file_bytes=%u expect_samples=%u heap_free=%u\n",
+                  sessionId.c_str(), (unsigned)expectedBytes,
+                  (unsigned)expectedSamples, (unsigned)ESP.getFreeHeap());
+
+    // --- Stream directly from the file into HTTPClient ---------------------
+    // Avoids loading the whole CSV into a heap String. On a 320 KB DRAM
+    // device a session with >~1500 rows (~225 KB) would exhaust the heap
+    // mid-String, silently truncate the upload, and the partial 2xx response
+    // would cause the file to be deleted with data permanently lost.
+    // Using HTTPClient::sendRequest(type, Stream*, size) bypasses the heap
+    // entirely: the HTTP stack reads the LittleFS file in small chunks as it
+    // sends TCP segments.
+    size_t fileSize = 0;
+    Stream* fileStream = store_->openSessionStream(sessionId, fileSize);
+
+    String body;  // only used as fallback for SdFat backend
+    if (!fileStream) {
+        // SdFat backend (V1.2): fall back to buffered read.
+        // 1 MB cap keeps us within available heap on smaller sessions.
+        constexpr size_t MAX_FALLBACK_BYTES = 1 * 1024 * 1024;
+        Serial.printf("[UPLOAD] %s: stream unavailable (SdFat?), falling back to String read\n",
+                      sessionId.c_str());
+        if (!store_->readSessionToString(sessionId, MAX_FALLBACK_BYTES, body) || body.length() == 0) {
+            Serial.printf("[UPLOAD] %s: read failed (bytes=%u maxFallback=%u)\n",
+                          sessionId.c_str(), (unsigned)expectedBytes, (unsigned)MAX_FALLBACK_BYTES);
+            return false;
+        }
+        fileSize = body.length();
+        Serial.printf("[UPLOAD] %s: fallback string_bytes=%u heap_after=%u\n",
+                      sessionId.c_str(), (unsigned)fileSize, (unsigned)ESP.getFreeHeap());
+    } else {
+        Serial.printf("[UPLOAD] %s: streaming file_bytes=%u heap=%u\n",
+                      sessionId.c_str(), (unsigned)fileSize, (unsigned)ESP.getFreeHeap());
+    }
+
+    if (fileSize == 0) {
+        Serial.printf("[UPLOAD] %s: zero bytes, skipping\n", sessionId.c_str());
+        store_->closeSessionStream();
         return false;
     }
 
@@ -141,9 +173,10 @@ bool WifiUploader::uploadOne(const String& sessionId, size_t expectedBytes, uint
     if (!http.begin(secrets::INGEST_URL)) {
         Serial.printf("[UPLOAD] %s: http.begin('%s') failed\n",
                       sessionId.c_str(), secrets::INGEST_URL);
+        store_->closeSessionStream();
         return false;
     }
-    http.setTimeout(15000);
+    http.setTimeout(30000);   // larger sessions need more time to stream
     http.addHeader("Content-Type", "text/csv");
     http.addHeader("X-Session-Id", sessionId);
     http.addHeader("X-Tracker-Id", chipIdString());
@@ -153,15 +186,22 @@ bool WifiUploader::uploadOne(const String& sessionId, size_t expectedBytes, uint
     }
 
     const uint32_t t0 = millis();
-    const int code   = http.POST((uint8_t*)body.c_str(), body.length());
+    int code;
+    if (fileStream) {
+        // Stream path: no heap allocation for body.
+        code = http.sendRequest("POST", fileStream, fileSize);
+    } else {
+        code = http.POST((uint8_t*)body.c_str(), body.length());
+    }
     const String resp = (code > 0) ? http.getString() : String();
     http.end();
+    store_->closeSessionStream();
     lastHttpStatus_ = code;
 
     if (code >= 200 && code < 300) {
-        Serial.printf("[UPLOAD] %s OK http=%d %ums %u bytes resp=%s\n",
+        Serial.printf("[UPLOAD] %s OK http=%d %ums file_bytes=%u resp=%s\n",
                       sessionId.c_str(), code, (unsigned)(millis() - t0),
-                      (unsigned)body.length(),
+                      (unsigned)fileSize,
                       resp.length() > 200 ? "<truncated>" : resp.c_str());
         return true;
     }
@@ -176,19 +216,34 @@ uint32_t WifiUploader::runOnce() {
     if (!enabled_ || !store_) return 0;
 
     auto sessions = store_->listSessions();
-    // Don't upload the active (still-being-written) session.
+
+    // Never touch the actively-recording session.
     sessions.erase(std::remove_if(sessions.begin(), sessions.end(),
                                   [this](const SessionStore::SessionInfo& s) {
                                       return store_->isActive(s.id);
                                   }),
                    sessions.end());
+
+    // When keeping files on device, skip sessions already uploaded this boot
+    // so we don't re-upload (and waste bandwidth) every cycle.
+    if (cfg::KEEP_UPLOADS_ON_DEVICE && !uploadedThisBoot_.empty()) {
+        sessions.erase(std::remove_if(sessions.begin(), sessions.end(),
+                                      [this](const SessionStore::SessionInfo& s) {
+                                          return std::find(uploadedThisBoot_.begin(),
+                                                           uploadedThisBoot_.end(),
+                                                           s.id) != uploadedThisBoot_.end();
+                                      }),
+                       sessions.end());
+    }
+
     if (sessions.empty()) {
-        return 0;   // nothing to do; don't even bring up Wi-Fi
+        return 0;   // nothing pending; don't bring up Wi-Fi
     }
 
     busy_ = true;
     lastAttempt_ = millis();
-    Serial.printf("[UPLOAD] cycle start; %u session(s) pending\n", (unsigned)sessions.size());
+    Serial.printf("[UPLOAD] cycle start; %u session(s) pending heap_free=%u\n",
+                  (unsigned)sessions.size(), (unsigned)ESP.getFreeHeap());
 
     if (!connectWifi()) {
         ++failedCount_;
@@ -199,26 +254,35 @@ uint32_t WifiUploader::runOnce() {
     uint32_t ok = 0;
     for (const auto& s : sessions) {
         if (uploadOne(s.id, s.sizeBytes, s.samples)) {
-            // Server confirmed; safe to free the on-device copy.
-            if (store_->removeSession(s.id)) {
-                ++ok;
-                ++uploadedCount_;
-                lastSuccess_ = millis();
-                Serial.printf("[UPLOAD] %s removed from device\n", s.id.c_str());
+            ++ok;
+            ++uploadedCount_;
+            lastSuccess_ = millis();
+            if (cfg::KEEP_UPLOADS_ON_DEVICE) {
+                // Keep the file on device; record that we've uploaded it this
+                // boot so we don't re-upload until the device reboots.
+                uploadedThisBoot_.push_back(s.id);
+                Serial.printf("[UPLOAD] %s: kept on device (KEEP_UPLOADS_ON_DEVICE)\n",
+                              s.id.c_str());
             } else {
-                Serial.printf("[UPLOAD] %s: server OK but local remove failed\n", s.id.c_str());
-                ++failedCount_;
+                // Legacy mode: remove after confirmed server receipt.
+                if (store_->removeSession(s.id)) {
+                    Serial.printf("[UPLOAD] %s removed from device\n", s.id.c_str());
+                } else {
+                    Serial.printf("[UPLOAD] %s: server OK but local remove failed\n",
+                                  s.id.c_str());
+                    ++failedCount_;
+                }
             }
         } else {
             ++failedCount_;
         }
-        // Yield between large uploads so other tasks (BLE, loop) keep running.
+        // Brief yield between sessions so BLE/UI tasks keep running.
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
     disconnectWifi();
     busy_ = false;
-    Serial.printf("[UPLOAD] cycle done; ok=%u/%u\n",
-                  (unsigned)ok, (unsigned)sessions.size());
+    Serial.printf("[UPLOAD] cycle done; ok=%u/%u heap_free=%u\n",
+                  (unsigned)ok, (unsigned)sessions.size(), (unsigned)ESP.getFreeHeap());
     return ok;
 }
