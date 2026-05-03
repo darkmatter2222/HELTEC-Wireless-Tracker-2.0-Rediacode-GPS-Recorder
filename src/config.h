@@ -126,7 +126,15 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "0.3.0";
+constexpr const char* FW_VERSION = "0.3.2";
+
+// When true the Wi-Fi uploader keeps the session CSV on-device after a
+// successful upload instead of deleting it. The server's unique index on
+// {sessionId,timestampMs} makes re-uploads idempotent, so if the device
+// is rebooted the file gets re-uploaded harmlessly. The only cost is disk
+// space -- with a 6 MB LittleFS partition and ~150 B/row that is ~40,000
+// rows before any cleanup is needed. Set false to restore auto-delete.
+constexpr bool KEEP_UPLOADS_ON_DEVICE = true;
 
 // ----------- Extended per-record telemetry fields ---------------------------
 // Each flag controls whether that GPS field is sampled and written to the CSV.

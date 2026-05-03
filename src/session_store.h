@@ -92,6 +92,14 @@ public:
     // or larger than maxBytes. Backend-aware (SdFat / SD / LittleFS).
     bool readSessionToString(const String& id, size_t maxBytes, String& out) const;
 
+    // Open a session file as a Stream so the caller can pipe it directly
+    // into an HTTPClient without buffering the whole file in heap. Works for
+    // LittleFS and SD backends. Returns nullptr for SdFat (caller should fall
+    // back to readSessionToString). outSizeBytes is set to the file size.
+    // The caller MUST call closeSessionStream() when the transfer is done.
+    Stream* openSessionStream(const String& id, size_t& outSizeBytes);
+    void    closeSessionStream();
+
 private:
     // True iff a usable backend is mounted (excludes None and Failed).
     bool hasUsableBackend() const {
@@ -108,6 +116,9 @@ private:
     uint64_t cardSizeMb_  = 0;            // populated when SD mounts
     bool     sdFatPreflightOk_ = false;   // true if SdFat managed to mount
                                           // the card during the preflight
+    // Held open between openSessionStream() and closeSessionStream() so the
+    // HTTPClient can stream the file without buffering it in heap.
+    fs::File openedStreamFile_;
                                           // diagnostic, even if the stock
                                           // driver subsequently failed
 };
