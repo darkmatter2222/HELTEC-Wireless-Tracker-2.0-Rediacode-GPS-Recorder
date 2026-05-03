@@ -456,6 +456,27 @@ static void pollSerialCommands() {
 void loop() {
     pollSerialCommands();
     gGps.update();
+
+    // GPS baud-rate self-healing: the begin() baud probe can false-positive at
+    // 9600 baud when the GPS module is actually sending at 115200 (UART baud
+    // aliasing makes some 115200 frames look like valid start bits at 9600).
+    // If bytes are flowing but TinyGPS++ has never decoded a valid sentence
+    // after 15 seconds, re-run the probe — the GPS is definitely active by
+    // then and the 115200 probe will win immediately.
+    {
+        static uint32_t gpsBaudHealAt = 0;
+        if (gGps.passedChecksum() > 0) {
+            gpsBaudHealAt = 0;  // NMEA flowing correctly; cancel watchdog
+        } else if (gGps.bytesIn() > 2000) {
+            if (gpsBaudHealAt == 0) gpsBaudHealAt = millis() + 15000;
+            else if ((int32_t)(millis() - gpsBaudHealAt) >= 0) {
+                gpsBaudHealAt = millis() + 30000;  // retry again in 30 s
+                Serial.printf("[GPS] baud-heal: %u bytes, 0 valid NMEA; was %u baud, re-probing\n",
+                              (unsigned)gGps.bytesIn(), (unsigned)gGps.baud());
+                gGps.begin();
+            }
+        }
+    }
     gRadia.loop();
     gWifi.tick();
 

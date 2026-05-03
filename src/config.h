@@ -126,7 +126,7 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "0.3.0";
+constexpr const char* FW_VERSION = "0.3.1";
 
 // ----------- Extended per-record telemetry fields ---------------------------
 // Each flag controls whether that GPS field is sampled and written to the CSV.

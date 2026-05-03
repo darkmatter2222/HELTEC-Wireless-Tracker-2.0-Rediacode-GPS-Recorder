@@ -58,10 +58,10 @@ void GpsModule::update() {
         ++bytesIn_;
         lastByteMs_ = millis();
     }
-    // Push newly-decoded position into the bearing ring buffer whenever
-    // TinyGPS++ marks the location object as updated (i.e. a new NMEA
-    // sentence with a valid fix just arrived). isUpdated() resets itself
-    // after being read, so this fires exactly once per new position sentence.
+    // Push newly-decoded position into the bearing ring buffer on each new NMEA
+    // sentence. isUpdated() is a plain getter (does NOT consume the flag); the
+    // flag is cleared by TinyGPS++ itself when lat() / lng() are called below,
+    // so this effectively fires once per new position sentence.
     if (gps_.location.isUpdated() && gps_.location.isValid()) {
         const uint8_t slots = (cfg::BEARING_HISTORY_POINTS < kMaxBearingHistory)
                             ? cfg::BEARING_HISTORY_POINTS : kMaxBearingHistory;
