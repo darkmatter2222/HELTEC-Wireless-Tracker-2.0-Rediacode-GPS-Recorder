@@ -8,6 +8,112 @@
   --panel:     #111418;
   --panel2:    #181c22;
   --panel3:    #1f242d;
+}
+
+/* ---- Dual Range Slider ------------------------------------------------- */
+
+.drs-wrap {
+  padding: 10px 14px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.drs-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.drs-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+}
+
+.drs-auto-btn {
+  font-size: 10px !important;
+  padding: 2px 8px !important;
+  color: var(--accent2) !important;
+  border-color: var(--accent2) !important;
+  background: transparent !important;
+}
+.drs-auto-btn:hover {
+  background: rgba(41,182,246,0.12) !important;
+}
+
+.drs-values-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.drs-val {
+  font-family: "Fira Mono", monospace;
+  font-size: 11px;
+  color: var(--accent);
+}
+.drs-val-right {
+  text-align: right;
+}
+
+.drs-track-outer {
+  position: relative;
+  height: 12px;
+  border-radius: 6px;
+  background: var(--panel3);
+  border: 1px solid var(--border2);
+  overflow: visible;
+  margin: 0 6px;
+  cursor: default;
+  user-select: none;
+}
+
+.drs-zone {
+  position: absolute;
+  top: 0;
+  height: 100%;
+}
+
+.drs-zone-left {
+  left: 0;
+  border-radius: 6px 0 0 6px;
+  opacity: 0.5;
+}
+
+.drs-zone-mid {
+  /* gradient area — background set inline */
+  border-top: none;
+  border-bottom: none;
+}
+
+.drs-zone-right {
+  border-radius: 0 6px 6px 0;
+  opacity: 0.5;
+}
+
+.drs-handle {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 20px;
+  transform: translate(-50%, -50%);
+  background: var(--panel);
+  border: 2px solid var(--accent);
+  border-radius: 4px;
+  cursor: ew-resize;
+  z-index: 4;
+  transition: border-color 0.12s, box-shadow 0.12s;
+  box-shadow: 0 0 0 0 transparent;
+}
+
+.drs-handle:hover,
+.drs-handle:active {
+  border-color: #fff;
+  box-shadow: 0 0 6px var(--accent);
+}
+
+
   --border:    #2a3040;
   --border2:   #3a4255;
   --text:      #d8dde8;
