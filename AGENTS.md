@@ -436,20 +436,26 @@ patching `public/config.js` so the compiled JS references the right API URL.
 
 Viewer URL: `http://192.168.86.48:8031/`
 
-### Viewer Features
+### Viewer Layout — Two Top-Level Modes
 
-- **Map modes**: Track (colored polyline), Dots (circle markers), Heatmap (native canvas, no plugin), Arrows (bearing arrows + dot underlay)
-- **Map zoom**: `maxZoom=20`; each tile layer has its own `maxNativeZoom` (OSM=19, CartoDB=20, OpenTopoMap=17, Esri Satellite=18) so over-zoom scales gracefully
-- **Color channels**: Dose rate, CPS, Speed, Altitude, HDOP, Session index
-- **Per-mode display controls** (Display tab):
+The viewer has a persistent top navigation bar with **Explore** and **Data Management** mode buttons.
+
+**Explore mode** (default) — left sidebar + full map:
+- Sidebar tabs: Sessions | Display | Stats
+- Map modes: Track (colored polyline), Dots (circle markers), Heatmap (native canvas, no plugin), Arrows (bearing arrows + dot underlay)
+- Map zoom: `maxZoom=20`; per-tile `maxNativeZoom` (OSM=19, CartoDB=20, OpenTopoMap=17, Esri Satellite=18) for graceful over-zoom
+- Color channels: Dose rate, CPS, Speed, Altitude, HDOP, Session index
+- Per-mode display controls (Display tab):
   - Track: track width slider; optional dot overlay + dot opacity slider
   - Dots: point radius slider
-  - Heatmap: no extra controls; uses native `L.circleMarker + L.canvas` renderer
+  - Heatmap: native `L.circleMarker + L.canvas` renderer; no extra controls
   - Arrows: arrow-every-N slider; dot opacity slider; optional track underlay + track opacity slider
-- **Soft-delete UI** (Manage tab → Delete/Restore tab): shows active + deleted sessions with toggle; Restore button; triple-confirm Purge
-- **Database panel** (DB tab): backup history with source/status badges; manual backup trigger; restore; DB stats
-- **Session timeline** scrubber + playback
-- **Tile layers**: OSM Streets, CartoDB Dark (default), OpenTopoMap, Satellite (Esri)
+- Session timeline scrubber + playback
+- Tile layers: OSM Streets, CartoDB Dark (default), OpenTopoMap, Satellite (Esri)
+
+**Data Management mode** — full-width two-column layout, no map:
+- **Left panel — Session Management** (`ManagePanel`): Rename, Delete/Restore, Merge, Export sub-tabs; active + soft-deleted sessions; triple-confirm Purge
+- **Right panel — Database** (`DatabasePanel`): backup history with source/status badges; manual backup trigger; restore; DB stats
 
 ---
 
