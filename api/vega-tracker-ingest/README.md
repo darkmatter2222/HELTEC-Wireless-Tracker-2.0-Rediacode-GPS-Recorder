@@ -1,4 +1,4 @@
-# Vega Tracker Ingest API
+# Radiological Map Ingest API
 
 FastAPI service that receives radiation/GPS session uploads from the
 Heltec field tracker (or any client speaking the same CSV schema as the

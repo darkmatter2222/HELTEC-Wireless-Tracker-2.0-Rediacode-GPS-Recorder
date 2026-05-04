@@ -1,4 +1,4 @@
-"""Vega Tracker Ingest API.
+"""Radiological Map Ingest API.
 
 Accepts radiation/GPS session uploads from the Heltec field tracker
 (or any client that produces the same CSV schema as the Android app)
@@ -119,7 +119,7 @@ async def lifespan(app: FastAPI):
         client.close()
 
 
-app = FastAPI(title="Vega Tracker Ingest", version=API_VERSION, lifespan=lifespan)
+app = FastAPI(title="Radiological Map Ingest", version=API_VERSION, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], allow_credentials=False,

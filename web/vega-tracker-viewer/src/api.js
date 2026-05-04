@@ -1,6 +1,6 @@
 // API_BASE is injected at runtime by nginx via /config.js (see public/config.js
 // and the Dockerfile). Falls back to same-origin for `npm run dev`.
-const RUNTIME = (typeof window !== 'undefined' && window.__VEGA_CONFIG__) || {};
+const RUNTIME = (typeof window !== 'undefined' && window.__APP_CONFIG__) || {};
 export const API_BASE =
   RUNTIME.apiBase ||
   import.meta.env.VITE_API_URL ||
