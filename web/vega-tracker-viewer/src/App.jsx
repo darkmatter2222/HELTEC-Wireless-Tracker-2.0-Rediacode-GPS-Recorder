@@ -255,8 +255,9 @@ export default function App() {
   const [fitTrigger, setFitTrigger] = useState(0);
   const playRef = useRef();
 
-  // Sidebar panel
-  const [panel, setPanel] = useState('sessions'); // sessions | display | stats | manage | db
+  // App mode and explore sidebar panel
+  const [appMode, setAppMode] = useState('explore'); // explore | manage
+  const [explorePanel, setExplorePanel] = useState('sessions'); // sessions | display | stats
   const [searchFilter, setSearchFilter] = useState('');
 
   // Resizable sidebar
@@ -509,20 +510,41 @@ export default function App() {
   // ---- render ------------------------------------------------------------
   return (
     <div className="app">
+      {/* === TOP NAV === */}
+      <nav className="top-nav">
+        <div className="nav-brand">
+          <span className="app-icon">☢</span>
+          <span className="nav-title">Radiological Map</span>
+        </div>
+        <div className="nav-modes">
+          <button
+            className={`nav-mode-btn ${appMode === 'explore' ? 'active' : ''}`}
+            onClick={() => setAppMode('explore')}>
+            Explore
+          </button>
+          <button
+            className={`nav-mode-btn ${appMode === 'manage' ? 'active' : ''}`}
+            onClick={() => setAppMode('manage')}>
+            Data Management
+          </button>
+        </div>
+        <div className="nav-meta">
+          <span>{sessions.length} session{sessions.length !== 1 ? 's' : ''}</span>
+        </div>
+      </nav>
+
+      {/* === APP BODY === */}
+      <div className="app-body">
+
+      {/* === EXPLORE MODE === */}
+      {appMode === 'explore' && (<>
       {/* === SIDEBAR === */}
       <aside className="sidebar" ref={sidebarRef} style={{ width: sidebarWidth }}>
-        <header className="sidebar-header">
-          <div className="app-title">
-            <span className="app-icon">☢</span>
-            <h1>Radiological Map</h1>
-          </div>
-          <div className="muted">{sessions.length} sessions loaded</div>
-        </header>
 
         {/* Tab bar */}
         <div className="tab-bar">
-          {[['sessions','Sessions'],['display','Display'],['stats','Stats'],['manage','Manage'],['db','DB']].map(([t,label]) => (
-            <button key={t} className={`tab ${panel === t ? 'active' : ''}`} onClick={() => setPanel(t)}>
+          {[['sessions','Sessions'],['display','Display'],['stats','Stats']].map(([t,label]) => (
+            <button key={t} className={`tab ${explorePanel === t ? 'active' : ''}`} onClick={() => setExplorePanel(t)}>
               {label}
             </button>
           ))}
@@ -532,7 +554,7 @@ export default function App() {
         {loading && <div className="muted px16">Loading sessions...</div>}
 
         {/* === SESSIONS PANEL === */}
-        {panel === 'sessions' && (
+        {explorePanel === 'sessions' && (
           <>
             <div className="btn-row">
               <button onClick={selectAll}>All</button>
@@ -592,7 +614,7 @@ export default function App() {
         )}
 
         {/* === DISPLAY PANEL === */}
-        {panel === 'display' && (
+        {explorePanel === 'display' && (
           <div className="panel-scroll">
             <SectionHead>Map Mode</SectionHead>
             <div className="mode-grid">
@@ -719,7 +741,7 @@ export default function App() {
         )}
 
         {/* === STATS PANEL === */}
-        {panel === 'stats' && (
+        {explorePanel === 'stats' && (
           <div className="panel-scroll">
             <SectionHead>Window summary</SectionHead>
             <div className="stat-grid">
@@ -747,26 +769,6 @@ export default function App() {
               </>
             )}
           </div>
-        )}
-
-        {/* === MANAGE PANEL === */}
-        {panel === 'manage' && (
-          <ManagePanel
-            sessions={sessions.map((s, i) => ({ ...s, _idx: i }))}
-            onRenamed={handleRenamed}
-            onDeleted={handleDeleted}
-            onMerged={handleMerged}
-            onRestored={handleRestored}
-            onPurged={handlePurged}
-            onError={msg => { setError(msg); setTimeout(() => setError(null), 5000); }}
-          />
-        )}
-
-        {/* === DATABASE PANEL === */}
-        {panel === 'db' && (
-          <DatabasePanel
-            onError={msg => { setError(msg); setTimeout(() => setError(null), 8000); }}
-          />
         )}
 
         {/* Resize handle */}
@@ -937,6 +939,40 @@ export default function App() {
           />
         )}
       </main>
+      </>)}
+      {/* end explore mode */}
+
+      {/* === DATA MANAGEMENT MODE === */}
+      {appMode === 'manage' && (
+        <div className="data-mgmt-view">
+          <div className="data-mgmt-panel">
+            <div className="data-mgmt-panel-header">Session Management</div>
+            <ManagePanel
+              sessions={sessions.map((s, i) => ({ ...s, _idx: i }))}
+              onRenamed={handleRenamed}
+              onDeleted={handleDeleted}
+              onMerged={handleMerged}
+              onRestored={handleRestored}
+              onPurged={handlePurged}
+              onError={msg => { setError(msg); setTimeout(() => setError(null), 5000); }}
+            />
+          </div>
+          <div className="data-mgmt-panel">
+            <div className="data-mgmt-panel-header">Database</div>
+            <DatabasePanel
+              onError={msg => { setError(msg); setTimeout(() => setError(null), 8000); }}
+            />
+          </div>
+        </div>
+      )}
+
+      {appMode === 'manage' && error && (
+        <div style={{ position: 'fixed', bottom: 16, right: 16, zIndex: 9999 }}>
+          <div className="error-banner" style={{ maxWidth: 400 }}>{error}</div>
+        </div>
+      )}
+
+      </div>{/* app-body */}
     </div>
   );
 }
