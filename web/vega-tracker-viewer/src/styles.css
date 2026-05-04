@@ -34,8 +34,120 @@ html, body, #root {
 
 .app {
   display: flex;
+  flex-direction: column;
   height: 100vh;
   width: 100vw;
+}
+
+/* ---- Top navigation bar ---------------------------------------------- */
+
+.top-nav {
+  height: 48px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  gap: 24px;
+  z-index: 100;
+}
+
+.nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.nav-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.4px;
+}
+
+.nav-modes {
+  display: flex;
+  gap: 3px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 3px;
+}
+
+.nav-mode-btn {
+  font-size: 12px;
+  font-weight: 500;
+  padding: 5px 18px;
+  border-radius: 4px;
+  border: none !important;
+  background: transparent !important;
+  color: var(--muted);
+  letter-spacing: 0.3px;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.nav-mode-btn:hover {
+  background: var(--panel3) !important;
+  color: var(--text) !important;
+  border-color: transparent !important;
+}
+
+.nav-mode-btn.active {
+  background: rgba(0, 230, 118, 0.15) !important;
+  color: var(--accent) !important;
+  border-color: transparent !important;
+}
+
+.nav-meta {
+  margin-left: auto;
+  font-size: 11px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- App body (content area below top nav) ---------------------------- */
+
+.app-body {
+  flex: 1;
+  display: flex;
+  overflow: hidden;
+  min-height: 0;
+}
+
+/* ---- Data Management view --------------------------------------------- */
+
+.data-mgmt-view {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+}
+
+.data-mgmt-panel {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.data-mgmt-panel:last-child {
+  border-right: none;
+}
+
+.data-mgmt-panel-header {
+  padding: 14px 20px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--muted);
+  background: var(--panel2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
 
 /* ---- Sidebar ---------------------------------------------------------- */
