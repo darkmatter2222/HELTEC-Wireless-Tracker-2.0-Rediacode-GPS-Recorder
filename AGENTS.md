@@ -78,7 +78,7 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 │   ├── overnight_watch.py        # log-tailing watchdog with reconnect
 │   └── capture_boot.py           # trigger ESP32 reset via DTR/RTS and capture boot log
 ├── api/
-│   └── vega-tracker-ingest/      # FastAPI ingest service (Docker)
+│   └── vega-tracker-ingest/      # Radiological Map Ingest API — FastAPI service (Docker)
 │       ├── .env                  # real credentials — gitignored
 │       ├── .env.example          # template
 │       ├── tracker_ingest_api.py # main FastAPI app
@@ -88,7 +88,7 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 │       ├── requirements.txt
 │       └── client_sample.py
 └── web/
-    └── vega-tracker-viewer/      # React + Vite session map viewer (Docker/nginx)
+    └── vega-tracker-viewer/      # Radiological Map Viewer — React + Vite (Docker/nginx)
         ├── .env                  # real credentials — gitignored
         ├── .env.example          # template
         ├── src/                  # React source
@@ -110,8 +110,8 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 | Server IP             | 192.168.86.48                       |
 | SSH user              | darkmatter2222                      |
 | SSH key               | ~/.ssh/id_rsa                       |
-| API port              | 8030 (vega-tracker-ingest)          |
-| Viewer port           | 8031 (vega-tracker-viewer)          |
+| API port              | 8030 (Radiological Map Ingest)      |
+| Viewer port           | 8031 (Radiological Map Viewer)      |
 | MongoDB port          | 27017 (host-native, not in Docker)  |
 | MongoDB auth source   | admin                               |
 
@@ -277,7 +277,7 @@ Empty `WIFI_SSID` or `INGEST_URL` disables the Wi-Fi uploader silently.
 - Primary: SdFat on FSPI (GPIO 4-7)
 - Fallback: LittleFS (5.9 MB partition) — currently disabled
   (`cfg::SD_REQUIRED = true`), failure is a hard error on screen
-- CSV schema: `timestampMs,uSvPerHour,cps,latitude,longitude,deviceId`
+- CSV schema: `timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop`
 - Sessions are append-only; `removeSession()` refuses to delete active session
 - Serial log on start/stop: `[REC] START: id=...` / `[REC] STOP: id=... samples=N`
 
@@ -341,7 +341,9 @@ Heartbeat format (every 3 s):
 
 ---
 
-## Deploy API (vega-tracker-ingest)
+## Deploy Ingest API (vega-tracker-ingest)
+
+Branded: **Radiological Map Ingest API**. Docker container name is `vega-tracker-ingest` (server-side infrastructure name; not renamed to avoid orphaning running containers).
 
 ```powershell
 cd api\vega-tracker-ingest
@@ -364,14 +366,20 @@ ssh darkmatter2222@192.168.86.48 "curl -s http://localhost:8030/info"
 
 ### API Endpoints
 
-| Method | Path                     | Description |
-|--------|--------------------------|-------------|
-| GET    | /health                  | liveness + mongo ping |
-| GET    | /info                    | version, collection counts, sample rate |
-| GET    | /sessions                | list sessions (id, device, samples, first/last ts) |
-| GET    | /session/{id}            | session detail (up to 5000 samples) |
-| POST   | /ingest/csv              | upload one session CSV |
-| POST   | /admin/recompute-sessions | purge pre-2020 rows, recompute all session metadata |
+| Method | Path                       | Description |
+|--------|----------------------------|-------------|
+| GET    | /health                    | liveness + mongo ping |
+| GET    | /info                      | version, collection counts, sample rate |
+| GET    | /sessions                  | list sessions; `?include_deleted=true` to include soft-deleted |
+| GET    | /session/{id}              | session detail (up to 5000 samples) |
+| POST   | /ingest/csv                | upload one session CSV |
+| DELETE | /sessions/{id}             | **soft-delete** — sets `deletedAt`/`deletedBy`, not hard-deleted |
+| PATCH  | /sessions/{id}/restore     | restore a soft-deleted session |
+| POST   | /admin/purge/{id}          | permanent hard-delete; requires session already soft-deleted + `?confirm=PURGE_CONFIRMED` |
+| POST   | /admin/recompute-sessions  | purge pre-2020 rows, recompute all session metadata |
+| POST   | /admin/backup              | trigger full-db mongodump; `?source=cron\|manual` |
+| GET    | /admin/backups             | list backups with source/status/elapsed |
+| POST   | /admin/restore/{name}      | restore from a named backup (full mongorestore) |
 
 ### Ingest CSV Headers
 
@@ -411,6 +419,10 @@ curl -X POST http://192.168.86.48:8030/admin/recompute-sessions
 
 ## Deploy Web Viewer (vega-tracker-viewer)
 
+Branded: **Radiological Map Viewer**. Docker container name is `vega-tracker-viewer` (server-side infrastructure; not renamed to avoid orphaning running containers).
+
+Runtime config is injected at container start via `/docker-entrypoint.d/10-config.sh`, which patches `window.__APP_CONFIG__` in `config.js` with the live `API_BASE` value. The React app reads `window.__APP_CONFIG__.apiBase` (previously `window.__VEGA_CONFIG__` — renamed during rebrand).
+
 ```powershell
 cd web\vega-tracker-viewer
 .\deploy.ps1              # copy + build Docker image + start container
@@ -419,10 +431,25 @@ cd web\vega-tracker-viewer
 ```
 
 The React app is built inside the Docker image at build time (Vite build).
-`API_BASE` env var is injected at container runtime via `nginx.conf`
-substitution so the compiled JS references the right API URL.
+`API_BASE` env var is injected at container runtime via `nginx.conf` + `/docker-entrypoint.d/10-config.sh`,
+patching `public/config.js` so the compiled JS references the right API URL.
 
 Viewer URL: `http://192.168.86.48:8031/`
+
+### Viewer Features
+
+- **Map modes**: Track (colored polyline), Dots (circle markers), Heatmap (native canvas, no plugin), Arrows (bearing arrows + dot underlay)
+- **Map zoom**: `maxZoom=20`; each tile layer has its own `maxNativeZoom` (OSM=19, CartoDB=20, OpenTopoMap=17, Esri Satellite=18) so over-zoom scales gracefully
+- **Color channels**: Dose rate, CPS, Speed, Altitude, HDOP, Session index
+- **Per-mode display controls** (Display tab):
+  - Track: track width slider; optional dot overlay + dot opacity slider
+  - Dots: point radius slider
+  - Heatmap: no extra controls; uses native `L.circleMarker + L.canvas` renderer
+  - Arrows: arrow-every-N slider; dot opacity slider; optional track underlay + track opacity slider
+- **Soft-delete UI** (Manage tab → Delete/Restore tab): shows active + deleted sessions with toggle; Restore button; triple-confirm Purge
+- **Database panel** (DB tab): backup history with source/status badges; manual backup trigger; restore; DB stats
+- **Session timeline** scrubber + playback
+- **Tile layers**: OSM Streets, CartoDB Dark (default), OpenTopoMap, Satellite (Esri)
 
 ---
 
@@ -621,9 +648,35 @@ Otherwise, iterate to completion.
   backend on V1.2 hardware), the uploader falls back to the String path with a
   1 MB cap.
 
-### Wi-Fi Uploader Jitter
+### Soft-Delete System (API v0.4.0+)
 
-- Running `HTTPClient` on the Arduino loop core (core 1) caused BLE packet
-  jitter, dropping RadiaCode readings.
-  Fix: pin the uploader `xTaskCreatePinnedToCore` to core 0.
+- `DELETE /sessions/{id}` is a **soft-delete**: sets `deletedAt` timestamp and `deletedBy` field; data is preserved.
+- `GET /sessions` filters out soft-deleted sessions by default. Pass `?include_deleted=true` to see them.
+- `PATCH /sessions/{id}/restore` clears `deletedAt` — session reappears in all views.
+- `POST /admin/purge/{id}?confirm=PURGE_CONFIRMED` performs a permanent hard-delete. Requires the session to already be soft-deleted (two-step gate prevents accidental permanent deletion).
+- The viewer's Manage tab → Delete/Restore sub-tab has a "Show deleted" toggle, Restore buttons, and a triple-confirm Purge flow.
 
+### Automated Backups
+
+- Weekly cron schedule (`POST /admin/backup?source=cron`) via server cron job.
+- 5 rolling snapshots kept; oldest are pruned on each new backup.
+- Full-db scope: mongodump of the entire `radiacode` database.
+- Backup telemetry written to `tracker_backups` MongoDB collection with `source`, `status`, `elapsedSec`, `sizeBytes`.
+- DatabasePanel in the viewer shows backup history with source/status badges and allows manual trigger + restore.
+
+
+### Heatmap Plugin Removed
+
+- `leaflet.heat` plugin was kept in `package.json` but its canvas lifecycle did not integrate
+  cleanly with React's component mount/unmount cycle, producing invisible or stuck layers.
+  Replaced with native `L.circleMarker()` + `L.canvas()` renderer inside `HeatmapLayer`
+  React component. No plugin dependency needed; colors map to the same green→yellow→orange→red
+  gradient via `heatGradientColor()`. `leaflet.heat` import in `main.jsx` is now unused but
+  kept to avoid a missing-module build error until the dependency is removed in a future cleanup.
+
+### Runtime Config Global Rename
+
+- `window.__VEGA_CONFIG__` renamed to `window.__APP_CONFIG__` during the rebrand
+  (May 2026). Updated in `public/config.js`, `src/api.js`, and `dist/config.js`.
+  The nginx entrypoint script patches `config.js` at container start — no rebuild needed
+  to change `API_BASE`.

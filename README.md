@@ -12,8 +12,8 @@ with a GPS fix, writes to SD card, and auto-uploads to a self-hosted API when on
 |-----------|-----------|
 | `src/` | ESP32-S3 firmware (C++, PlatformIO) |
 | `scripts/` | Python dev-tools: serial console, data download, map plotting |
-| `api/vega-tracker-ingest/` | FastAPI ingest service + MongoDB (Docker) |
-| `web/vega-tracker-viewer/` | React session map viewer (Docker/nginx) |
+| `api/vega-tracker-ingest/` | Radiological Map Ingest API — FastAPI + MongoDB (Docker) |
+| `web/vega-tracker-viewer/` | Radiological Map Viewer — React/Leaflet session map (Docker/nginx) |
 
 ---
 
@@ -30,16 +30,21 @@ Heltec HTIT-Tracker V2
 - uploads over Wi-Fi when available
        | HTTP POST /ingest/csv
        v
-vega-tracker-ingest (FastAPI)    port 8030
+Radiological Map Ingest API (FastAPI)    port 8030
 - validates timestamps (reject pre-2020)
 - writes to MongoDB (radiacode DB)
+- soft-delete, restore, purge endpoints
+- weekly automated backups (5 rolling snapshots)
 - exposes session list + detail endpoints
        |
        v
-vega-tracker-viewer (React/nginx) port 8031
-- interactive session map (Leaflet)
-- dose rate heatmap, GPS track
-- session list with duration + sample count
+Radiological Map Viewer (React/nginx) port 8031
+- interactive session map (Leaflet, maxZoom 20)
+- Track / Dots / Heatmap / Arrows display modes
+- per-mode opacity and overlay controls
+- dose rate / CPS / speed / altitude / HDOP color channels
+- session soft-delete + restore + purge UI
+- database backup + restore panel
 ```
 
 ---
@@ -124,12 +129,13 @@ cp .env.example .env
 
 ## Firmware Version
 
-Current: **v0.2.0**
+Current: **v0.3.3**
 
-What changed in v0.2.0:
-- Double long-press required to stop recording (prevents accidental stops from vibration)
-- `[REC] START` / `[REC] STOP` serial log events
-- GPS UTC anchor logging
+What's in each version:
+- **v0.3.3** — heap logging per upload cycle; SdFat streaming fallback capped at 1 MB
+- **v0.3.2** — streaming HTTP upload (fixes silent truncation of large sessions)
+- **v0.3.0** — extended telemetry: `speedKph`, `bearingDeg`, `altitudeM`, `hdop` columns
+- **v0.2.0** — double long-press required to stop recording (prevents accidental stops from vibration)
 
 ---
 
@@ -149,9 +155,13 @@ What changed in v0.2.0:
 ## CSV Schema
 
 ```
-timestampMs,uSvPerHour,cps,latitude,longitude,deviceId
-1746114660123,0.142,12.0,47.6062,-122.3321,5243066020F4
+timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop
+1746114660123,0.142,12.0,47.6062,-122.3321,5243066020F4,48.23,267.3,12.4,1.20
 ```
+
+Columns 6–9 (`speedKph`, `bearingDeg`, `altitudeM`, `hdop`) are present in firmware v0.3.0+.
+They emit empty strings when disabled or unavailable; pre-v0.3.0 files have 6 columns.
+Bearing is derived from the last N GPS positions (forward-azimuth formula), not NMEA COG.
 
 ---
 
