@@ -37,21 +37,25 @@ const TILES = [
     name: 'OSM Streets',
     url: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
     attribution: '&copy; OpenStreetMap contributors',
+    maxNativeZoom: 19,
   },
   {
     name: 'CartoDB Dark',
     url: 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
     attribution: '&copy; OpenStreetMap contributors, &copy; CartoDB',
+    maxNativeZoom: 20,
   },
   {
     name: 'OpenTopoMap',
     url: 'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
     attribution: '&copy; OpenStreetMap contributors, &copy; OpenTopoMap',
+    maxNativeZoom: 17,
   },
   {
     name: 'Satellite (Esri)',
     url: 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
     attribution: '&copy; Esri World Imagery',
+    maxNativeZoom: 18,
   },
 ];
 
@@ -110,9 +114,10 @@ function HeatmapLayer({ points, field, doseMin, doseMax }) {
     if (L.heatLayer) {
       if (layerRef.current) map.removeLayer(layerRef.current);
       layerRef.current = L.heatLayer(heat, {
-        radius: 20,
-        blur: 18,
-        maxZoom: 17,
+        radius: 25,
+        blur: 20,
+        minOpacity: 0.2,
+        max: 1.0,
         gradient: { 0.0: '#00e676', 0.4: '#ffea00', 0.75: '#ff6d00', 1.0: '#d50000' },
       });
       layerRef.current.addTo(map);
@@ -710,11 +715,13 @@ export default function App() {
 
       {/* === MAP === */}
       <main className="map-pane">
-        <MapContainer center={[39.5, -98.35]} zoom={4} style={{ width: '100%', height: '100%' }}>
+        <MapContainer center={[39.5, -98.35]} zoom={4} maxZoom={20} style={{ width: '100%', height: '100%' }}>
           <TileLayer
             key={tile.url}
             attribution={tile.attribution}
             url={tile.url}
+            maxZoom={20}
+            maxNativeZoom={tile.maxNativeZoom ?? 19}
           />
           {fitBounds && <FitBoundsOnce bounds={fitBounds} dep={fitTrigger} />}
 
@@ -769,7 +776,7 @@ export default function App() {
                 return (
                   <React.Fragment key={i}>
                     <CircleMarker center={[p.lat, p.lng]} radius={pointRadius - 1}
-                      pathOptions={{ color: col, fillColor: col, fillOpacity: 0.7, weight: 1 }}>
+                      pathOptions={{ color: col, fillColor: col, fillOpacity: 0.12, weight: 0 }}>
                       {showTooltips && <SampleTooltip p={p} sessionId={t.id} nanoMode={nanoMode} />}
                     </CircleMarker>
                     {/* Arrow every N points, only when bearing is available */}
