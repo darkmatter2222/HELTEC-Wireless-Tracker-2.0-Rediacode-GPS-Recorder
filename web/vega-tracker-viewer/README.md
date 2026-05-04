@@ -1,6 +1,6 @@
-# Vega Tracker Viewer
+# Radiological Map Viewer
 
-Static React + Leaflet web UI for the Vega Tracker ingest API. Lets you
+Static React + Leaflet web UI for the Radiological Map ingest API. Lets you
 browse uploaded sessions on a map, scrub through time, color the trace
 by dose rate, and toggle multiple sessions simultaneously.
 

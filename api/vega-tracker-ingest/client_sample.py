@@ -1,4 +1,4 @@
-"""Smoke-test the Vega Tracker Ingest API.
+"""Smoke-test the Radiological Map Ingest API.
 
 Usage:
     python client_sample.py http://192.168.86.48:8030 path/to/session.csv
