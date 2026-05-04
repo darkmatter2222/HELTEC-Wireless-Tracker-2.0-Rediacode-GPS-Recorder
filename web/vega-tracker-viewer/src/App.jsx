@@ -92,40 +92,62 @@ function boundsKey(b) {
   return `${sw.lat.toFixed(4)},${sw.lng.toFixed(4)},${ne.lat.toFixed(4)},${ne.lng.toFixed(4)}`;
 }
 
-// Leaflet heatmap layer component. Uses leaflet.heat plugin if available;
-// falls back to dense CircleMarkers if the plugin didn't load.
-function HeatmapLayer({ points, field, doseMin, doseMax }) {
+// Maps t ∈ [0,1] → green (#00e676) → yellow (#ffea00) → orange (#ff6d00) → red (#d50000)
+function heatGradientColor(t) {
+  let r, g, b;
+  if (t < 0.4) {
+    const u = t / 0.4;
+    r = Math.round(u * 255);
+    g = Math.round(230 + u * 4);
+    b = Math.round(118 * (1 - u));
+  } else if (t < 0.75) {
+    const u = (t - 0.4) / 0.35;
+    r = 255;
+    g = Math.round(234 - u * 125);
+    b = 0;
+  } else {
+    const u = (t - 0.75) / 0.25;
+    r = Math.round(255 - u * 42);
+    g = Math.round(109 - u * 109);
+    b = 0;
+  }
+  return `rgb(${r},${g},${b})`;
+}
+
+// Heatmap layer rendered via native Leaflet Canvas — no external plugin required.
+function HeatmapLayer({ points, field }) {
   const map = useMap();
-  const layerRef = useRef(null);
+  const groupRef = useRef(null);
 
   useEffect(() => {
+    if (groupRef.current) { map.removeLayer(groupRef.current); groupRef.current = null; }
     if (!points || points.length === 0) return;
 
-    // Build intensity array: [lat, lng, intensity 0-1]
-    const vals = points.map(p => {
-      if (field === 'cps') return p.cps ?? 0;
-      if (field === 'speed') return p.spd ?? 0;
-      return p.uSv ?? 0;
-    });
+    const vals = points.map(p =>
+      field === 'cps' ? (p.cps ?? 0) : field === 'speed' ? (p.spd ?? 0) : (p.uSv ?? 0)
+    );
     const maxVal = Math.max(...vals, 1e-6);
+    const renderer = L.canvas({ padding: 0.5 });
+    const group = L.layerGroup();
 
-    const heat = points.map((p, i) => [p.lat, p.lng, vals[i] / maxVal]);
-
-    if (L.heatLayer) {
-      if (layerRef.current) map.removeLayer(layerRef.current);
-      layerRef.current = L.heatLayer(heat, {
-        radius: 25,
-        blur: 20,
-        minOpacity: 0.2,
-        max: 1.0,
-        gradient: { 0.0: '#00e676', 0.4: '#ffea00', 0.75: '#ff6d00', 1.0: '#d50000' },
-      });
-      layerRef.current.addTo(map);
+    for (let i = 0; i < points.length; i++) {
+      const p = points[i];
+      L.circleMarker([p.lat, p.lng], {
+        renderer,
+        radius: 20,
+        color: 'transparent',
+        fillColor: heatGradientColor(vals[i] / maxVal),
+        fillOpacity: 0.25,
+        weight: 0,
+      }).addTo(group);
     }
+
+    group.addTo(map);
+    groupRef.current = group;
     return () => {
-      if (layerRef.current) { map.removeLayer(layerRef.current); layerRef.current = null; }
+      if (groupRef.current) { map.removeLayer(groupRef.current); groupRef.current = null; }
     };
-  }, [points, field, doseMin, doseMax, map]);
+  }, [points, field, map]);
 
   return null;
 }
@@ -219,7 +241,12 @@ export default function App() {
   const [trackWeight, setTrackWeight]   = useState(4);
   const [pointRadius, setPointRadius]   = useState(5);
   const [showTooltips, setShowTooltips] = useState(true);
-  const [arrowEvery, setArrowEvery]     = useState(5);      // show 1-in-N arrows
+  const [arrowEvery, setArrowEvery]         = useState(5);    // show 1-in-N arrows
+  const [trackShowDots, setTrackShowDots]   = useState(false);
+  const [trackDotOpacity, setTrackDotOpacity] = useState(0.5);
+  const [arrowDotOpacity, setArrowDotOpacity] = useState(0.12);
+  const [arrowShowTrack, setArrowShowTrack] = useState(false);
+  const [arrowTrackOpacity, setArrowTrackOpacity] = useState(0.25);
 
   // Timeline
   const [timeFrac, setTimeFrac]     = useState(1.0);
@@ -634,12 +661,26 @@ export default function App() {
               <input type="checkbox" checked={showTooltips} onChange={e => setShowTooltips(e.target.checked)} />
               Show tooltips
             </label>
-            {(mapMode === 'Track') && (
-              <div className="slider-row">
-                <span>Track width {trackWeight}px</span>
-                <input type="range" min="1" max="10" value={trackWeight}
-                  onChange={e => setTrackWeight(Number(e.target.value))} />
-              </div>
+            {mapMode === 'Track' && (
+              <>
+                <div className="slider-row">
+                  <span>Track width {trackWeight}px</span>
+                  <input type="range" min="1" max="10" value={trackWeight}
+                    onChange={e => setTrackWeight(Number(e.target.value))} />
+                </div>
+                <label className="check">
+                  <input type="checkbox" checked={trackShowDots}
+                    onChange={e => setTrackShowDots(e.target.checked)} />
+                  Overlay dots on track
+                </label>
+                {trackShowDots && (
+                  <div className="slider-row">
+                    <span>Dot opacity {Math.round(trackDotOpacity * 100)}%</span>
+                    <input type="range" min="0.05" max="1" step="0.05" value={trackDotOpacity}
+                      onChange={e => setTrackDotOpacity(Number(e.target.value))} />
+                  </div>
+                )}
+              </>
             )}
             {(mapMode === 'Dots' || mapMode === 'Arrows') && (
               <div className="slider-row">
@@ -649,11 +690,30 @@ export default function App() {
               </div>
             )}
             {mapMode === 'Arrows' && (
-              <div className="slider-row">
-                <span>Arrow every {arrowEvery} pts</span>
-                <input type="range" min="1" max="20" value={arrowEvery}
-                  onChange={e => setArrowEvery(Number(e.target.value))} />
-              </div>
+              <>
+                <div className="slider-row">
+                  <span>Arrow every {arrowEvery} pts</span>
+                  <input type="range" min="1" max="20" value={arrowEvery}
+                    onChange={e => setArrowEvery(Number(e.target.value))} />
+                </div>
+                <div className="slider-row">
+                  <span>Dot opacity {Math.round(arrowDotOpacity * 100)}%</span>
+                  <input type="range" min="0" max="1" step="0.05" value={arrowDotOpacity}
+                    onChange={e => setArrowDotOpacity(Number(e.target.value))} />
+                </div>
+                <label className="check">
+                  <input type="checkbox" checked={arrowShowTrack}
+                    onChange={e => setArrowShowTrack(e.target.checked)} />
+                  Show track underlay
+                </label>
+                {arrowShowTrack && (
+                  <div className="slider-row">
+                    <span>Track opacity {Math.round(arrowTrackOpacity * 100)}%</span>
+                    <input type="range" min="0.05" max="1" step="0.05" value={arrowTrackOpacity}
+                      onChange={e => setArrowTrackOpacity(Number(e.target.value))} />
+                  </div>
+                )}
+              </>
             )}
           </div>
         )}
@@ -726,10 +786,11 @@ export default function App() {
           {fitBounds && <FitBoundsOnce bounds={fitBounds} dep={fitTrigger} />}
 
           {/* Heatmap mode */}
-          {mapMode === 'Heatmap' && filteredTraces.map(t => (
-            t.filtered.length > 0 &&
-            <HeatmapLayer key={t.id} points={t.filtered} field={colorChannel} doseMin={doseMin} doseMax={doseMax} />
-          ))}
+          {mapMode === 'Heatmap' && filteredTraces.map(t =>
+            t.filtered.length > 0
+              ? <HeatmapLayer key={t.id} points={t.filtered} field={colorChannel} />
+              : null
+          )}
 
           {/* Track mode */}
           {mapMode === 'Track' && filteredTraces.map(t => {
@@ -751,6 +812,21 @@ export default function App() {
             return <React.Fragment key={t.id}>{segs}</React.Fragment>;
           })}
 
+          {/* Track mode — optional dot overlay */}
+          {mapMode === 'Track' && trackShowDots && filteredTraces.map(t => (
+            <React.Fragment key={`${t.id}-tdots`}>
+              {t.filtered.map((p, i) => (
+                <CircleMarker key={i} center={[p.lat, p.lng]} radius={pointRadius}
+                  pathOptions={{
+                    color: 'transparent',
+                    fillColor: getColor(p, t.idx),
+                    fillOpacity: trackDotOpacity,
+                    weight: 0,
+                  }} />
+              ))}
+            </React.Fragment>
+          ))}
+
           {/* Dots mode */}
           {mapMode === 'Dots' && filteredTraces.map(t => (
             <React.Fragment key={t.id}>
@@ -768,6 +844,26 @@ export default function App() {
             </React.Fragment>
           ))}
 
+          {/* Arrows mode — optional track underlay */}
+          {mapMode === 'Arrows' && arrowShowTrack && filteredTraces.map(t => {
+            if (!t.filtered || t.filtered.length === 0) return null;
+            const segs = [];
+            for (let i = 1; i < t.filtered.length; i++) {
+              const a = t.filtered[i - 1], b = t.filtered[i];
+              segs.push(
+                <Polyline key={`${t.id}-${i}`}
+                  positions={[[a.lat, a.lng], [b.lat, b.lng]]}
+                  pathOptions={{
+                    color: getColor(b, t.idx),
+                    weight: trackWeight,
+                    opacity: arrowTrackOpacity,
+                  }}
+                />
+              );
+            }
+            return <React.Fragment key={`${t.id}-atrack`}>{segs}</React.Fragment>;
+          })}
+
           {/* Arrows mode — shows dot + bearing arrow */}
           {mapMode === 'Arrows' && filteredTraces.map(t => (
             <React.Fragment key={t.id}>
@@ -776,7 +872,7 @@ export default function App() {
                 return (
                   <React.Fragment key={i}>
                     <CircleMarker center={[p.lat, p.lng]} radius={pointRadius - 1}
-                      pathOptions={{ color: col, fillColor: col, fillOpacity: 0.12, weight: 0 }}>
+                      pathOptions={{ color: col, fillColor: col, fillOpacity: arrowDotOpacity, weight: 0 }}>
                       {showTooltips && <SampleTooltip p={p} sessionId={t.id} nanoMode={nanoMode} />}
                     </CircleMarker>
                     {/* Arrow every N points, only when bearing is available */}
