@@ -21,7 +21,7 @@ import { useRef, useEffect } from 'react';
 const CANVAS_W = 400;
 const CANVAS_H = 10;
 const GRADIENT_STEPS = 40;   // color-stop resolution for full-bar gradient
-const DIM_ALPHA = 0.18;       // opacity of the out-of-range overlay
+const DIM_ALPHA = 0.62;       // how much gradient shows through in out-of-range zones
 
 // Draw the full-spectrum gradient across the whole bar, then darken the
 // regions outside [lowPct, highPct] so the active zone is clearly lit.
@@ -42,9 +42,9 @@ function drawGradient(canvas, colorFn, lowPct, highPct) {
   const x0 = (lowPct  / 100) * W;
   const x1 = (highPct / 100) * W;
 
-  // 2. Dark overlay on the out-of-range zones
+  // 2. Dark overlay on the out-of-range zones — DIM_ALPHA controls how much gradient shows through
   ctx.fillStyle = '#0a0c0f';   // same as --bg
-  ctx.globalAlpha = 1 - DIM_ALPHA;
+  ctx.globalAlpha = 1 - DIM_ALPHA;  // low alpha = barely dimmed; high alpha = nearly black
   if (x0 > 0)    ctx.fillRect(0,  0, x0,     H);
   if (x1 < W)    ctx.fillRect(x1, 0, W - x1, H);
   ctx.globalAlpha = 1;
