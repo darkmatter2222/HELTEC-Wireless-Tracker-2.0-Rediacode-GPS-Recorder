@@ -61,7 +61,7 @@
   border-radius: 5px;
   overflow: hidden;   /* clips canvas to rounded corners */
   background: var(--panel3);
-  border: 1px solid var(--border2);
+  box-shadow: inset 0 0 0 1px var(--border2);  /* inset shadow = border without shrinking content box */
   margin: 0 8px;
   user-select: none;
   cursor: default;

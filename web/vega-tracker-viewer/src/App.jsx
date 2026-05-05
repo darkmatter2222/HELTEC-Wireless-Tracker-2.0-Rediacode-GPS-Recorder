@@ -128,18 +128,17 @@ function HeatmapLayer({ points, field }) {
       field === 'cps' ? (p.cps ?? 0) : field === 'speed' ? (p.spd ?? 0) : (p.uSv ?? 0)
     );
     const maxVal = Math.max(...vals, 1e-6);
-    const renderer = L.canvas({ padding: 0.5 });
     const group = L.layerGroup();
 
     for (let i = 0; i < points.length; i++) {
       const p = points[i];
       L.circleMarker([p.lat, p.lng], {
-        renderer,
-        radius: 20,
+        radius: 22,
         color: 'transparent',
         fillColor: heatGradientColor(vals[i] / maxVal),
-        fillOpacity: 0.25,
+        fillOpacity: 0.65,
         weight: 0,
+        interactive: false,
       }).addTo(group);
     }
 
