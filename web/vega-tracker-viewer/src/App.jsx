@@ -115,10 +115,10 @@ function heatGradientColor(t) {
   return `rgb(${r},${g},${b})`;
 }
 
-// True weather-forecast-style heatmap: Gaussian kernel blobs rendered on a
-// canvas overlay layer that follows the map during pan/zoom.
-// Each point is projected from lat/lng to container pixels on every redraw,
-// so blobs maintain correct geographic size regardless of zoom or pan.
+// True weather-forecast-style heatmap: Gaussian radial-gradient blobs drawn
+// on a plain <canvas> appended to the map container div.  Avoids L.Layer.extend
+// which is unreliable in Vite/ESM builds.  Redraws on every move/zoom so blobs
+// always track their geographic position.
 function HeatmapLayer({ points, field }) {
   const map = useMap();
 
@@ -129,58 +129,44 @@ function HeatmapLayer({ points, field }) {
       field === 'cps' ? (p.cps ?? 0) : field === 'speed' ? (p.spd ?? 0) : (p.uSv ?? 0)
     );
     const maxVal = Math.max(...vals, 1e-6);
-
-    // Extract channel-specific "rgb,g,b" strings once so _draw stays cheap
+    // Pre-extract "r,g,b" strings so the inner draw loop is cheap
     const rgbs = vals.map(v => heatGradientColor(v / maxVal).slice(4, -1));
 
-    const HeatLayer = L.Layer.extend({
-      onAdd(m) {
-        this._map = m;
-        const canvas = L.DomUtil.create('canvas');
-        canvas.style.cssText = 'position:absolute;pointer-events:none;';
-        m.getPane('overlayPane').appendChild(canvas);
-        this._canvas = canvas;
-        m.on('moveend zoomend viewreset', this._draw, this);
-        this._draw();
-      },
-      onRemove(m) {
-        m.off('moveend zoomend viewreset', this._draw, this);
-        L.DomUtil.remove(this._canvas);
-      },
-      _draw() {
-        const m = this._map;
-        const canvas = this._canvas;
-        const size = m.getSize();
-        canvas.width = size.x;
-        canvas.height = size.y;
-        // Align canvas with the layer coordinate system so panning is seamless
-        L.DomUtil.setPosition(canvas, m.containerPointToLayerPoint([0, 0]));
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText =
+      'position:absolute;top:0;left:0;pointer-events:none;z-index:400;';
+    map.getContainer().appendChild(canvas);
 
-        const ctx = canvas.getContext('2d');
-        ctx.clearRect(0, 0, size.x, size.y);
+    function draw() {
+      const size = map.getSize();
+      // Setting .width resets the canvas; no need for clearRect
+      canvas.width  = size.x;
+      canvas.height = size.y;
+      const ctx = canvas.getContext('2d');
+      const RADIUS = Math.max(12, 28 * Math.pow(1.65, map.getZoom() - 14));
 
-        // Gaussian-kernel radius scales with zoom so geographic coverage is stable
-        const RADIUS = Math.max(15, 30 * Math.pow(1.6, m.getZoom() - 14));
+      for (let i = 0; i < points.length; i++) {
+        const p = points[i];
+        const px = map.latLngToContainerPoint([p.lat, p.lng]);
+        const rgb = rgbs[i];
+        const grd = ctx.createRadialGradient(px.x, px.y, 0, px.x, px.y, RADIUS);
+        grd.addColorStop(0,    `rgba(${rgb},0.9)`);
+        grd.addColorStop(0.4,  `rgba(${rgb},0.55)`);
+        grd.addColorStop(1,    `rgba(${rgb},0)`);
+        ctx.fillStyle = grd;
+        ctx.beginPath();
+        ctx.arc(px.x, px.y, RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
 
-        for (let i = 0; i < points.length; i++) {
-          const p = points[i];
-          const px = m.latLngToContainerPoint([p.lat, p.lng]);
-          const rgb = rgbs[i];
-          const grd = ctx.createRadialGradient(px.x, px.y, 0, px.x, px.y, RADIUS);
-          grd.addColorStop(0,    `rgba(${rgb},0.9)`);
-          grd.addColorStop(0.45, `rgba(${rgb},0.55)`);
-          grd.addColorStop(1,    `rgba(${rgb},0)`);
-          ctx.fillStyle = grd;
-          ctx.beginPath();
-          ctx.arc(px.x, px.y, RADIUS, 0, Math.PI * 2);
-          ctx.fill();
-        }
-      },
-    });
+    map.on('move zoom viewreset', draw);
+    draw();
 
-    const layer = new HeatLayer();
-    layer.addTo(map);
-    return () => { map.removeLayer(layer); };
+    return () => {
+      map.off('move zoom viewreset', draw);
+      canvas.remove();
+    };
   }, [points, field, map]);
 
   return null;
