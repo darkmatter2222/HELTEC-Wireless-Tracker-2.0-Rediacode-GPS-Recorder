@@ -236,6 +236,11 @@ export default function App() {
   const [spdMin,  setSpdMin]    = useState(0);    const [spdMax,  setSpdMax]    = useState(80);    const [spdManual,  setSpdManual]    = useState(false);
   const [altMin,  setAltMin]    = useState(0);    const [altMax,  setAltMax]    = useState(500);   const [altManual,  setAltManual]    = useState(false);
   const [hdopMin, setHdopMin]   = useState(0);    const [hdopMax, setHdopMax]   = useState(5);     const [hdopManual, setHdopManual]   = useState(false);
+  // stable track bounds for sliders — derived from raw data, never from the scale handles
+  const [doseDataMax, setDoseDataMax] = useState(2.0);
+  const [cpsDataMax,  setCpsDataMax]  = useState(100);
+  const [spdDataMax,  setSpdDataMax]  = useState(120);
+  const [altDataMax,  setAltDataMax]  = useState(1000);
   // legacy alias kept for existing references
   const doseScaleManual = doseManual;
   const setDoseScaleManual = setDoseManual;
@@ -426,6 +431,23 @@ export default function App() {
     if (!spdManual)  autoScaleChannel('spd',  false, setSpdMin,  setSpdMax,  1);
     if (!altManual)  autoScaleChannel('alt',  false, setAltMin,  setAltMax,  0);
     if (!hdopManual) autoScaleChannel('hdop', false, setHdopMin, setHdopMax, 2);
+    // always update stable track bounds from raw data max
+    const rawMax = (field, fallback) => {
+      let m = fallback;
+      for (const id of selected) {
+        const rows = rowsBySession[id];
+        if (!rows) continue;
+        for (const r of rows) {
+          const v = r[field];
+          if (typeof v === 'number' && isFinite(v) && v > m) m = v;
+        }
+      }
+      return m;
+    };
+    setDoseDataMax(Math.max(rawMax('uSv',  0) * 1.2, 2));
+    setCpsDataMax (Math.max(rawMax('cps',  0) * 1.2, 10));
+    setSpdDataMax (Math.max(rawMax('spd',  0) * 1.2, 20));
+    setAltDataMax (Math.max(rawMax('alt',  0) * 1.2, 100));
   }, [rowsBySession, selected, doseManual, cpsManual, spdManual, altManual, hdopManual]); // eslint-disable-line
 
   // ---- play
@@ -655,7 +677,7 @@ export default function App() {
 
             {(colorChannel === 'dose') && (
               <DualRangeSlider
-                lo={0} hi={Math.max(doseMax * 1.5, 2)}
+                lo={0} hi={doseDataMax}
                 low={doseMin} high={doseMax}
                 onLowChange={v  => { setDoseManual(true); setDoseMin(parseFloat(v.toFixed(3))); }}
                 onHighChange={v => { setDoseManual(true); setDoseMax(parseFloat(v.toFixed(3))); }}
@@ -667,7 +689,7 @@ export default function App() {
             )}
             {colorChannel === 'cps' && (
               <DualRangeSlider
-                lo={0} hi={Math.max(cpsMax * 1.5, 10)}
+                lo={0} hi={cpsDataMax}
                 low={cpsMin} high={cpsMax}
                 onLowChange={v  => { setCpsManual(true); setCpsMin(parseFloat(v.toFixed(1))); }}
                 onHighChange={v => { setCpsManual(true); setCpsMax(parseFloat(v.toFixed(1))); }}
@@ -679,7 +701,7 @@ export default function App() {
             )}
             {colorChannel === 'speed' && (
               <DualRangeSlider
-                lo={0} hi={Math.max(spdMax * 1.5, 20)}
+                lo={0} hi={spdDataMax}
                 low={spdMin} high={spdMax}
                 onLowChange={v  => { setSpdManual(true); setSpdMin(parseFloat(v.toFixed(1))); }}
                 onHighChange={v => { setSpdManual(true); setSpdMax(parseFloat(v.toFixed(1))); }}
@@ -691,7 +713,7 @@ export default function App() {
             )}
             {colorChannel === 'alt' && (
               <DualRangeSlider
-                lo={-500} hi={Math.max(altMax * 1.5, 100)}
+                lo={0} hi={altDataMax}
                 low={altMin} high={altMax}
                 onLowChange={v  => { setAltManual(true); setAltMin(parseFloat(v.toFixed(0))); }}
                 onHighChange={v => { setAltManual(true); setAltMax(parseFloat(v.toFixed(0))); }}
