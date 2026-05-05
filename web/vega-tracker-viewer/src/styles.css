@@ -21,6 +21,81 @@
   font-size: 13px;
 }
 
+/* ---- Dual Range Slider ------------------------------------------------- */
+
+.drs-wrap {
+  padding: 10px 14px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.drs-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.drs-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+}
+
+.drs-values {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.drs-val {
+  font-family: "Fira Mono", monospace;
+  font-size: 11px;
+  color: var(--accent);
+}
+
+/* Outer track shell */
+.drs-track {
+  position: relative;
+  height: 10px;
+  border-radius: 5px;
+  overflow: hidden;   /* clips canvas to rounded corners */
+  background: var(--panel3);
+  border: 1px solid var(--border2);
+  margin: 0 8px;
+  user-select: none;
+  cursor: default;
+}
+
+/* Canvas fills the track exactly, rendering the gradient preview */
+.drs-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+  pointer-events: none;
+}
+
+/* Draggable handle pill */
+.drs-handle {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 22px;
+  transform: translate(-50%, -50%);
+  background: var(--panel2);
+  border: 2px solid var(--accent);
+  border-radius: 5px;
+  cursor: ew-resize;
+  z-index: 10;
+  transition: border-color 0.1s, box-shadow 0.1s;
+}
+.drs-handle:hover { border-color: #fff; box-shadow: 0 0 6px var(--accent); }
+.drs-handle.dragging { border-color: #fff; box-shadow: 0 0 8px var(--accent); }
+
+
+
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
 html, body, #root {

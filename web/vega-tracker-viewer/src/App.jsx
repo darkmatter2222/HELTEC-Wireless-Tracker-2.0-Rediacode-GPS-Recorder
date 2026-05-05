@@ -13,6 +13,7 @@ import { SparkChart } from './SparkChart.jsx';
 import { ManagePanel } from './ManagePanel.jsx';
 import { TimelineView } from './TimelineView.jsx';
 import { DatabasePanel } from './DatabasePanel.jsx';
+import { DualRangeSlider } from './DualRangeSlider.jsx';
 
 // ---- constants -------------------------------------------------------------
 
@@ -168,14 +169,14 @@ function arrowIcon(bearing, color, size = 20) {
   });
 }
 
-function getPointColor(p, channel, idx, doseMin, doseMax) {
+function getPointColor(p, channel, idx, ranges) {
   switch (channel) {
-    case 'cps':     return cpsColor(p.cps, 0, 50);
-    case 'speed':   return speedColor(p.spd, 0, 80);
-    case 'alt':     return altColor(p.alt, 0, 500);
-    case 'hdop':    return hdopColor(p.hdop, 0, 5);
+    case 'cps':     return cpsColor(p.cps,  ranges.cpsMin,  ranges.cpsMax);
+    case 'speed':   return speedColor(p.spd, ranges.spdMin,  ranges.spdMax);
+    case 'alt':     return altColor(p.alt,   ranges.altMin,  ranges.altMax);
+    case 'hdop':    return hdopColor(p.hdop, ranges.hdopMin, ranges.hdopMax);
     case 'session': return sessionColor(idx);
-    default:        return doseColor(p.uSv, doseMin, doseMax);
+    default:        return doseColor(p.uSv,  ranges.doseMin, ranges.doseMax);
   }
 }
 
@@ -229,9 +230,20 @@ export default function App() {
   const [error, setError]         = useState(null);
   const [rowsBySession, setRows]  = useState({});
   const [selected, setSelected]   = useState(new Set());
-  const [doseMin, setDoseMin]     = useState(0);
-  const [doseMax, setDoseMax]     = useState(1.0);
-  const [doseScaleManual, setDoseScaleManual] = useState(false);
+  // Per-channel [lo, hi] scale state + manual-override flags
+  const [doseMin, setDoseMin]   = useState(0);    const [doseMax, setDoseMax]   = useState(1.0);   const [doseManual, setDoseManual]   = useState(false);
+  const [cpsMin,  setCpsMin]    = useState(0);    const [cpsMax,  setCpsMax]    = useState(50);    const [cpsManual,  setCpsManual]    = useState(false);
+  const [spdMin,  setSpdMin]    = useState(0);    const [spdMax,  setSpdMax]    = useState(80);    const [spdManual,  setSpdManual]    = useState(false);
+  const [altMin,  setAltMin]    = useState(0);    const [altMax,  setAltMax]    = useState(500);   const [altManual,  setAltManual]    = useState(false);
+  const [hdopMin, setHdopMin]   = useState(0);    const [hdopMax, setHdopMax]   = useState(5);     const [hdopManual, setHdopManual]   = useState(false);
+  // stable track bounds for sliders — derived from raw data, never from the scale handles
+  const [doseDataMax, setDoseDataMax] = useState(2.0);
+  const [cpsDataMax,  setCpsDataMax]  = useState(100);
+  const [spdDataMax,  setSpdDataMax]  = useState(120);
+  const [altDataMax,  setAltDataMax]  = useState(1000);
+  // legacy alias kept for existing references
+  const doseScaleManual = doseManual;
+  const setDoseScaleManual = setDoseManual;
 
   // Map / display mode
   const [mapMode, setMapMode]         = useState('Track');  // Track | Dots | Heatmap | Arrows
@@ -393,25 +405,50 @@ export default function App() {
     setFitTrigger(t => t + 1);
   }, [fitKey]);
 
-  // ---- auto-scale dose color
-  useEffect(() => {
-    if (doseScaleManual) return;
+  // ---- auto-scale all color channels from loaded data
+  function autoScaleChannel(field, manualFlag, setLo, setHi, decimals = 2) {
     const vals = [];
     for (const id of selected) {
       const rows = rowsBySession[id];
       if (!rows) continue;
       for (const r of rows) {
-        if (typeof r.uSv === 'number' && isFinite(r.uSv)) vals.push(r.uSv);
+        const v = r[field];
+        if (typeof v === 'number' && isFinite(v)) vals.push(v);
       }
     }
     if (vals.length < 2) return;
     vals.sort((a, b) => a - b);
-    const lo = vals[Math.floor(vals.length * 0.05)];
-    const hi = vals[Math.floor(vals.length * 0.95)];
+    const lo = vals[Math.floor(vals.length * 0.02)];
+    const hi = vals[Math.floor(vals.length * 0.98)];
     if (!(hi > lo)) return;
-    setDoseMin(parseFloat(lo.toFixed(3)));
-    setDoseMax(parseFloat(hi.toFixed(3)));
-  }, [rowsBySession, selected, doseScaleManual]);
+    setLo(parseFloat(lo.toFixed(decimals)));
+    setHi(parseFloat(hi.toFixed(decimals)));
+  }
+
+  useEffect(() => {
+    if (!doseManual) autoScaleChannel('uSv',  false, setDoseMin, setDoseMax, 3);
+    if (!cpsManual)  autoScaleChannel('cps',  false, setCpsMin,  setCpsMax,  1);
+    if (!spdManual)  autoScaleChannel('spd',  false, setSpdMin,  setSpdMax,  1);
+    if (!altManual)  autoScaleChannel('alt',  false, setAltMin,  setAltMax,  0);
+    if (!hdopManual) autoScaleChannel('hdop', false, setHdopMin, setHdopMax, 2);
+    // always update stable track bounds from raw data max
+    const rawMax = (field, fallback) => {
+      let m = fallback;
+      for (const id of selected) {
+        const rows = rowsBySession[id];
+        if (!rows) continue;
+        for (const r of rows) {
+          const v = r[field];
+          if (typeof v === 'number' && isFinite(v) && v > m) m = v;
+        }
+      }
+      return m;
+    };
+    setDoseDataMax(Math.max(rawMax('uSv',  0) * 1.2, 2));
+    setCpsDataMax (Math.max(rawMax('cps',  0) * 1.2, 10));
+    setSpdDataMax (Math.max(rawMax('spd',  0) * 1.2, 20));
+    setAltDataMax (Math.max(rawMax('alt',  0) * 1.2, 100));
+  }, [rowsBySession, selected, doseManual, cpsManual, spdManual, altManual, hdopManual]); // eslint-disable-line
 
   // ---- play
   useEffect(() => {
@@ -503,8 +540,9 @@ export default function App() {
   const tile = TILES[tileIdx];
 
   // ---- color fn shortcut
+  const ranges = { doseMin, doseMax, cpsMin, cpsMax, spdMin, spdMax, altMin, altMax, hdopMin, hdopMax };
   function getColor(p, traceIdx) {
-    return getPointColor(p, colorChannel, traceIdx, doseMin, doseMax);
+    return getPointColor(p, colorChannel, traceIdx, ranges);
   }
 
   // ---- render ------------------------------------------------------------
@@ -638,29 +676,64 @@ export default function App() {
             </div>
 
             {(colorChannel === 'dose') && (
-              <>
-                <SectionHead>Dose scale ({nanoMode ? 'nSv/h' : 'µSv/h'})</SectionHead>
-                <div className="number-row">
-                  <label>min
-                    <input type="number" step="0.001" value={doseMin}
-                      onChange={e => { setDoseScaleManual(true); setDoseMin(parseFloat(e.target.value) || 0); }} />
-                  </label>
-                  <label>max
-                    <input type="number" step="0.001" value={doseMax}
-                      onChange={e => { setDoseScaleManual(true); setDoseMax(parseFloat(e.target.value) || 0.001); }} />
-                  </label>
-                  <button onClick={() => setDoseScaleManual(false)} title="Reset to auto">↺</button>
-                </div>
-                <div className="legend-bar">
-                  {[0,0.25,0.5,0.75,1].map(t => (
-                    <span key={t} style={{ background: doseColor(doseMin + (doseMax - doseMin) * t, doseMin, doseMax) }} />
-                  ))}
-                </div>
-                <div className="legend-labels">
-                  <span>{nanoMode ? (doseMin * 1000).toFixed(0) + ' nSv/h' : doseMin.toFixed(3)}</span>
-                  <span>{nanoMode ? (doseMax * 1000).toFixed(0) + ' nSv/h' : doseMax.toFixed(3)}</span>
-                </div>
-              </>
+              <DualRangeSlider
+                lo={0} hi={doseDataMax}
+                low={doseMin} high={doseMax}
+                onLowChange={v  => { setDoseManual(true); setDoseMin(parseFloat(v.toFixed(3))); }}
+                onHighChange={v => { setDoseManual(true); setDoseMax(parseFloat(v.toFixed(3))); }}
+                colorFn={t => doseColor(t, 0, 1)}
+                label={`Dose rate scale (${nanoMode ? 'nSv/h' : 'µSv/h'})`}
+                fmtVal={v => nanoMode ? (v * 1000).toFixed(0) + ' nSv/h' : v.toFixed(3) + ' µSv/h'}
+                onAuto={() => setDoseManual(false)}
+              />
+            )}
+            {colorChannel === 'cps' && (
+              <DualRangeSlider
+                lo={0} hi={cpsDataMax}
+                low={cpsMin} high={cpsMax}
+                onLowChange={v  => { setCpsManual(true); setCpsMin(parseFloat(v.toFixed(1))); }}
+                onHighChange={v => { setCpsManual(true); setCpsMax(parseFloat(v.toFixed(1))); }}
+                colorFn={t => cpsColor(t, 0, 1)}
+                label="CPS scale"
+                fmtVal={v => v.toFixed(0) + ' cps'}
+                onAuto={() => setCpsManual(false)}
+              />
+            )}
+            {colorChannel === 'speed' && (
+              <DualRangeSlider
+                lo={0} hi={spdDataMax}
+                low={spdMin} high={spdMax}
+                onLowChange={v  => { setSpdManual(true); setSpdMin(parseFloat(v.toFixed(1))); }}
+                onHighChange={v => { setSpdManual(true); setSpdMax(parseFloat(v.toFixed(1))); }}
+                colorFn={t => speedColor(t, 0, 1)}
+                label="Speed scale (km/h)"
+                fmtVal={v => v.toFixed(0) + ' km/h'}
+                onAuto={() => setSpdManual(false)}
+              />
+            )}
+            {colorChannel === 'alt' && (
+              <DualRangeSlider
+                lo={0} hi={altDataMax}
+                low={altMin} high={altMax}
+                onLowChange={v  => { setAltManual(true); setAltMin(parseFloat(v.toFixed(0))); }}
+                onHighChange={v => { setAltManual(true); setAltMax(parseFloat(v.toFixed(0))); }}
+                colorFn={t => altColor(t, 0, 1)}
+                label="Altitude scale (m)"
+                fmtVal={v => v.toFixed(0) + ' m'}
+                onAuto={() => setAltManual(false)}
+              />
+            )}
+            {colorChannel === 'hdop' && (
+              <DualRangeSlider
+                lo={0} hi={10}
+                low={hdopMin} high={hdopMax}
+                onLowChange={v  => { setHdopManual(true); setHdopMin(parseFloat(v.toFixed(2))); }}
+                onHighChange={v => { setHdopManual(true); setHdopMax(parseFloat(v.toFixed(2))); }}
+                colorFn={t => hdopColor(t, 0, 1)}
+                label="HDOP scale"
+                fmtVal={v => v.toFixed(1)}
+                onAuto={() => setHdopManual(false)}
+              />
             )}
 
             <SectionHead>Map Tiles</SectionHead>
