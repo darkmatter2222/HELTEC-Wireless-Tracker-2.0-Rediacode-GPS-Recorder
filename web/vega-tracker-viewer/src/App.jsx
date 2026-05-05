@@ -132,7 +132,7 @@ function HexLayer({ points, field }) {
     const S3    = Math.sqrt(3);
 
     const canvas = document.createElement('canvas');
-    canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:400;';
+    canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:400;background:transparent;';
     map.getContainer().appendChild(canvas);
 
     let bins    = new Map();
@@ -177,6 +177,8 @@ function HexLayer({ points, field }) {
       canvas.height = size.y;
       const ctx    = canvas.getContext('2d');
       const W      = size.x, H = size.y;
+      // Explicit clear guards against GPU compositing leaving stale pixels
+      ctx.clearRect(0, 0, W, H);
 
       // Top-left corner of the viewport in global pixel space
       const origin = map.project(map.getBounds().getNorthWest(), zoom);
@@ -205,8 +207,9 @@ function HexLayer({ points, field }) {
         const t     = Math.min(1, (b.sum / b.count) / maxAvg);
         const color = heatGradientColor(t);
 
-        // Draw at 88% of bin radius so gaps between hexes expose the map
-        const DR = HEX_R * 0.88;
+        // Draw at 70% of bin radius — covers ~49% of pixel area, leaving
+        // ~51% transparent so map tiles are clearly readable underneath.
+        const DR = HEX_R * 0.70;
 
         // Draw flat-top hexagon (vertex 0 at angle 0° = right)
         ctx.beginPath();
@@ -217,11 +220,11 @@ function HexLayer({ points, field }) {
           i === 0 ? ctx.moveTo(vx, vy) : ctx.lineTo(vx, vy);
         }
         ctx.closePath();
-        ctx.globalAlpha = 0.75;
+        ctx.globalAlpha = 0.72;
         ctx.fillStyle = color;
         ctx.fill();
         ctx.globalAlpha = 1;
-        ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+        ctx.strokeStyle = 'rgba(255,255,255,0.18)';
         ctx.lineWidth   = 0.8;
         ctx.stroke();
 
