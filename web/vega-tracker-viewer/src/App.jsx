@@ -115,38 +115,72 @@ function heatGradientColor(t) {
   return `rgb(${r},${g},${b})`;
 }
 
-// Heatmap layer rendered via native Leaflet Canvas — no external plugin required.
+// True weather-forecast-style heatmap: Gaussian kernel blobs rendered on a
+// canvas overlay layer that follows the map during pan/zoom.
+// Each point is projected from lat/lng to container pixels on every redraw,
+// so blobs maintain correct geographic size regardless of zoom or pan.
 function HeatmapLayer({ points, field }) {
   const map = useMap();
-  const groupRef = useRef(null);
 
   useEffect(() => {
-    if (groupRef.current) { map.removeLayer(groupRef.current); groupRef.current = null; }
     if (!points || points.length === 0) return;
 
     const vals = points.map(p =>
       field === 'cps' ? (p.cps ?? 0) : field === 'speed' ? (p.spd ?? 0) : (p.uSv ?? 0)
     );
     const maxVal = Math.max(...vals, 1e-6);
-    const group = L.layerGroup();
 
-    for (let i = 0; i < points.length; i++) {
-      const p = points[i];
-      L.circleMarker([p.lat, p.lng], {
-        radius: 22,
-        color: 'transparent',
-        fillColor: heatGradientColor(vals[i] / maxVal),
-        fillOpacity: 0.65,
-        weight: 0,
-        interactive: false,
-      }).addTo(group);
-    }
+    // Extract channel-specific "rgb,g,b" strings once so _draw stays cheap
+    const rgbs = vals.map(v => heatGradientColor(v / maxVal).slice(4, -1));
 
-    group.addTo(map);
-    groupRef.current = group;
-    return () => {
-      if (groupRef.current) { map.removeLayer(groupRef.current); groupRef.current = null; }
-    };
+    const HeatLayer = L.Layer.extend({
+      onAdd(m) {
+        this._map = m;
+        const canvas = L.DomUtil.create('canvas');
+        canvas.style.cssText = 'position:absolute;pointer-events:none;';
+        m.getPane('overlayPane').appendChild(canvas);
+        this._canvas = canvas;
+        m.on('moveend zoomend viewreset', this._draw, this);
+        this._draw();
+      },
+      onRemove(m) {
+        m.off('moveend zoomend viewreset', this._draw, this);
+        L.DomUtil.remove(this._canvas);
+      },
+      _draw() {
+        const m = this._map;
+        const canvas = this._canvas;
+        const size = m.getSize();
+        canvas.width = size.x;
+        canvas.height = size.y;
+        // Align canvas with the layer coordinate system so panning is seamless
+        L.DomUtil.setPosition(canvas, m.containerPointToLayerPoint([0, 0]));
+
+        const ctx = canvas.getContext('2d');
+        ctx.clearRect(0, 0, size.x, size.y);
+
+        // Gaussian-kernel radius scales with zoom so geographic coverage is stable
+        const RADIUS = Math.max(15, 30 * Math.pow(1.6, m.getZoom() - 14));
+
+        for (let i = 0; i < points.length; i++) {
+          const p = points[i];
+          const px = m.latLngToContainerPoint([p.lat, p.lng]);
+          const rgb = rgbs[i];
+          const grd = ctx.createRadialGradient(px.x, px.y, 0, px.x, px.y, RADIUS);
+          grd.addColorStop(0,    `rgba(${rgb},0.9)`);
+          grd.addColorStop(0.45, `rgba(${rgb},0.55)`);
+          grd.addColorStop(1,    `rgba(${rgb},0)`);
+          ctx.fillStyle = grd;
+          ctx.beginPath();
+          ctx.arc(px.x, px.y, RADIUS, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      },
+    });
+
+    const layer = new HeatLayer();
+    layer.addTo(map);
+    return () => { map.removeLayer(layer); };
   }, [points, field, map]);
 
   return null;

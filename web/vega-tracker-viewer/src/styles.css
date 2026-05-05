@@ -59,23 +59,29 @@
   position: relative;
   height: 10px;
   border-radius: 5px;
-  overflow: hidden;   /* clips canvas to rounded corners */
+  overflow: hidden;   /* clips gradient div and dim overlays to pill shape */
   background: var(--panel3);
-  box-shadow: inset 0 0 0 1px var(--border2);  /* inset shadow = border without shrinking content box */
+  box-shadow: inset 0 0 0 1px var(--border2);
   margin: 0 8px;
   user-select: none;
   cursor: default;
 }
 
-/* Canvas fills the track exactly, rendering the gradient preview */
-.drs-canvas {
+/* CSS gradient div — fills the track exactly, no canvas border-radius clipping */
+.drs-gradient {
   position: absolute;
   inset: 0;
-  width: 100%;
-  height: 100%;
-  display: block;
-  pointer-events: none;
 }
+
+/* Out-of-range dim overlay halves */
+.drs-dim {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: #0a0c0f;
+}
+.drs-dim-lo { left: 0; }
+.drs-dim-hi { right: 0; }
 
 /* Draggable handle pill */
 .drs-handle {

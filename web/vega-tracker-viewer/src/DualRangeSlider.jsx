@@ -2,8 +2,11 @@
  * DualRangeSlider
  *
  * Gradient bar with two independent draggable handles.
- * Uses refs for all mutable values so the document-level drag handler
- * always reads current state — no stale-closure invisible walls.
+ *
+ * Uses a CSS linear-gradient background (not a canvas) so the gradient
+ * fills perfectly to the rounded corners of the track with no clipping.
+ * Uses refs for all mutable values so document-level drag handlers
+ * always read current state — no stale-closure invisible walls.
  *
  * Props:
  *   lo / hi         — absolute track bounds (numbers)
@@ -16,38 +19,18 @@
  *   onAuto          — optional callback for the reset-to-auto button
  */
 
-import { useRef, useEffect } from 'react';
+import { useRef } from 'react';
 
-const CANVAS_W = 400;
-const CANVAS_H = 10;
-const GRADIENT_STEPS = 40;   // color-stop resolution for full-bar gradient
+const GRADIENT_STEPS = 24;
 const DIM_ALPHA = 0.62;       // how much gradient shows through in out-of-range zones
 
-// Draw the full-spectrum gradient across the whole bar, then darken the
-// regions outside [lowPct, highPct] so the active zone is clearly lit.
-function drawGradient(canvas, colorFn, lowPct, highPct) {
-  const ctx = canvas.getContext('2d');
-  const W = canvas.width;
-  const H = canvas.height;
-  ctx.clearRect(0, 0, W, H);
-
-  // 1. Full gradient, wall to wall
-  const grd = ctx.createLinearGradient(0, 0, W, 0);
+function buildGradientCSS(colorFn) {
+  const stops = [];
   for (let i = 0; i <= GRADIENT_STEPS; i++) {
-    grd.addColorStop(i / GRADIENT_STEPS, colorFn(i / GRADIENT_STEPS));
+    const t = i / GRADIENT_STEPS;
+    stops.push(`${colorFn(t)} ${(t * 100).toFixed(1)}%`);
   }
-  ctx.fillStyle = grd;
-  ctx.fillRect(0, 0, W, H);
-
-  const x0 = (lowPct  / 100) * W;
-  const x1 = (highPct / 100) * W;
-
-  // 2. Dark overlay on the out-of-range zones — DIM_ALPHA controls how much gradient shows through
-  ctx.fillStyle = '#0a0c0f';   // same as --bg
-  ctx.globalAlpha = 1 - DIM_ALPHA;  // low alpha = barely dimmed; high alpha = nearly black
-  if (x0 > 0)    ctx.fillRect(0,  0, x0,     H);
-  if (x1 < W)    ctx.fillRect(x1, 0, W - x1, H);
-  ctx.globalAlpha = 1;
+  return `linear-gradient(to right, ${stops.join(', ')})`;
 }
 
 export function DualRangeSlider({
@@ -59,42 +42,35 @@ export function DualRangeSlider({
   fmtVal = v => v.toFixed(2),
   onAuto,
 }) {
-  const trackRef  = useRef(null);
-  const canvasRef = useRef(null);
+  const trackRef = useRef(null);
 
   // --- Live refs -----------------------------------------------------------
   // Updated every render so document listeners always see current values.
-  const loRef         = useRef(lo);
-  const hiRef         = useRef(hi);
-  const lowRef        = useRef(low);
-  const highRef       = useRef(high);
-  const onLowRef      = useRef(onLowChange);
-  const onHighRef     = useRef(onHighChange);
-  const colorFnRef    = useRef(colorFn);
+  const loRef       = useRef(lo);
+  const hiRef       = useRef(hi);
+  const lowRef      = useRef(low);
+  const highRef     = useRef(high);
+  const onLowRef    = useRef(onLowChange);
+  const onHighRef   = useRef(onHighChange);
 
-  loRef.current      = lo;
-  hiRef.current      = hi;
-  lowRef.current     = low;
-  highRef.current    = high;
-  onLowRef.current   = onLowChange;
-  onHighRef.current  = onHighChange;
-  colorFnRef.current = colorFn;
+  loRef.current     = lo;
+  hiRef.current     = hi;
+  lowRef.current    = low;
+  highRef.current   = high;
+  onLowRef.current  = onLowChange;
+  onHighRef.current = onHighChange;
   // -------------------------------------------------------------------------
 
-  const span    = Math.max(1e-9, hi - lo);
-  const lowPct  = ((low  - lo) / span) * 100;
-  const highPct = ((high - lo) / span) * 100;
+  const span       = Math.max(1e-9, hi - lo);
+  const lowPct     = ((low  - lo) / span) * 100;
+  const highPct    = ((high - lo) / span) * 100;
+  const dimHiWidth = 100 - highPct;
 
-  // Redraw canvas on every render (cheap — just canvas 2d operations)
-  useEffect(() => {
-    if (canvasRef.current) {
-      drawGradient(canvasRef.current, colorFn, lowPct, highPct);
-    }
-  });
+  // CSS gradient fills within the rounded container — no canvas clipping issue
+  const gradientCSS = buildGradientCSS(colorFn);
+  const dimOpacity  = (1 - DIM_ALPHA).toFixed(2);
 
   // --- Drag logic ----------------------------------------------------------
-  // makeDragStart returns a mousedown handler.
-  // onMove reads ONLY from refs — never from the closure snapshot.
   function makeDragStart(which) {
     return function onMouseDown(e) {
       e.preventDefault();
@@ -157,12 +133,20 @@ export function DualRangeSlider({
       </div>
 
       <div className="drs-track" ref={trackRef}>
-        <canvas
-          ref={canvasRef}
-          className="drs-canvas"
-          width={CANVAS_W}
-          height={CANVAS_H}
-        />
+        {/* CSS gradient fills exactly to the rounded corners — no canvas/clip issues */}
+        <div className="drs-gradient" style={{ background: gradientCSS }} />
+
+        {/* Dark overlay on left out-of-range zone */}
+        {lowPct > 0 && (
+          <div className="drs-dim drs-dim-lo"
+            style={{ width: `${lowPct}%`, opacity: dimOpacity }} />
+        )}
+        {/* Dark overlay on right out-of-range zone */}
+        {dimHiWidth > 0 && (
+          <div className="drs-dim drs-dim-hi"
+            style={{ width: `${dimHiWidth}%`, opacity: dimOpacity }} />
+        )}
+
         {/* Low handle */}
         <div
           className="drs-handle"
