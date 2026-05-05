@@ -207,9 +207,9 @@ function HexLayer({ points, field }) {
         const t     = Math.min(1, (b.sum / b.count) / maxAvg);
         const color = heatGradientColor(t);
 
-        // Draw at 70% of bin radius — covers ~49% of pixel area, leaving
-        // ~51% transparent so map tiles are clearly readable underneath.
-        const DR = HEX_R * 0.70;
+        // Draw at 60% of bin radius — covers ~36% of pixel area, leaving
+        // ~64% transparent so map tiles are clearly readable underneath.
+        const DR = HEX_R * 0.60;
 
         // Draw flat-top hexagon (vertex 0 at angle 0° = right)
         ctx.beginPath();
@@ -220,11 +220,11 @@ function HexLayer({ points, field }) {
           i === 0 ? ctx.moveTo(vx, vy) : ctx.lineTo(vx, vy);
         }
         ctx.closePath();
-        ctx.globalAlpha = 0.72;
+        ctx.globalAlpha = 0.55;
         ctx.fillStyle = color;
         ctx.fill();
         ctx.globalAlpha = 1;
-        ctx.strokeStyle = 'rgba(255,255,255,0.18)';
+        ctx.strokeStyle = 'rgba(255,255,255,0.25)';
         ctx.lineWidth   = 0.8;
         ctx.stroke();
 
