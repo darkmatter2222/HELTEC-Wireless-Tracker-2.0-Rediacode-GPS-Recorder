@@ -205,28 +205,31 @@ function HexLayer({ points, field }) {
         const t     = Math.min(1, (b.sum / b.count) / maxAvg);
         const color = heatGradientColor(t);
 
+        // Draw at 88% of bin radius so gaps between hexes expose the map
+        const DR = HEX_R * 0.88;
+
         // Draw flat-top hexagon (vertex 0 at angle 0° = right)
         ctx.beginPath();
         for (let i = 0; i < 6; i++) {
           const a  = (Math.PI / 3) * i;
-          const vx = cx + HEX_R * Math.cos(a);
-          const vy = cy + HEX_R * Math.sin(a);
+          const vx = cx + DR * Math.cos(a);
+          const vy = cy + DR * Math.sin(a);
           i === 0 ? ctx.moveTo(vx, vy) : ctx.lineTo(vx, vy);
         }
         ctx.closePath();
-        ctx.globalAlpha = 0.78;
+        ctx.globalAlpha = 0.75;
         ctx.fillStyle = color;
         ctx.fill();
         ctx.globalAlpha = 1;
-        ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+        ctx.strokeStyle = 'rgba(0,0,0,0.4)';
         ctx.lineWidth   = 0.8;
         ctx.stroke();
 
         // Inset count label — only when hex is large enough to be legible
-        if (b.count > 1 && HEX_R >= 20) {
+        if (b.count > 1 && DR >= 18) {
           ctx.globalAlpha  = 0.9;
           ctx.fillStyle    = '#fff';
-          ctx.font         = `bold ${Math.max(9, Math.round(HEX_R * 0.36))}px sans-serif`;
+          ctx.font         = `bold ${Math.max(9, Math.round(DR * 0.36))}px sans-serif`;
           ctx.textAlign    = 'center';
           ctx.textBaseline = 'middle';
           ctx.fillText(b.count > 9999 ? '9k+' : String(b.count), cx, cy);
