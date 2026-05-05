@@ -20,7 +20,7 @@ import { DualRangeSlider } from './DualRangeSlider.jsx';
 const MIN_VALID_TS_MS = 1577836800000; // 2020-01-01 UTC
 
 // Map display modes
-const MAP_MODES = ['Track', 'Dots', 'Heatmap', 'Arrows'];
+const MAP_MODES = ['Track', 'Dots', 'Hex', 'Arrows'];
 
 // Color channel options
 const COLOR_CHANNELS = [
@@ -115,51 +115,127 @@ function heatGradientColor(t) {
   return `rgb(${r},${g},${b})`;
 }
 
-// True weather-forecast-style heatmap: Gaussian radial-gradient blobs drawn
-// on a plain <canvas> appended to the map container div.  Avoids L.Layer.extend
-// which is unreliable in Vite/ESM builds.  Redraws on every move/zoom so blobs
-// always track their geographic position.
-function HeatmapLayer({ points, field }) {
+// Hexagonal binning layer: points are aggregated into a flat-top hex grid
+// defined in global Leaflet pixel coordinates.  Bins are recomputed on zoom
+// change (geography changes per cell); on pan the existing bins are just
+// redrawn at the new viewport offset — no per-point work needed during pan.
+// Hex size is fixed in pixels (HEX_R) so geographic coverage scales naturally
+// with zoom: zooming in reveals smaller geographic cells, zooming out merges
+// many points into fewer coarse cells.  Ideal for millions of data points.
+function HexLayer({ points, field }) {
   const map = useMap();
 
   useEffect(() => {
     if (!points || points.length === 0) return;
 
-    const vals = points.map(p =>
-      field === 'cps' ? (p.cps ?? 0) : field === 'speed' ? (p.spd ?? 0) : (p.uSv ?? 0)
-    );
-    const maxVal = Math.max(...vals, 1e-6);
-    // Pre-extract "r,g,b" strings so the inner draw loop is cheap
-    const rgbs = vals.map(v => heatGradientColor(v / maxVal).slice(4, -1));
+    const HEX_R = 36;          // circumradius in pixels — flat-top orientation
+    const S3    = Math.sqrt(3);
 
     const canvas = document.createElement('canvas');
-    canvas.style.cssText =
-      'position:absolute;top:0;left:0;pointer-events:none;z-index:400;';
+    canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:400;';
     map.getContainer().appendChild(canvas);
 
-    function draw() {
-      const size = map.getSize();
-      // Setting .width resets the canvas; no need for clearRect
-      canvas.width  = size.x;
-      canvas.height = size.y;
-      const ctx = canvas.getContext('2d');
-      const RADIUS = Math.max(12, 28 * Math.pow(1.65, map.getZoom() - 14));
+    let bins    = new Map();
+    let lastZoom = -1;
 
-      for (let i = 0; i < points.length; i++) {
-        const p = points[i];
-        const px = map.latLngToContainerPoint([p.lat, p.lng]);
-        const rgb = rgbs[i];
-        const grd = ctx.createRadialGradient(px.x, px.y, 0, px.x, px.y, RADIUS);
-        grd.addColorStop(0,    `rgba(${rgb},0.9)`);
-        grd.addColorStop(0.4,  `rgba(${rgb},0.55)`);
-        grd.addColorStop(1,    `rgba(${rgb},0)`);
-        ctx.fillStyle = grd;
-        ctx.beginPath();
-        ctx.arc(px.x, px.y, RADIUS, 0, Math.PI * 2);
-        ctx.fill();
+    // Recompute which hex each point falls into at the current zoom level.
+    // Uses map.project() for global (pan-independent) pixel coordinates.
+    function rebin(zoom) {
+      lastZoom = zoom;
+      bins = new Map();
+      for (const p of points) {
+        const gp  = map.project([p.lat, p.lng], zoom);
+        // Flat-top hex: pixel (x, y) → fractional axial coords (q_f, r_f)
+        const q_f = ( 2 / 3 * gp.x) / HEX_R;
+        const r_f = (-1 / 3 * gp.x + S3 / 3 * gp.y) / HEX_R;
+        const s_f = -q_f - r_f;
+        // Cube-coordinate rounding
+        let q = Math.round(q_f), r = Math.round(r_f), s = Math.round(s_f);
+        const dq = Math.abs(q - q_f), dr = Math.abs(r - r_f), ds = Math.abs(s - s_f);
+        if      (dq > dr && dq > ds) q = -r - s;
+        else if (dr > ds)            r = -q - s;
+        const val = field === 'cps'   ? (p.cps ?? 0)
+                  : field === 'speed' ? (p.spd ?? 0)
+                  :                     (p.uSv ?? 0);
+        const key = `${q},${r}`;
+        if (bins.has(key)) {
+          const b = bins.get(key);
+          b.sum += val;
+          b.count++;
+        } else {
+          bins.set(key, { q, r, sum: val, count: 1 });
+        }
       }
     }
 
+    function draw() {
+      const zoom = map.getZoom();
+      if (zoom !== lastZoom) rebin(zoom);
+
+      const size   = map.getSize();
+      canvas.width  = size.x;
+      canvas.height = size.y;
+      const ctx    = canvas.getContext('2d');
+      const W      = size.x, H = size.y;
+
+      // Top-left corner of the viewport in global pixel space
+      const origin = map.project(map.getBounds().getNorthWest(), zoom);
+      const ox = origin.x, oy = origin.y;
+
+      // Normalise against the max average of the currently VISIBLE hexes
+      // so colour contrast is always high regardless of absolute values.
+      let maxAvg = 1e-9;
+      for (const b of bins.values()) {
+        const cx = HEX_R * 1.5 * b.q - ox;
+        const cy = HEX_R * S3 * (b.r + b.q / 2) - oy;
+        if (cx > -HEX_R * 2 && cx < W + HEX_R * 2 &&
+            cy > -HEX_R * 2 && cy < H + HEX_R * 2) {
+          const avg = b.sum / b.count;
+          if (avg > maxAvg) maxAvg = avg;
+        }
+      }
+
+      for (const b of bins.values()) {
+        // Hex centre in screen-pixel space for the current viewport
+        const cx = HEX_R * 1.5 * b.q - ox;
+        const cy = HEX_R * S3 * (b.r + b.q / 2) - oy;
+        if (cx < -HEX_R * 2 || cx > W + HEX_R * 2 ||
+            cy < -HEX_R * 2 || cy > H + HEX_R * 2) continue;
+
+        const t     = Math.min(1, (b.sum / b.count) / maxAvg);
+        const color = heatGradientColor(t);
+
+        // Draw flat-top hexagon (vertex 0 at angle 0° = right)
+        ctx.beginPath();
+        for (let i = 0; i < 6; i++) {
+          const a  = (Math.PI / 3) * i;
+          const vx = cx + HEX_R * Math.cos(a);
+          const vy = cy + HEX_R * Math.sin(a);
+          i === 0 ? ctx.moveTo(vx, vy) : ctx.lineTo(vx, vy);
+        }
+        ctx.closePath();
+        ctx.globalAlpha = 0.78;
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+        ctx.lineWidth   = 0.8;
+        ctx.stroke();
+
+        // Inset count label — only when hex is large enough to be legible
+        if (b.count > 1 && HEX_R >= 20) {
+          ctx.globalAlpha  = 0.9;
+          ctx.fillStyle    = '#fff';
+          ctx.font         = `bold ${Math.max(9, Math.round(HEX_R * 0.36))}px sans-serif`;
+          ctx.textAlign    = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(b.count > 9999 ? '9k+' : String(b.count), cx, cy);
+          ctx.globalAlpha  = 1;
+        }
+      }
+    }
+
+    rebin(map.getZoom());
     map.on('move zoom viewreset', draw);
     draw();
 
@@ -265,7 +341,7 @@ export default function App() {
   const setDoseScaleManual = setDoseManual;
 
   // Map / display mode
-  const [mapMode, setMapMode]         = useState('Track');  // Track | Dots | Heatmap | Arrows
+  const [mapMode, setMapMode]         = useState('Track');  // Track | Dots | Hex | Arrows
   const [colorChannel, setColorChannel] = useState('dose'); // dose | cps | speed | alt | hdop | session
   const [nanoMode, setNanoMode]         = useState(false);
   const [tileIdx, setTileIdx]           = useState(1);       // default CartoDB Dark
@@ -879,10 +955,10 @@ export default function App() {
           />
           {fitBounds && <FitBoundsOnce bounds={fitBounds} dep={fitTrigger} />}
 
-          {/* Heatmap mode */}
-          {mapMode === 'Heatmap' && filteredTraces.map(t =>
+          {/* Hex binning mode */}
+          {mapMode === 'Hex' && filteredTraces.map(t =>
             t.filtered.length > 0
-              ? <HeatmapLayer key={t.id} points={t.filtered} field={colorChannel} />
+              ? <HexLayer key={t.id} points={t.filtered} field={colorChannel} />
               : null
           )}
 
