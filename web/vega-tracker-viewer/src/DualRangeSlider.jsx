@@ -1,30 +1,61 @@
-// DualRangeSlider — a single gradient bar with two draggable handles.
-// Shows the channel color gradient between the handles; solid endpoint
-// color outside each handle ("clamping" the gradient at the edges).
-//
-// Props:
-//   lo        — absolute minimum value for the track
-//   hi        — absolute maximum value for the track
-//   low       — current left-handle value
-//   high      — current right-handle value
-//   onLowChange(v)  — called while dragging left handle
-//   onHighChange(v) — called while dragging right handle
-//   colorFn(t)      — maps t ∈ [0,1] → CSS color string (the gradient preview)
-//   label           — channel label shown above the slider
-//   fmtVal(v)       — formats a numeric value for display (optional)
-//   autoLabel       — label for the reset-to-auto button
+﻿/**
+ * DualRangeSlider
+ *
+ * A gradient bar with two independent draggable handles.
+ *
+ * Props:
+ *   lo / hi         — absolute track bounds
+ *   low / high      — current handle values (lo <= low < high <= hi)
+ *   onLowChange(v)  — fired while dragging the left handle
+ *   onHighChange(v) — fired while dragging the right handle
+ *   colorFn(t)      — t in [0,1] maps to a CSS color string for the gradient preview
+ *   label           — text shown above the slider
+ *   fmtVal(v)       — formats a value for display (default: 2 decimals)
+ *   onAuto          — optional callback for the reset-to-auto button
+ */
 
-import { useRef, useCallback } from 'react';
+import { useRef, useEffect } from 'react';
 
-const HANDLE_W = 12; // px half-width of each handle for offset math
-const STEPS = 200;   // gradient preview resolution
+const CANVAS_W = 300;
+const CANVAS_H = 10;
 
-function buildGradient(colorFn) {
-  const stops = [];
-  for (let i = 0; i <= STEPS; i++) {
-    stops.push(colorFn(i / STEPS));
+function drawGradient(canvas, colorFn, lowPct, highPct) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width;
+  const H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  const x0 = (lowPct  / 100) * W;
+  const x1 = (highPct / 100) * W;
+
+  // Left dimmed zone
+  if (x0 > 0) {
+    ctx.globalAlpha = 0.25;
+    ctx.fillStyle = colorFn(0);
+    ctx.fillRect(0, 0, x0, H);
   }
-  return `linear-gradient(to right, ${stops.join(', ')})`;
+
+  // Active gradient zone
+  ctx.globalAlpha = 1;
+  if (x1 > x0) {
+    const grd = ctx.createLinearGradient(x0, 0, x1, 0);
+    const STEPS = 24;
+    for (let i = 0; i <= STEPS; i++) {
+      const t = i / STEPS;
+      const globalT = (lowPct + t * (highPct - lowPct)) / 100;
+      grd.addColorStop(t, colorFn(globalT));
+    }
+    ctx.fillStyle = grd;
+    ctx.fillRect(x0, 0, x1 - x0, H);
+  }
+
+  // Right dimmed zone
+  if (x1 < W) {
+    ctx.globalAlpha = 0.25;
+    ctx.fillStyle = colorFn(1);
+    ctx.fillRect(x1, 0, W - x1, H);
+  }
+  ctx.globalAlpha = 1;
 }
 
 export function DualRangeSlider({
@@ -35,102 +66,97 @@ export function DualRangeSlider({
   label,
   fmtVal = v => v.toFixed(2),
   onAuto,
-  autoLabel = '↺ Auto',
 }) {
-  const trackRef = useRef(null);
+  const trackRef  = useRef(null);
+  const canvasRef = useRef(null);
 
-  // Converts a pixel x position inside the track to a value in [lo, hi]
-  function pxToVal(clientX) {
-    const rect = trackRef.current.getBoundingClientRect();
-    const t = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    return lo + t * (hi - lo);
-  }
+  const span    = Math.max(1e-9, hi - lo);
+  const lowPct  = ((low  - lo) / span) * 100;
+  const highPct = ((high - lo) / span) * 100;
 
-  // Drag handler factory
-  const startDrag = useCallback((which) => (e) => {
-    e.preventDefault();
-    const isTouch = e.type === 'touchstart';
-
-    function getX(ev) {
-      return isTouch ? ev.touches[0].clientX : ev.clientX;
+  useEffect(() => {
+    if (canvasRef.current) {
+      drawGradient(canvasRef.current, colorFn, lowPct, highPct);
     }
+  });
 
-    function onMove(ev) {
-      const val = pxToVal(getX(ev));
-      if (which === 'low') {
-        onLowChange(Math.min(val, high - (hi - lo) * 0.001));
-      } else {
-        onHighChange(Math.max(val, low + (hi - lo) * 0.001));
+  function makeDragStart(which) {
+    return function onMouseDown(e) {
+      e.preventDefault();
+      e.stopPropagation();
+
+      const track = trackRef.current;
+
+      function pxToVal(clientX) {
+        const rect = track.getBoundingClientRect();
+        const t = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+        return lo + t * (hi - lo);
       }
-    }
-    function onUp() {
-      document.removeEventListener('mousemove', onMove);
-      document.removeEventListener('mouseup', onUp);
-      document.removeEventListener('touchmove', onMove);
-      document.removeEventListener('touchend', onUp);
-    }
-    document.addEventListener('mousemove', onMove);
-    document.addEventListener('mouseup', onUp);
-    document.addEventListener('touchmove', onMove, { passive: false });
-    document.addEventListener('touchend', onUp);
-  }, [lo, hi, low, high, onLowChange, onHighChange]); // eslint-disable-line
 
-  // Handle positions as % of track width
-  const lowPct  = ((low  - lo) / Math.max(1e-9, hi - lo)) * 100;
-  const highPct = ((high - lo) / Math.max(1e-9, hi - lo)) * 100;
+      function onMove(ev) {
+        const val = pxToVal(ev.clientX);
+        if (which === 'low') {
+          onLowChange(Math.min(val, high - span * 0.001));
+        } else {
+          onHighChange(Math.max(val, low + span * 0.001));
+        }
+      }
 
-  // Solid color at the endpoints
-  const colorLow  = colorFn(0);
-  const colorHigh = colorFn(1);
-  const gradient  = buildGradient(colorFn);
+      function onUp() {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        e.target.classList.remove('dragging');
+      }
+
+      e.target.classList.add('dragging');
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    };
+  }
 
   return (
     <div className="drs-wrap">
-      <div className="drs-label-row">
+      <div className="drs-header">
         <span className="drs-label">{label}</span>
         {onAuto && (
-          <button className="btn-sm drs-auto-btn" onClick={onAuto} title="Reset to auto-scale">
-            {autoLabel}
+          <button
+            className="btn-sm"
+            onClick={onAuto}
+            style={{
+              fontSize: '10px',
+              padding: '1px 7px',
+              color: 'var(--accent2)',
+              borderColor: 'var(--accent2)',
+              background: 'transparent',
+            }}
+          >
+            ↺ Auto
           </button>
         )}
       </div>
-      <div className="drs-values-row">
+
+      <div className="drs-values">
         <span className="drs-val">{fmtVal(low)}</span>
-        <span className="drs-val drs-val-right">{fmtVal(high)}</span>
+        <span className="drs-val">{fmtVal(high)}</span>
       </div>
 
-      {/* Track */}
-      <div className="drs-track-outer" ref={trackRef}>
-        {/* Left solid zone */}
-        <div className="drs-zone drs-zone-left"
-          style={{ width: `${lowPct}%`, background: colorLow }} />
-
-        {/* Gradient zone between handles */}
-        <div className="drs-zone drs-zone-mid"
-          style={{
-            left: `${lowPct}%`,
-            width: `${highPct - lowPct}%`,
-            background: gradient,
-            backgroundSize: `${100 / Math.max(0.001, (highPct - lowPct) / 100)}% 100%`,
-          }} />
-
-        {/* Right solid zone */}
-        <div className="drs-zone drs-zone-right"
-          style={{ left: `${highPct}%`, width: `${100 - highPct}%`, background: colorHigh }} />
-
-        {/* Left handle */}
-        <div className="drs-handle drs-handle-low"
+      <div className="drs-track" ref={trackRef}>
+        <canvas
+          ref={canvasRef}
+          className="drs-canvas"
+          width={CANVAS_W}
+          height={CANVAS_H}
+        />
+        <div
+          className="drs-handle"
           style={{ left: `${lowPct}%` }}
-          onMouseDown={startDrag('low')}
-          onTouchStart={startDrag('low')}
+          onMouseDown={makeDragStart('low')}
           title={fmtVal(low)}
         />
-
-        {/* Right handle */}
-        <div className="drs-handle drs-handle-high"
+        <div
+          className="drs-handle"
           style={{ left: `${highPct}%` }}
-          onMouseDown={startDrag('high')}
-          onTouchStart={startDrag('high')}
+          onMouseDown={makeDragStart('high')}
           title={fmtVal(high)}
         />
       </div>
