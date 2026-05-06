@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
   MapContainer, TileLayer, Polyline, CircleMarker,
-  Tooltip, useMap, Marker,
+  Tooltip, useMap, useMapEvents, Marker,
 } from 'react-leaflet';
 import L from 'leaflet';
 import { fetchSessions, fetchSessionRows } from './api.js';
@@ -20,7 +20,7 @@ import { DualRangeSlider } from './DualRangeSlider.jsx';
 const MIN_VALID_TS_MS = 1577836800000; // 2020-01-01 UTC
 
 // Map display modes
-const MAP_MODES = ['Track', 'Dots', 'Heatmap', 'Arrows'];
+const MAP_MODES = ['Track', 'Dots', 'Hex', 'Arrows'];
 
 // Color channel options
 const COLOR_CHANNELS = [
@@ -115,40 +115,130 @@ function heatGradientColor(t) {
   return `rgb(${r},${g},${b})`;
 }
 
-// Heatmap layer rendered via native Leaflet Canvas — no external plugin required.
-function HeatmapLayer({ points, field }) {
+// Syncs hexBinZoom state to map zoom when auto-follow is enabled.
+// Must be rendered inside MapContainer.
+function MapZoomSync({ onZoomChange }) {
+  useMapEvents({ zoom: (e) => onZoomChange(e.target.getZoom()) });
+  return null;
+}
+
+// Hexagonal binning layer.
+// binZoom controls the geographic resolution of bins — independent of the
+// current map view zoom.  Higher binZoom = finer bins (more, smaller hexes).
+// Lower binZoom = coarser bins (fewer, bigger hexes covering more area).
+// The pixel scale factor 2^(mapZoom-binZoom) converts bin pixel coords from
+// binZoom space to the current screen space on every draw, so geography is
+// always correct regardless of the zoom mismatch.
+function HexLayer({ points, field, binZoom }) {
   const map = useMap();
-  const groupRef = useRef(null);
 
   useEffect(() => {
-    if (groupRef.current) { map.removeLayer(groupRef.current); groupRef.current = null; }
     if (!points || points.length === 0) return;
 
-    const vals = points.map(p =>
-      field === 'cps' ? (p.cps ?? 0) : field === 'speed' ? (p.spd ?? 0) : (p.uSv ?? 0)
-    );
-    const maxVal = Math.max(...vals, 1e-6);
-    const renderer = L.canvas({ padding: 0.5 });
-    const group = L.layerGroup();
+    const HEX_R = 36;          // circumradius in pixels at binZoom — flat-top
+    const S3    = Math.sqrt(3);
 
-    for (let i = 0; i < points.length; i++) {
-      const p = points[i];
-      L.circleMarker([p.lat, p.lng], {
-        renderer,
-        radius: 20,
-        color: 'transparent',
-        fillColor: heatGradientColor(vals[i] / maxVal),
-        fillOpacity: 0.25,
-        weight: 0,
-      }).addTo(group);
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:400;background:transparent;';
+    map.getContainer().appendChild(canvas);
+
+    // Bin all points at binZoom resolution once per effect run.
+    // Rebinning is cheap here; it only triggers when binZoom/points/field change.
+    const bins = new Map();
+    for (const p of points) {
+      const gp  = map.project([p.lat, p.lng], binZoom);
+      const q_f = ( 2 / 3 * gp.x) / HEX_R;
+      const r_f = (-1 / 3 * gp.x + S3 / 3 * gp.y) / HEX_R;
+      const s_f = -q_f - r_f;
+      let q = Math.round(q_f), r = Math.round(r_f), s = Math.round(s_f);
+      const dq = Math.abs(q - q_f), dr = Math.abs(r - r_f), ds = Math.abs(s - s_f);
+      if      (dq > dr && dq > ds) q = -r - s;
+      else if (dr > ds)            r = -q - s;
+      const val = field === 'cps'   ? (p.cps ?? 0)
+                : field === 'speed' ? (p.spd ?? 0)
+                :                     (p.uSv ?? 0);
+      const key = `${q},${r}`;
+      if (bins.has(key)) { const b = bins.get(key); b.sum += val; b.count++; }
+      else bins.set(key, { q, r, sum: val, count: 1 });
     }
 
-    group.addTo(map);
-    groupRef.current = group;
+    function draw() {
+      const mapZoom = map.getZoom();
+      // Scale bin pixel coords from binZoom space → current mapZoom screen space.
+      // scale > 1: zoomed in past binZoom → hexes appear larger on screen.
+      // scale < 1: zoomed out past binZoom → hexes appear smaller (denser).
+      const scale  = Math.pow(2, mapZoom - binZoom);
+      const visR   = HEX_R * scale;   // visual circumradius in screen pixels
+
+      const size   = map.getSize();
+      canvas.width  = size.x;
+      canvas.height = size.y;
+      const ctx    = canvas.getContext('2d');
+      const W      = size.x, H = size.y;
+      ctx.clearRect(0, 0, W, H);
+
+      // NW corner of viewport in global pixel space at current mapZoom
+      const origin = map.project(map.getBounds().getNorthWest(), mapZoom);
+      const ox = origin.x, oy = origin.y;
+
+      // Normalise colour against max average of VISIBLE hexes only.
+      let maxAvg = 1e-9;
+      for (const b of bins.values()) {
+        const cx = HEX_R * 1.5 * b.q * scale - ox;
+        const cy = HEX_R * S3 * (b.r + b.q / 2) * scale - oy;
+        if (cx > -visR * 2 && cx < W + visR * 2 &&
+            cy > -visR * 2 && cy < H + visR * 2) {
+          const avg = b.sum / b.count;
+          if (avg > maxAvg) maxAvg = avg;
+        }
+      }
+
+      for (const b of bins.values()) {
+        const cx = HEX_R * 1.5 * b.q * scale - ox;
+        const cy = HEX_R * S3 * (b.r + b.q / 2) * scale - oy;
+        if (cx < -visR * 2 || cx > W + visR * 2 ||
+            cy < -visR * 2 || cy > H + visR * 2) continue;
+
+        const t     = Math.min(1, (b.sum / b.count) / maxAvg);
+        const color = heatGradientColor(t);
+        const DR    = visR * 0.94;  // 94% — tight gap between neighbours
+
+        ctx.beginPath();
+        for (let i = 0; i < 6; i++) {
+          const a  = (Math.PI / 3) * i;
+          const vx = cx + DR * Math.cos(a);
+          const vy = cy + DR * Math.sin(a);
+          i === 0 ? ctx.moveTo(vx, vy) : ctx.lineTo(vx, vy);
+        }
+        ctx.closePath();
+        ctx.globalAlpha = 0.55;
+        ctx.fillStyle = color;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+        ctx.lineWidth   = 0.8;
+        ctx.stroke();
+
+        if (b.count > 1 && DR >= 18) {
+          ctx.globalAlpha  = 0.9;
+          ctx.fillStyle    = '#fff';
+          ctx.font         = `bold ${Math.max(9, Math.round(DR * 0.36))}px sans-serif`;
+          ctx.textAlign    = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(b.count > 9999 ? '9k+' : String(b.count), cx, cy);
+          ctx.globalAlpha  = 1;
+        }
+      }
+    }
+
+    map.on('move zoom viewreset', draw);
+    draw();
+
     return () => {
-      if (groupRef.current) { map.removeLayer(groupRef.current); groupRef.current = null; }
+      map.off('move zoom viewreset', draw);
+      canvas.remove();
     };
-  }, [points, field, map]);
+  }, [points, field, binZoom, map]);
 
   return null;
 }
@@ -246,7 +336,7 @@ export default function App() {
   const setDoseScaleManual = setDoseManual;
 
   // Map / display mode
-  const [mapMode, setMapMode]         = useState('Track');  // Track | Dots | Heatmap | Arrows
+  const [mapMode, setMapMode]         = useState('Track');  // Track | Dots | Hex | Arrows
   const [colorChannel, setColorChannel] = useState('dose'); // dose | cps | speed | alt | hdop | session
   const [nanoMode, setNanoMode]         = useState(false);
   const [tileIdx, setTileIdx]           = useState(1);       // default CartoDB Dark
@@ -254,6 +344,8 @@ export default function App() {
   const [pointRadius, setPointRadius]   = useState(5);
   const [showTooltips, setShowTooltips] = useState(true);
   const [arrowEvery, setArrowEvery]         = useState(5);    // show 1-in-N arrows
+  const [hexBinZoom, setHexBinZoom]         = useState(6);    // bin resolution (default = initial map zoom)
+  const [hexBinAuto, setHexBinAuto]         = useState(true); // auto-follow map zoom
   const [trackShowDots, setTrackShowDots]   = useState(false);
   const [trackDotOpacity, setTrackDotOpacity] = useState(0.5);
   const [arrowDotOpacity, setArrowDotOpacity] = useState(0.12);
@@ -748,67 +840,116 @@ export default function App() {
             </div>
 
             <SectionHead>Rendering</SectionHead>
-            <label className="check">
-              <input type="checkbox" checked={nanoMode} onChange={e => setNanoMode(e.target.checked)} />
-              Display nSv/h
-            </label>
-            <label className="check">
-              <input type="checkbox" checked={showTooltips} onChange={e => setShowTooltips(e.target.checked)} />
-              Show tooltips
-            </label>
+            <div className="render-cards">
+              <label className="toggle-pill">
+                <input type="checkbox" checked={nanoMode} onChange={e => setNanoMode(e.target.checked)} />
+                <span className="toggle-track"><span className="toggle-thumb" /></span>
+                <span className="toggle-label">nSv/h mode</span>
+              </label>
+              <label className="toggle-pill">
+                <input type="checkbox" checked={showTooltips} onChange={e => setShowTooltips(e.target.checked)} />
+                <span className="toggle-track"><span className="toggle-thumb" /></span>
+                <span className="toggle-label">Tooltips</span>
+              </label>
+            </div>
+
             {mapMode === 'Track' && (
-              <>
-                <div className="slider-row">
-                  <span>Track width {trackWeight}px</span>
-                  <input type="range" min="1" max="10" value={trackWeight}
+              <div className="render-cards">
+                <div className="ctrl-card">
+                  <div className="ctrl-card-header">
+                    <span className="ctrl-card-label">Track width</span>
+                    <span className="ctrl-card-value">{trackWeight}px</span>
+                  </div>
+                  <input type="range" className="ctrl-range" min="1" max="10" value={trackWeight}
                     onChange={e => setTrackWeight(Number(e.target.value))} />
                 </div>
-                <label className="check">
+                <label className="toggle-pill">
                   <input type="checkbox" checked={trackShowDots}
                     onChange={e => setTrackShowDots(e.target.checked)} />
-                  Overlay dots on track
+                  <span className="toggle-track"><span className="toggle-thumb" /></span>
+                  <span className="toggle-label">Dot overlay</span>
                 </label>
                 {trackShowDots && (
-                  <div className="slider-row">
-                    <span>Dot opacity {Math.round(trackDotOpacity * 100)}%</span>
-                    <input type="range" min="0.05" max="1" step="0.05" value={trackDotOpacity}
+                  <div className="ctrl-card">
+                    <div className="ctrl-card-header">
+                      <span className="ctrl-card-label">Dot opacity</span>
+                      <span className="ctrl-card-value">{Math.round(trackDotOpacity * 100)}%</span>
+                    </div>
+                    <input type="range" className="ctrl-range" min="0.05" max="1" step="0.05" value={trackDotOpacity}
                       onChange={e => setTrackDotOpacity(Number(e.target.value))} />
                   </div>
                 )}
-              </>
+              </div>
             )}
             {(mapMode === 'Dots' || mapMode === 'Arrows') && (
-              <div className="slider-row">
-                <span>Point radius {pointRadius}px</span>
-                <input type="range" min="2" max="16" value={pointRadius}
-                  onChange={e => setPointRadius(Number(e.target.value))} />
+              <div className="render-cards">
+                <div className="ctrl-card">
+                  <div className="ctrl-card-header">
+                    <span className="ctrl-card-label">Point radius</span>
+                    <span className="ctrl-card-value">{pointRadius}px</span>
+                  </div>
+                  <input type="range" className="ctrl-range" min="2" max="16" value={pointRadius}
+                    onChange={e => setPointRadius(Number(e.target.value))} />
+                </div>
+              </div>
+            )}
+            {mapMode === 'Hex' && (
+              <div className="render-cards">
+                <div className="ctrl-card">
+                  <div className="ctrl-card-header">
+                    <span className="ctrl-card-label">Hex bin level</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span className="ctrl-card-value">{hexBinZoom}</span>
+                      <button
+                        className={`auto-pill${hexBinAuto ? ' active' : ''}`}
+                        onClick={() => setHexBinAuto(true)}>
+                        auto
+                      </button>
+                    </div>
+                  </div>
+                  <input type="range" className="ctrl-range" min="1" max="22" value={hexBinZoom}
+                    onChange={e => { setHexBinZoom(Number(e.target.value)); setHexBinAuto(false); }} />
+                  <div className="ctrl-range-labels">
+                    <span>coarse</span><span>fine</span>
+                  </div>
+                </div>
               </div>
             )}
             {mapMode === 'Arrows' && (
-              <>
-                <div className="slider-row">
-                  <span>Arrow every {arrowEvery} pts</span>
-                  <input type="range" min="1" max="20" value={arrowEvery}
+              <div className="render-cards">
+                <div className="ctrl-card">
+                  <div className="ctrl-card-header">
+                    <span className="ctrl-card-label">Arrow every</span>
+                    <span className="ctrl-card-value">{arrowEvery} pts</span>
+                  </div>
+                  <input type="range" className="ctrl-range" min="1" max="20" value={arrowEvery}
                     onChange={e => setArrowEvery(Number(e.target.value))} />
                 </div>
-                <div className="slider-row">
-                  <span>Dot opacity {Math.round(arrowDotOpacity * 100)}%</span>
-                  <input type="range" min="0" max="1" step="0.05" value={arrowDotOpacity}
+                <div className="ctrl-card">
+                  <div className="ctrl-card-header">
+                    <span className="ctrl-card-label">Dot opacity</span>
+                    <span className="ctrl-card-value">{Math.round(arrowDotOpacity * 100)}%</span>
+                  </div>
+                  <input type="range" className="ctrl-range" min="0" max="1" step="0.05" value={arrowDotOpacity}
                     onChange={e => setArrowDotOpacity(Number(e.target.value))} />
                 </div>
-                <label className="check">
+                <label className="toggle-pill">
                   <input type="checkbox" checked={arrowShowTrack}
                     onChange={e => setArrowShowTrack(e.target.checked)} />
-                  Show track underlay
+                  <span className="toggle-track"><span className="toggle-thumb" /></span>
+                  <span className="toggle-label">Track underlay</span>
                 </label>
                 {arrowShowTrack && (
-                  <div className="slider-row">
-                    <span>Track opacity {Math.round(arrowTrackOpacity * 100)}%</span>
-                    <input type="range" min="0.05" max="1" step="0.05" value={arrowTrackOpacity}
+                  <div className="ctrl-card">
+                    <div className="ctrl-card-header">
+                      <span className="ctrl-card-label">Track opacity</span>
+                      <span className="ctrl-card-value">{Math.round(arrowTrackOpacity * 100)}%</span>
+                    </div>
+                    <input type="range" className="ctrl-range" min="0.05" max="1" step="0.05" value={arrowTrackOpacity}
                       onChange={e => setArrowTrackOpacity(Number(e.target.value))} />
                   </div>
                 )}
-              </>
+              </div>
             )}
           </div>
         )}
@@ -850,20 +991,21 @@ export default function App() {
 
       {/* === MAP === */}
       <main className="map-pane">
-        <MapContainer center={[39.5, -98.35]} zoom={4} maxZoom={20} style={{ width: '100%', height: '100%' }}>
+        <MapContainer center={[39.5, -98.35]} zoom={6} maxZoom={22} style={{ width: '100%', height: '100%' }}>
           <TileLayer
             key={tile.url}
             attribution={tile.attribution}
             url={tile.url}
-            maxZoom={20}
+            maxZoom={22}
             maxNativeZoom={tile.maxNativeZoom ?? 19}
           />
+          <MapZoomSync onZoomChange={z => { if (hexBinAuto) setHexBinZoom(z); }} />
           {fitBounds && <FitBoundsOnce bounds={fitBounds} dep={fitTrigger} />}
 
-          {/* Heatmap mode */}
-          {mapMode === 'Heatmap' && filteredTraces.map(t =>
+          {/* Hex binning mode */}
+          {mapMode === 'Hex' && filteredTraces.map(t =>
             t.filtered.length > 0
-              ? <HeatmapLayer key={t.id} points={t.filtered} field={colorChannel} />
+              ? <HexLayer key={t.id} points={t.filtered} field={colorChannel} binZoom={hexBinZoom} />
               : null
           )}
 
