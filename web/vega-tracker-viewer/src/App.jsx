@@ -950,12 +950,12 @@ export default function App() {
 
       {/* === MAP === */}
       <main className="map-pane">
-        <MapContainer center={[39.5, -98.35]} zoom={6} maxZoom={20} style={{ width: '100%', height: '100%' }}>
+        <MapContainer center={[39.5, -98.35]} zoom={6} maxZoom={22} style={{ width: '100%', height: '100%' }}>
           <TileLayer
             key={tile.url}
             attribution={tile.attribution}
             url={tile.url}
-            maxZoom={20}
+            maxZoom={22}
             maxNativeZoom={tile.maxNativeZoom ?? 19}
           />
           {fitBounds && <FitBoundsOnce bounds={fitBounds} dep={fitTrigger} />}
