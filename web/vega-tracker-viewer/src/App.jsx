@@ -207,9 +207,9 @@ function HexLayer({ points, field }) {
         const t     = Math.min(1, (b.sum / b.count) / maxAvg);
         const color = heatGradientColor(t);
 
-        // Draw at 60% of bin radius — covers ~36% of pixel area, leaving
-        // ~64% transparent so map tiles are clearly readable underneath.
-        const DR = HEX_R * 0.60;
+        // Draw at 80% of bin radius — hexes nearly touch but leave visible
+        // gaps; fill opacity 0.55 keeps map tiles readable underneath.
+        const DR = HEX_R * 0.80;
 
         // Draw flat-top hexagon (vertex 0 at angle 0° = right)
         ctx.beginPath();
@@ -951,7 +951,7 @@ export default function App() {
 
       {/* === MAP === */}
       <main className="map-pane">
-        <MapContainer center={[39.5, -98.35]} zoom={4} maxZoom={20} style={{ width: '100%', height: '100%' }}>
+        <MapContainer center={[39.5, -98.35]} zoom={5} maxZoom={20} style={{ width: '100%', height: '100%' }}>
           <TileLayer
             key={tile.url}
             attribution={tile.attribution}
