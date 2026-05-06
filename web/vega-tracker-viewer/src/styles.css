@@ -569,18 +569,136 @@ button.active {
 
 .check:hover { background: var(--panel2); }
 
-/* ---- Slider rows ------------------------------------------------------ */
+/* ---- Rendering section: ctrl-cards + toggle-pills -------------------- */
 
-.slider-row {
-  padding: 6px 14px;
+.render-cards {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: 11px;
+  gap: 6px;
+  padding: 8px 12px;
+}
+
+/* Control card — labelled slider block */
+.ctrl-card {
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px 8px;
+}
+
+.ctrl-card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+}
+
+.ctrl-card-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
   color: var(--muted);
 }
 
-.slider-row input[type=range] { width: 100%; accent-color: var(--accent); }
+.ctrl-card-value {
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  letter-spacing: 0.2px;
+}
+
+.ctrl-range {
+  width: 100%;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
+.ctrl-range-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 9px;
+  color: var(--muted);
+  margin-top: 3px;
+  opacity: 0.7;
+}
+
+/* Auto badge pill (hex level) */
+.auto-pill {
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 7px;
+  border-radius: 10px;
+  border: 1px solid var(--border2);
+  background: var(--panel3);
+  color: var(--muted);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.auto-pill.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #000;
+}
+.auto-pill:hover:not(.active) {
+  background: var(--panel3);
+  border-color: var(--border2);
+  color: var(--text);
+}
+
+/* Toggle pill (checkbox replacement) */
+.toggle-pill {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+  transition: border-color 0.15s;
+}
+.toggle-pill:hover { border-color: var(--border2); }
+.toggle-pill input[type=checkbox] { display: none; }
+
+.toggle-track {
+  position: relative;
+  width: 32px;
+  height: 17px;
+  background: var(--panel3);
+  border: 1px solid var(--border2);
+  border-radius: 9px;
+  flex-shrink: 0;
+  transition: background 0.2s, border-color 0.2s;
+}
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 11px;
+  height: 11px;
+  background: var(--muted);
+  border-radius: 50%;
+  transition: transform 0.2s, background 0.2s;
+}
+/* Checked state — rely on sibling via :has() */
+.toggle-pill:has(input:checked) .toggle-track {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.toggle-pill:has(input:checked) .toggle-thumb {
+  transform: translateX(15px);
+  background: #000;
+}
+
+.toggle-label {
+  font-size: 12px;
+  color: var(--text);
+  flex: 1;
+}
 
 /* ---- Stats grid ------------------------------------------------------- */
 

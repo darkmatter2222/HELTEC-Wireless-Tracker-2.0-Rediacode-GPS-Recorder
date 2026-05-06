@@ -840,84 +840,116 @@ export default function App() {
             </div>
 
             <SectionHead>Rendering</SectionHead>
-            <label className="check">
-              <input type="checkbox" checked={nanoMode} onChange={e => setNanoMode(e.target.checked)} />
-              Display nSv/h
-            </label>
-            <label className="check">
-              <input type="checkbox" checked={showTooltips} onChange={e => setShowTooltips(e.target.checked)} />
-              Show tooltips
-            </label>
+            <div className="render-cards">
+              <label className="toggle-pill">
+                <input type="checkbox" checked={nanoMode} onChange={e => setNanoMode(e.target.checked)} />
+                <span className="toggle-track"><span className="toggle-thumb" /></span>
+                <span className="toggle-label">nSv/h mode</span>
+              </label>
+              <label className="toggle-pill">
+                <input type="checkbox" checked={showTooltips} onChange={e => setShowTooltips(e.target.checked)} />
+                <span className="toggle-track"><span className="toggle-thumb" /></span>
+                <span className="toggle-label">Tooltips</span>
+              </label>
+            </div>
+
             {mapMode === 'Track' && (
-              <>
-                <div className="slider-row">
-                  <span>Track width {trackWeight}px</span>
-                  <input type="range" min="1" max="10" value={trackWeight}
+              <div className="render-cards">
+                <div className="ctrl-card">
+                  <div className="ctrl-card-header">
+                    <span className="ctrl-card-label">Track width</span>
+                    <span className="ctrl-card-value">{trackWeight}px</span>
+                  </div>
+                  <input type="range" className="ctrl-range" min="1" max="10" value={trackWeight}
                     onChange={e => setTrackWeight(Number(e.target.value))} />
                 </div>
-                <label className="check">
+                <label className="toggle-pill">
                   <input type="checkbox" checked={trackShowDots}
                     onChange={e => setTrackShowDots(e.target.checked)} />
-                  Overlay dots on track
+                  <span className="toggle-track"><span className="toggle-thumb" /></span>
+                  <span className="toggle-label">Dot overlay</span>
                 </label>
                 {trackShowDots && (
-                  <div className="slider-row">
-                    <span>Dot opacity {Math.round(trackDotOpacity * 100)}%</span>
-                    <input type="range" min="0.05" max="1" step="0.05" value={trackDotOpacity}
+                  <div className="ctrl-card">
+                    <div className="ctrl-card-header">
+                      <span className="ctrl-card-label">Dot opacity</span>
+                      <span className="ctrl-card-value">{Math.round(trackDotOpacity * 100)}%</span>
+                    </div>
+                    <input type="range" className="ctrl-range" min="0.05" max="1" step="0.05" value={trackDotOpacity}
                       onChange={e => setTrackDotOpacity(Number(e.target.value))} />
                   </div>
                 )}
-              </>
+              </div>
             )}
             {(mapMode === 'Dots' || mapMode === 'Arrows') && (
-              <div className="slider-row">
-                <span>Point radius {pointRadius}px</span>
-                <input type="range" min="2" max="16" value={pointRadius}
-                  onChange={e => setPointRadius(Number(e.target.value))} />
+              <div className="render-cards">
+                <div className="ctrl-card">
+                  <div className="ctrl-card-header">
+                    <span className="ctrl-card-label">Point radius</span>
+                    <span className="ctrl-card-value">{pointRadius}px</span>
+                  </div>
+                  <input type="range" className="ctrl-range" min="2" max="16" value={pointRadius}
+                    onChange={e => setPointRadius(Number(e.target.value))} />
+                </div>
               </div>
             )}
             {mapMode === 'Hex' && (
-              <>
-                <div className="slider-row" style={{ alignItems: 'center' }}>
-                  <span>Hex level {hexBinZoom}{hexBinAuto ? ' (auto)' : ''}</span>
-                  <button
-                    style={{ fontSize: '10px', padding: '1px 6px', marginLeft: '6px',
-                             background: hexBinAuto ? 'var(--accent)' : 'var(--bg3)',
-                             border: '1px solid var(--border2)', borderRadius: '4px',
-                             color: '#fff', cursor: 'pointer', whiteSpace: 'nowrap' }}
-                    onClick={() => setHexBinAuto(true)}>
-                    auto
-                  </button>
+              <div className="render-cards">
+                <div className="ctrl-card">
+                  <div className="ctrl-card-header">
+                    <span className="ctrl-card-label">Hex bin level</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span className="ctrl-card-value">{hexBinZoom}</span>
+                      <button
+                        className={`auto-pill${hexBinAuto ? ' active' : ''}`}
+                        onClick={() => setHexBinAuto(true)}>
+                        auto
+                      </button>
+                    </div>
+                  </div>
+                  <input type="range" className="ctrl-range" min="1" max="22" value={hexBinZoom}
+                    onChange={e => { setHexBinZoom(Number(e.target.value)); setHexBinAuto(false); }} />
+                  <div className="ctrl-range-labels">
+                    <span>coarse</span><span>fine</span>
+                  </div>
                 </div>
-                <input type="range" min="1" max="22" value={hexBinZoom}
-                  onChange={e => { setHexBinZoom(Number(e.target.value)); setHexBinAuto(false); }} />
-              </>
+              </div>
             )}
             {mapMode === 'Arrows' && (
-              <>
-                <div className="slider-row">
-                  <span>Arrow every {arrowEvery} pts</span>
-                  <input type="range" min="1" max="20" value={arrowEvery}
+              <div className="render-cards">
+                <div className="ctrl-card">
+                  <div className="ctrl-card-header">
+                    <span className="ctrl-card-label">Arrow every</span>
+                    <span className="ctrl-card-value">{arrowEvery} pts</span>
+                  </div>
+                  <input type="range" className="ctrl-range" min="1" max="20" value={arrowEvery}
                     onChange={e => setArrowEvery(Number(e.target.value))} />
                 </div>
-                <div className="slider-row">
-                  <span>Dot opacity {Math.round(arrowDotOpacity * 100)}%</span>
-                  <input type="range" min="0" max="1" step="0.05" value={arrowDotOpacity}
+                <div className="ctrl-card">
+                  <div className="ctrl-card-header">
+                    <span className="ctrl-card-label">Dot opacity</span>
+                    <span className="ctrl-card-value">{Math.round(arrowDotOpacity * 100)}%</span>
+                  </div>
+                  <input type="range" className="ctrl-range" min="0" max="1" step="0.05" value={arrowDotOpacity}
                     onChange={e => setArrowDotOpacity(Number(e.target.value))} />
                 </div>
-                <label className="check">
+                <label className="toggle-pill">
                   <input type="checkbox" checked={arrowShowTrack}
                     onChange={e => setArrowShowTrack(e.target.checked)} />
-                  Show track underlay
+                  <span className="toggle-track"><span className="toggle-thumb" /></span>
+                  <span className="toggle-label">Track underlay</span>
                 </label>
                 {arrowShowTrack && (
-                  <div className="slider-row">
-                    <span>Track opacity {Math.round(arrowTrackOpacity * 100)}%</span>
-                    <input type="range" min="0.05" max="1" step="0.05" value={arrowTrackOpacity}
+                  <div className="ctrl-card">
+                    <div className="ctrl-card-header">
+                      <span className="ctrl-card-label">Track opacity</span>
+                      <span className="ctrl-card-value">{Math.round(arrowTrackOpacity * 100)}%</span>
+                    </div>
+                    <input type="range" className="ctrl-range" min="0.05" max="1" step="0.05" value={arrowTrackOpacity}
                       onChange={e => setArrowTrackOpacity(Number(e.target.value))} />
                   </div>
                 )}
-              </>
+              </div>
             )}
           </div>
         )}
