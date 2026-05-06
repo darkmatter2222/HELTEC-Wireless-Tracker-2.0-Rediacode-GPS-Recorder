@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
   MapContainer, TileLayer, Polyline, CircleMarker,
-  Tooltip, useMap, Marker,
+  Tooltip, useMap, useMapEvents, Marker,
 } from 'react-leaflet';
 import L from 'leaflet';
 import { fetchSessions, fetchSessionRows } from './api.js';
@@ -115,102 +115,94 @@ function heatGradientColor(t) {
   return `rgb(${r},${g},${b})`;
 }
 
-// Hexagonal binning layer: points are aggregated into a flat-top hex grid
-// defined in global Leaflet pixel coordinates.  Bins are recomputed on zoom
-// change (geography changes per cell); on pan the existing bins are just
-// redrawn at the new viewport offset — no per-point work needed during pan.
-// Hex size is fixed in pixels (HEX_R) so geographic coverage scales naturally
-// with zoom: zooming in reveals smaller geographic cells, zooming out merges
-// many points into fewer coarse cells.  Ideal for millions of data points.
-function HexLayer({ points, field }) {
+// Syncs hexBinZoom state to map zoom when auto-follow is enabled.
+// Must be rendered inside MapContainer.
+function MapZoomSync({ onZoomChange }) {
+  useMapEvents({ zoom: (e) => onZoomChange(e.target.getZoom()) });
+  return null;
+}
+
+// Hexagonal binning layer.
+// binZoom controls the geographic resolution of bins — independent of the
+// current map view zoom.  Higher binZoom = finer bins (more, smaller hexes).
+// Lower binZoom = coarser bins (fewer, bigger hexes covering more area).
+// The pixel scale factor 2^(mapZoom-binZoom) converts bin pixel coords from
+// binZoom space to the current screen space on every draw, so geography is
+// always correct regardless of the zoom mismatch.
+function HexLayer({ points, field, binZoom }) {
   const map = useMap();
 
   useEffect(() => {
     if (!points || points.length === 0) return;
 
-    const HEX_R = 36;          // circumradius in pixels — flat-top orientation
+    const HEX_R = 36;          // circumradius in pixels at binZoom — flat-top
     const S3    = Math.sqrt(3);
 
     const canvas = document.createElement('canvas');
     canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:400;background:transparent;';
     map.getContainer().appendChild(canvas);
 
-    let bins    = new Map();
-    let lastZoom = -1;
-
-    // Recompute which hex each point falls into at the current zoom level.
-    // Uses map.project() for global (pan-independent) pixel coordinates.
-    function rebin(zoom) {
-      lastZoom = zoom;
-      bins = new Map();
-      for (const p of points) {
-        const gp  = map.project([p.lat, p.lng], zoom);
-        // Flat-top hex: pixel (x, y) → fractional axial coords (q_f, r_f)
-        const q_f = ( 2 / 3 * gp.x) / HEX_R;
-        const r_f = (-1 / 3 * gp.x + S3 / 3 * gp.y) / HEX_R;
-        const s_f = -q_f - r_f;
-        // Cube-coordinate rounding
-        let q = Math.round(q_f), r = Math.round(r_f), s = Math.round(s_f);
-        const dq = Math.abs(q - q_f), dr = Math.abs(r - r_f), ds = Math.abs(s - s_f);
-        if      (dq > dr && dq > ds) q = -r - s;
-        else if (dr > ds)            r = -q - s;
-        const val = field === 'cps'   ? (p.cps ?? 0)
-                  : field === 'speed' ? (p.spd ?? 0)
-                  :                     (p.uSv ?? 0);
-        const key = `${q},${r}`;
-        if (bins.has(key)) {
-          const b = bins.get(key);
-          b.sum += val;
-          b.count++;
-        } else {
-          bins.set(key, { q, r, sum: val, count: 1 });
-        }
-      }
+    // Bin all points at binZoom resolution once per effect run.
+    // Rebinning is cheap here; it only triggers when binZoom/points/field change.
+    const bins = new Map();
+    for (const p of points) {
+      const gp  = map.project([p.lat, p.lng], binZoom);
+      const q_f = ( 2 / 3 * gp.x) / HEX_R;
+      const r_f = (-1 / 3 * gp.x + S3 / 3 * gp.y) / HEX_R;
+      const s_f = -q_f - r_f;
+      let q = Math.round(q_f), r = Math.round(r_f), s = Math.round(s_f);
+      const dq = Math.abs(q - q_f), dr = Math.abs(r - r_f), ds = Math.abs(s - s_f);
+      if      (dq > dr && dq > ds) q = -r - s;
+      else if (dr > ds)            r = -q - s;
+      const val = field === 'cps'   ? (p.cps ?? 0)
+                : field === 'speed' ? (p.spd ?? 0)
+                :                     (p.uSv ?? 0);
+      const key = `${q},${r}`;
+      if (bins.has(key)) { const b = bins.get(key); b.sum += val; b.count++; }
+      else bins.set(key, { q, r, sum: val, count: 1 });
     }
 
     function draw() {
-      const zoom = map.getZoom();
-      if (zoom !== lastZoom) rebin(zoom);
+      const mapZoom = map.getZoom();
+      // Scale bin pixel coords from binZoom space → current mapZoom screen space.
+      // scale > 1: zoomed in past binZoom → hexes appear larger on screen.
+      // scale < 1: zoomed out past binZoom → hexes appear smaller (denser).
+      const scale  = Math.pow(2, mapZoom - binZoom);
+      const visR   = HEX_R * scale;   // visual circumradius in screen pixels
 
       const size   = map.getSize();
       canvas.width  = size.x;
       canvas.height = size.y;
       const ctx    = canvas.getContext('2d');
       const W      = size.x, H = size.y;
-      // Explicit clear guards against GPU compositing leaving stale pixels
       ctx.clearRect(0, 0, W, H);
 
-      // Top-left corner of the viewport in global pixel space
-      const origin = map.project(map.getBounds().getNorthWest(), zoom);
+      // NW corner of viewport in global pixel space at current mapZoom
+      const origin = map.project(map.getBounds().getNorthWest(), mapZoom);
       const ox = origin.x, oy = origin.y;
 
-      // Normalise against the max average of the currently VISIBLE hexes
-      // so colour contrast is always high regardless of absolute values.
+      // Normalise colour against max average of VISIBLE hexes only.
       let maxAvg = 1e-9;
       for (const b of bins.values()) {
-        const cx = HEX_R * 1.5 * b.q - ox;
-        const cy = HEX_R * S3 * (b.r + b.q / 2) - oy;
-        if (cx > -HEX_R * 2 && cx < W + HEX_R * 2 &&
-            cy > -HEX_R * 2 && cy < H + HEX_R * 2) {
+        const cx = HEX_R * 1.5 * b.q * scale - ox;
+        const cy = HEX_R * S3 * (b.r + b.q / 2) * scale - oy;
+        if (cx > -visR * 2 && cx < W + visR * 2 &&
+            cy > -visR * 2 && cy < H + visR * 2) {
           const avg = b.sum / b.count;
           if (avg > maxAvg) maxAvg = avg;
         }
       }
 
       for (const b of bins.values()) {
-        // Hex centre in screen-pixel space for the current viewport
-        const cx = HEX_R * 1.5 * b.q - ox;
-        const cy = HEX_R * S3 * (b.r + b.q / 2) - oy;
-        if (cx < -HEX_R * 2 || cx > W + HEX_R * 2 ||
-            cy < -HEX_R * 2 || cy > H + HEX_R * 2) continue;
+        const cx = HEX_R * 1.5 * b.q * scale - ox;
+        const cy = HEX_R * S3 * (b.r + b.q / 2) * scale - oy;
+        if (cx < -visR * 2 || cx > W + visR * 2 ||
+            cy < -visR * 2 || cy > H + visR * 2) continue;
 
         const t     = Math.min(1, (b.sum / b.count) / maxAvg);
         const color = heatGradientColor(t);
+        const DR    = visR * 0.94;  // 94% — tight gap between neighbours
 
-        // Draw at 94% of bin radius — minimal gap between hexes.
-        const DR = HEX_R * 0.94;
-
-        // Draw flat-top hexagon (vertex 0 at angle 0° = right)
         ctx.beginPath();
         for (let i = 0; i < 6; i++) {
           const a  = (Math.PI / 3) * i;
@@ -227,7 +219,6 @@ function HexLayer({ points, field }) {
         ctx.lineWidth   = 0.8;
         ctx.stroke();
 
-        // Inset count label — only when hex is large enough to be legible
         if (b.count > 1 && DR >= 18) {
           ctx.globalAlpha  = 0.9;
           ctx.fillStyle    = '#fff';
@@ -240,7 +231,6 @@ function HexLayer({ points, field }) {
       }
     }
 
-    rebin(map.getZoom());
     map.on('move zoom viewreset', draw);
     draw();
 
@@ -248,7 +238,7 @@ function HexLayer({ points, field }) {
       map.off('move zoom viewreset', draw);
       canvas.remove();
     };
-  }, [points, field, map]);
+  }, [points, field, binZoom, map]);
 
   return null;
 }
@@ -354,6 +344,8 @@ export default function App() {
   const [pointRadius, setPointRadius]   = useState(5);
   const [showTooltips, setShowTooltips] = useState(true);
   const [arrowEvery, setArrowEvery]         = useState(5);    // show 1-in-N arrows
+  const [hexBinZoom, setHexBinZoom]         = useState(6);    // bin resolution (default = initial map zoom)
+  const [hexBinAuto, setHexBinAuto]         = useState(true); // auto-follow map zoom
   const [trackShowDots, setTrackShowDots]   = useState(false);
   const [trackDotOpacity, setTrackDotOpacity] = useState(0.5);
   const [arrowDotOpacity, setArrowDotOpacity] = useState(0.12);
@@ -884,6 +876,23 @@ export default function App() {
                   onChange={e => setPointRadius(Number(e.target.value))} />
               </div>
             )}
+            {mapMode === 'Hex' && (
+              <>
+                <div className="slider-row" style={{ alignItems: 'center' }}>
+                  <span>Hex level {hexBinZoom}{hexBinAuto ? ' (auto)' : ''}</span>
+                  <button
+                    style={{ fontSize: '10px', padding: '1px 6px', marginLeft: '6px',
+                             background: hexBinAuto ? 'var(--accent)' : 'var(--bg3)',
+                             border: '1px solid var(--border2)', borderRadius: '4px',
+                             color: '#fff', cursor: 'pointer', whiteSpace: 'nowrap' }}
+                    onClick={() => setHexBinAuto(true)}>
+                    auto
+                  </button>
+                </div>
+                <input type="range" min="1" max="22" value={hexBinZoom}
+                  onChange={e => { setHexBinZoom(Number(e.target.value)); setHexBinAuto(false); }} />
+              </>
+            )}
             {mapMode === 'Arrows' && (
               <>
                 <div className="slider-row">
@@ -958,12 +967,13 @@ export default function App() {
             maxZoom={22}
             maxNativeZoom={tile.maxNativeZoom ?? 19}
           />
+          <MapZoomSync onZoomChange={z => { if (hexBinAuto) setHexBinZoom(z); }} />
           {fitBounds && <FitBoundsOnce bounds={fitBounds} dep={fitTrigger} />}
 
           {/* Hex binning mode */}
           {mapMode === 'Hex' && filteredTraces.map(t =>
             t.filtered.length > 0
-              ? <HexLayer key={t.id} points={t.filtered} field={colorChannel} />
+              ? <HexLayer key={t.id} points={t.filtered} field={colorChannel} binZoom={hexBinZoom} />
               : null
           )}
 
