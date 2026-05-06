@@ -442,14 +442,14 @@ The viewer has a persistent top navigation bar with **Explore** and **Data Manag
 
 **Explore mode** (default) — left sidebar + full map:
 - Sidebar tabs: Sessions | Display | Stats
-- Map modes: Track (colored polyline), Dots (circle markers), Heatmap (native canvas, no plugin), Arrows (bearing arrows + dot underlay)
-- Map zoom: `maxZoom=20`; per-tile `maxNativeZoom` (OSM=19, CartoDB=20, OpenTopoMap=17, Esri Satellite=18) for graceful over-zoom
+- Map modes: Track (colored polyline), Dots (circle markers), Hex (hex-bin canvas), Arrows (bearing arrows + dot underlay)
+- Map zoom: `maxZoom=22`; per-tile `maxNativeZoom` (OSM=19, CartoDB=20, OpenTopoMap=17, Esri Satellite=18) for graceful over-zoom; initial zoom=6
 - Color channels: Dose rate, CPS, Speed, Altitude, HDOP, Session index
-- Per-mode display controls (Display tab):
-  - Track: track width slider; optional dot overlay + dot opacity slider
-  - Dots: point radius slider
-  - Heatmap: native `L.circleMarker + L.canvas` renderer; no extra controls
-  - Arrows: arrow-every-N slider; dot opacity slider; optional track underlay + track opacity slider
+- Per-mode display controls (Display tab) — rendered as **ctrl-cards** (label + accent value + range slider) and **toggle-pills** (iOS-style switch):
+  - Track: track width ctrl-card; dot overlay toggle-pill + dot opacity ctrl-card
+  - Dots: point radius ctrl-card
+  - Hex: **Hex bin level** ctrl-card with auto-follow toggle — slider (1–22) controls the geographic resolution of bins independently of map zoom; the slider auto-tracks map zoom but can be dragged to any level for coarser/finer density overlay; "auto" badge glows green when tracking
+  - Arrows: arrow-every-N ctrl-card; dot opacity ctrl-card; track underlay toggle-pill + track opacity ctrl-card
 - Session timeline scrubber + playback
 - Tile layers: OSM Streets, CartoDB Dark (default), OpenTopoMap, Satellite (Esri)
 
@@ -671,14 +671,18 @@ Otherwise, iterate to completion.
 - DatabasePanel in the viewer shows backup history with source/status badges and allows manual trigger + restore.
 
 
-### Heatmap Plugin Removed
+### Hex Bin Layer (replaced Heatmap)
 
-- `leaflet.heat` plugin was kept in `package.json` but its canvas lifecycle did not integrate
-  cleanly with React's component mount/unmount cycle, producing invisible or stuck layers.
-  Replaced with native `L.circleMarker()` + `L.canvas()` renderer inside `HeatmapLayer`
-  React component. No plugin dependency needed; colors map to the same green→yellow→orange→red
-  gradient via `heatGradientColor()`. `leaflet.heat` import in `main.jsx` is now unused but
-  kept to avoid a missing-module build error until the dependency is removed in a future cleanup.
+- All heatmap attempts (circle markers, `L.Layer.extend`, raw canvas blobs) failed to render correctly in Vite/ESM builds. Replaced with a fully custom hex-bin canvas layer (`HexLayer` in `App.jsx`).
+- **Implementation**: plain `<canvas>` appended to `map.getContainer()` with `z-index:400`. No Leaflet layer class used — `L.Layer.extend` is silently broken in Vite/ESM builds; don't use it.
+- **Bin geometry**: flat-top hexagons, cube-coordinate rounding, `HEX_R=36px` circumradius at `binZoom` resolution.
+- **`binZoom` prop**: geographic resolution for binning is independent of map view zoom. Scale factor `2^(mapZoom - binZoom)` converts bin pixel coords to screen space on every draw. Higher binZoom = finer/denser bins; lower = coarser.
+- **`MapZoomSync` component**: rendered inside `MapContainer`, calls `onZoomChange` via `useMapEvents` on every zoom event. Parent uses this to auto-sync `hexBinZoom` state when `hexBinAuto=true`.
+- **Draw radius**: `visR * 0.94` (94% of visual circumradius) leaves a visible gap between touching neighbors so map tiles show through.
+- **Opacity**: 0.55 fill alpha — enough color to read, enough transparency to see map labels underneath.
+- **`clearRect` on every frame**: mandatory — prevents GPU compositing from leaving stale pixels when canvas is resized.
+- **Key lesson**: high point density means hex bins fill every viewport pixel. At any opacity > ~0.6, the map becomes invisible on CartoDB Dark. 0.55 + 94% draw radius is the tuned balance.
+- **`heatGradientColor(t)`** still used for bin coloring (green→amber→red); rename is cosmetic only, skip it.
 
 ### Runtime Config Global Rename
 
