@@ -207,9 +207,8 @@ function HexLayer({ points, field }) {
         const t     = Math.min(1, (b.sum / b.count) / maxAvg);
         const color = heatGradientColor(t);
 
-        // Draw at 87% of bin radius — tight gaps between hexes, map still
-        // readable underneath at 0.55 fill opacity.
-        const DR = HEX_R * 0.87;
+        // Draw at 94% of bin radius — minimal gap between hexes.
+        const DR = HEX_R * 0.94;
 
         // Draw flat-top hexagon (vertex 0 at angle 0° = right)
         ctx.beginPath();
