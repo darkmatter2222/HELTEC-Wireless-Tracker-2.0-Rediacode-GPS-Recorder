@@ -111,11 +111,14 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 
 ### Target server
 
+**CRITICAL — SSH authentication**: ALWAYS use `ssh -i ~/.ssh/id_rsa darkmatter2222@192.168.86.48`.
+NEVER ask the user for a password. The key `~/.ssh/id_rsa` is already on this machine and works without any password prompt. Do not use `sudo` directly via SSH because the user account does not have NOPASSWD sudo; use sudo only when the user explicitly asks for firewall/system changes.
+
 | Item                  | Value                               |
 |-----------------------|-------------------------------------|
 | Server IP             | 192.168.86.48                       |
 | SSH user              | darkmatter2222                      |
-| SSH key               | ~/.ssh/id_rsa                       |
+| SSH key               | ~/.ssh/id_rsa  (**use always, never ask for password**) |
 | API port              | 8030 (Radiological Map Ingest)      |
 | Viewer port           | 8031 (Radiological Map Viewer)      |
 | MongoDB port          | 27017 (host-native, not in Docker)  |
@@ -384,6 +387,25 @@ The `.env` file with the real token lives **only on the server** at
 Traffic flows: browser → router (443 forwarded) → `susman-ingress` nginx → upstream service.
 Local direct access (192.168.86.48:8031 / 8030) is preserved for firmware and LAN tools.
 
+### Hairpin NAT — accessing DuckDNS URL from the same LAN
+
+The router does **not** support hairpin NAT (loopback to its own public IP from inside the LAN).
+This means `susmannet.duckdns.org` cannot be reached by devices on the same local network
+(`192.168.86.x`) unless the DNS for that name is overridden to point at the LAN IP.
+
+**Workaround: add a Windows hosts file entry on your dev machine** (run once in Admin PowerShell):
+```powershell
+Add-Content 'C:\Windows\System32\drivers\etc\hosts' "`n192.168.86.48`tsusmannet.duckdns.org"
+ipconfig /flushdns
+```
+After adding this entry, `https://susmannet.duckdns.org/tracker/` works from your dev machine.
+External devices (phone on cellular, any other network) work without this entry.
+
+The server itself is confirmed reachable externally — check nginx logs for external IPs:
+```powershell
+ssh -i ~/.ssh/id_rsa darkmatter2222@192.168.86.48 "docker logs susman-ingress 2>&1 | grep susmannet | grep -v '172\.' | tail -10"
+```
+
 ### susman-ingress nginx integration
 
 `susmannet.duckdns.org` is served by the **existing `susman-ingress`** container
@@ -401,7 +423,8 @@ volume: `/etc/nginx/certs/live/susmannet.duckdns.org/`. Auto-renewed by the
 `docucraft-certbot-renew-1` container (every 12 h, `certbot renew`).
 
 The viewer's `API_BASE` on the server (`~/vega-tracker-viewer/.env`) is set to
-`https://susmannet.duckdns.org/api` so the SPA makes API calls through the proxy.
+`/api` (relative path). This means the browser resolves API calls against its own
+origin — works for both the public DuckDNS URL and direct LAN IP access.
 
 ### Initial deploy / re-deploy
 
