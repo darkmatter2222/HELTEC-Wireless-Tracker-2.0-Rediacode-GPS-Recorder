@@ -4,7 +4,10 @@
 set -eu
 
 CONFIG_JS=/usr/share/nginx/html/config.js
-API_BASE_VALUE="${API_BASE:-http://192.168.86.48:8030}"
+# Default to /api (relative path) so the browser resolves against its current
+# origin. This makes both DuckDNS proxy and direct LAN IP access work without
+# hairpin NAT. Override with API_BASE env var if an absolute URL is needed.
+API_BASE_VALUE="${API_BASE:-/api}"
 
 # Escape ampersand and slashes for sed.
 ESC=$(printf '%s' "$API_BASE_VALUE" | sed -e 's/[\/&]/\\&/g')

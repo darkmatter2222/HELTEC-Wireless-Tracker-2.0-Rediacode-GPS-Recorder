@@ -1,10 +1,12 @@
 // API_BASE is injected at runtime by nginx via /config.js (see public/config.js
-// and the Dockerfile). Falls back to same-origin for `npm run dev`.
+// and the Dockerfile). Defaults to /api (relative) so the browser resolves it
+// against whichever origin it loaded from — works for both the DuckDNS proxy
+// and direct LAN IP access (viewer nginx proxies /api/ to the ingest port).
 const RUNTIME = (typeof window !== 'undefined' && window.__APP_CONFIG__) || {};
 export const API_BASE =
   RUNTIME.apiBase ||
   import.meta.env.VITE_API_URL ||
-  'http://192.168.86.48:8030';
+  '/api';
 
 // ---- read ------------------------------------------------------------------
 
