@@ -35,9 +35,12 @@ constexpr uint16_t COL_BG       = ST77XX_BLACK;
 constexpr uint16_t COL_FG       = 0xFFFF;
 constexpr uint16_t COL_DIM      = 0x8C71;     // light gray, readable on black
 constexpr uint16_t COL_GREEN    = 0x07E0;
-constexpr uint16_t COL_RED      = 0xF800;
-constexpr uint16_t COL_AMBER    = 0xFD20;
-constexpr uint16_t COL_CYAN     = 0x07FF;
+// This panel's MADCTL is BGR, not RGB, so R and B bit fields are swapped
+// relative to the Adafruit defaults.  Green (center 6 bits) is unaffected.
+// 0xF800 renders blue; 0x001F renders red.  0xFD20 renders cyan; 0x053F renders amber.
+constexpr uint16_t COL_RED      = 0x001F;
+constexpr uint16_t COL_AMBER    = 0x053F;
+constexpr uint16_t COL_CYAN     = 0xFFE0;     // BGR-corrected cyan
 constexpr uint16_t COL_HEADER   = 0x10A2;     // dark blue band
 constexpr uint16_t COL_PICK     = 0x041F;     // selected row highlight
 
