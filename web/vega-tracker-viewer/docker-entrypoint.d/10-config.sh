@@ -16,3 +16,17 @@ if [ -f "$CONFIG_JS" ]; then
     sed -i "s|__API_BASE__|${ESC}|g" "$CONFIG_JS"
     echo "[entrypoint] config.js patched with API_BASE=${API_BASE_VALUE}"
 fi
+
+# Generate htpasswd file for Basic Auth from env vars.
+# Same credentials as susman-ingress proxy so both paths require the same login.
+HTPASSWD_PATH="/etc/nginx/tracker_htpasswd"
+if [ -n "${TRACKER_USER:-}" ] && [ -n "${TRACKER_PASS:-}" ]; then
+    # openssl passwd -apr1 is available in the nginx:alpine base image.
+    HASH=$(openssl passwd -apr1 "${TRACKER_PASS}")
+    printf '%s:%s\n' "${TRACKER_USER}" "${HASH}" > "${HTPASSWD_PATH}"
+    chmod 644 "${HTPASSWD_PATH}"
+    echo "[entrypoint] tracker_htpasswd written for user '${TRACKER_USER}'"
+else
+    echo "[entrypoint] WARNING: TRACKER_USER or TRACKER_PASS not set — auth disabled"
+    echo "disabled:!" > "${HTPASSWD_PATH}"
+fi

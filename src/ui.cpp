@@ -264,11 +264,10 @@ void Ui::renderHeader() {
 
     const bool fix = gps_ && gps_->hasFix();
     char gbuf[10]; snprintf(gbuf, sizeof(gbuf), "GPS %s", fix ? "3D" : "NO");
-    // Red background pill when no fix so it reads as alarming, not dim.
-    // Green text on header when fix; white text on red bg when no fix.
+    // Red text on header bg when no fix; green text on header bg when locked.
     field(1, 36, 2, 44, 8, gbuf,
-          fix ? COL_GREEN : COL_FG,
-          fix ? COL_HEADER : COL_RED, 1);
+          fix ? COL_GREEN : COL_RED,
+          COL_HEADER, 1);
 
     char bbuf[12];
     if (vbatPct_ >= 0) snprintf(bbuf, sizeof(bbuf), "BAT %3d%%", vbatPct_);
@@ -355,12 +354,12 @@ void Ui::renderGps() {
     if (!gps_) return;
     char buf[24];
 
-    // FIX badge: green text on black when locked; white text on red bg when not.
+    // FIX badge: green text on black when locked; red text on black when not.
     const bool hasFix = gps_->hasFix();
     snprintf(buf, sizeof(buf), "FIX %s", hasFix ? "3D" : "NO");
     field(20, 4, 14, 76, 8, buf,
-          hasFix ? COL_GREEN : COL_FG,
-          hasFix ? COL_BG    : COL_RED, 1);
+          hasFix ? COL_GREEN : COL_RED,
+          COL_BG, 1);
 
     // Satellites: red < 4, amber 4-6, green >= 7
     const uint8_t sats = gps_->satellites();
