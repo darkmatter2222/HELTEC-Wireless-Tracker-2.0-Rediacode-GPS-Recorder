@@ -109,6 +109,14 @@ struct Internal {
     // which appears to compound the 110's already-flaky state.
     uint32_t          lastConnectMs = 0;
 
+    // Non-blocking auto-scan state. Previously doScan() blocked the Arduino
+    // main loop for RADIACODE_SCAN_MS (8 s) on every reconnect cycle, starving
+    // the button state machine and causing the 5-second double-long-press
+    // confirmation window to expire unnoticed. The scan now runs asynchronously
+    // in the BLE stack task; loop() polls for a captured device each call.
+    bool              autoScanActive = false;
+    uint32_t          autoScanDeadline = 0;
+
     Preferences       prefs;
 };
 static Internal g;
@@ -1136,7 +1144,13 @@ void RadiaCode::loop() {
 
     // Request timeout. Don't disconnect on a single timeout -- the 110 is\n    // observed to take 5-9 s for the first VS_DATA_BUF response after\n    // Ready, and an idle slot or two is normal. Just clear the flag and\n    // let the next poll fire. The peer will close the link itself if it\n    // really has gone away.\n    if (g.awaitingResponse && (int32_t)(now - g.activeDeadlineMs) >= 0) {\n        log_w("Request 0x%04X timed out (cmd will be retried by next poll)", g.activeCmd);\n        g.awaitingResponse = false;\n        g.expectedLen = -1;\n        g.respBuffer.clear();\n    }
 
-    // Drive scan/reconnect when not connected (auto-mode)
+    // Drive scan/reconnect when not connected (non-blocking async auto-mode).
+    // Previously doScan() blocked the main loop for RADIACODE_SCAN_MS (8 s)
+    // every ~13 seconds during BLE reconnect cycling. This starved the button
+    // state machine (confirmStopPending_ expired unnoticed) and made menus
+    // unresponsive. The scan now runs in the BLE stack task; loop() just polls
+    // g.foundDev each call. connectToFound() still blocks (~1-5 s) but only
+    // fires once per reconnect, not once per scan window.
     if (g.state == State::Idle || g.state == State::Disconnected) {
         if (g.autoRetryHalted) {
             // Don't auto-retry. The previous connect attempt failed
@@ -1144,10 +1158,46 @@ void RadiaCode::loop() {
             // Wait for explicit user command to resume.
             return;
         }
-        static uint32_t nextScan = 0;
-        if ((int32_t)(now - nextScan) >= 0) {
-            doScan(cfg::RADIACODE_SCAN_MS);
-            nextScan = millis() + cfg::RADIACODE_RECONNECT_MS;
+
+        NimBLEScan* scan = NimBLEDevice::getScan();
+        static uint32_t nextAutoScan = 0;
+
+        if (g.autoScanActive) {
+            if (g.foundDev) {
+                // ScanCb captured a matching device; stop the scan and connect.
+                scan->stop();
+                g.autoScanActive = false;
+                const bool ok = connectToFound();  // blocks ~1-5 s per reconnect
+                if (!ok && g.state == State::Connecting) {
+                    setState(State::Disconnected);
+                }
+                if (!ok) {
+                    nextAutoScan = millis() + cfg::RADIACODE_RECONNECT_MS;
+                }
+            } else if ((int32_t)(now - g.autoScanDeadline) >= 0 ||
+                       !scan->isScanning()) {
+                // Scan window elapsed (or NimBLE finished naturally); no match.
+                if (scan->isScanning()) scan->stop();
+                g.autoScanActive = false;
+                setState(State::Disconnected);
+                nextAutoScan = millis() + cfg::RADIACODE_RECONNECT_MS;
+            }
+            return;
+        }
+
+        // Start a fresh async scan once the inter-scan cooldown elapses.
+        if ((int32_t)(now - nextAutoScan) >= 0) {
+            setState(State::Scanning);
+            if (g.foundDev) { delete g.foundDev; g.foundDev = nullptr; }
+            scan->setAdvertisedDeviceCallbacks(&gScanCb, /*wantDuplicates=*/true);
+            scan->setActiveScan(true);
+            scan->setInterval(100);
+            scan->setWindow(99);
+            scan->setDuplicateFilter(false);
+            scan->setMaxResults(0);
+            scan->start(cfg::RADIACODE_SCAN_MS / 1000, nullptr, false);  // async
+            g.autoScanActive   = true;
+            g.autoScanDeadline = millis() + cfg::RADIACODE_SCAN_MS;
         }
         return;
     }

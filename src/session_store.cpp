@@ -347,13 +347,19 @@ bool SessionStore::resumeIfActive() {
     }
     recording_ = true;
 
-    // Recompute sample count by scanning lines (skip header)
+    // Recompute sample count by scanning lines (skip header).
+    // Use a raw byte buffer rather than readStringUntil() which allocates a
+    // heap String for every row -- O(N) heap churn stalls append() on large
+    // sessions because LittleFS uses a global volume mutex.
     File data = fs_->open(pathFor(activeId_), "r");
     if (data) {
         sampleCount_ = 0;
-        while (data.available()) {
-            data.readStringUntil('\n');
-            ++sampleCount_;
+        uint8_t buf[256];
+        size_t n;
+        while ((n = data.read(buf, sizeof(buf))) > 0) {
+            for (size_t i = 0; i < n; ++i) {
+                if (buf[i] == '\n') ++sampleCount_;
+            }
         }
         if (sampleCount_ > 0) --sampleCount_; // header
         data.close();
@@ -580,16 +586,26 @@ std::vector<SessionStore::SessionInfo> SessionStore::listSessions() const {
                 info.id        = stripCsvSuffix(name);
                 info.sizeBytes = f.size();
                 info.samples   = 0;
-                // Cheap line count. Re-open for a separate read pass since
-                // the directory's File handle is positioned at metadata.
-                File data = fs_->open(String(cfg::SESSIONS_DIR) + "/" + name, "r");
-                if (data) {
-                    while (data.available()) {
-                        data.readStringUntil('\n');
-                        ++info.samples;
+                // For the active recording session use the in-memory count --
+                // no file read needed, and avoids holding the LittleFS mutex
+                // while append() may be waiting for it on the NimBLE task.
+                // For completed sessions, scan bytes from the file; a 256-byte
+                // buffer avoids the O(N) heap churn of readStringUntil().
+                if (info.id == activeId_) {
+                    info.samples = sampleCount_;
+                } else {
+                    File data = fs_->open(String(cfg::SESSIONS_DIR) + "/" + name, "r");
+                    if (data) {
+                        uint8_t buf[256];
+                        size_t n;
+                        while ((n = data.read(buf, sizeof(buf))) > 0) {
+                            for (size_t i = 0; i < n; ++i) {
+                                if (buf[i] == '\n') ++info.samples;
+                            }
+                        }
+                        if (info.samples > 0) --info.samples;  // header
+                        data.close();
                     }
-                    if (info.samples > 0) --info.samples;   // header
-                    data.close();
                 }
                 out.push_back(info);
             }

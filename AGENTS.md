@@ -235,7 +235,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.3.3`.
+Current: `0.3.4`.
 
 ---
 
@@ -721,6 +721,54 @@ Otherwise, iterate to completion.
   The Wi-Fi uploader uploads and deletes the session file within ~60 seconds.
   Fix: first long-press shows "HOLD AGAIN: STOP REC" confirmation (5-second
   window). Second long-press stops. Any other input or timeout cancels.
+
+### Blocking BLE Auto-Scan / Button Failure During Reconnect Storm (v0.3.4)
+
+- **Root cause**: `RadiaCode::loop()` called `doScan(RADIACODE_SCAN_MS)` which
+  is a **synchronous blocking scan** lasting 8 seconds on every reconnect
+  attempt. With `RADIACODE_RECONNECT_MS = 5 s`, the main Arduino loop (core 1)
+  was blocked 8 out of every 13 seconds during a BLE disconnect/reconnect storm.
+- **Symptoms observed**:
+  1. After 2-3 hours of field use (one large session building up), BLE kept
+     disconnecting and reconnecting for ~1 hour before stabilizing.
+  2. During (and after) the storm, the double long-press stop-recording
+     confirmation **never worked** (failed ~40 consecutive times). The user
+     held the button, saw "HOLD AGAIN: STOP REC", held it again — nothing.
+  3. Menu navigation was increasingly sluggish as session count grew.
+- **Why the button failed**: `pressStartMs_` in `Button::poll()` is set to the
+  current `millis()` when the first stable press is detected by the main loop.
+  During the 8-second scan block, `poll()` isn't called. When the block ends,
+  `pressStartMs_` is stamped at block-end, not at the physical press start.
+  More critically: `Ui::tick()` (which checks the 10-second confirmation timer)
+  wasn't called during the block. If a reconnect cycle happened while
+  `confirmStopPending_ = true`, the timer expired unnoticed during the block,
+  and `tick()`'s first call after unblocking immediately cleared the flag.
+- **Fix (v0.3.4)**:
+  - `doScan()` is no longer called from `loop()`. The auto-mode scan now runs
+    asynchronously via `scan->start(duration, nullptr, false)` (BLE stack task).
+    `loop()` polls `g.foundDev` and `g.autoScanActive` each iteration.
+    The main loop is never blocked by the scan thread. `connectToFound()` still
+    blocks (~1-5 s) but only fires once per reconnect, not every scan window.
+  - `kConfirmStopTimeoutMs` increased from 5 s to 10 s to give headroom for
+    the brief `connectToFound()` blocking period that remains.
+
+### O(N) Line Counting in listSessions() / resumeIfActive() (v0.3.4)
+
+- **Root cause**: LittleFS path in `listSessions()` and `resumeIfActive()` used
+  `data.readStringUntil('\n')` to count lines, allocating and freeing a heap
+  `String` for every single row — 20,000 alloc/free cycles for a 20,000-row
+  session. `esp_littlefs` uses a **global volume mutex**: the WiFi uploader task
+  (core 0) calling `listSessions()` every 60 s held that mutex while churning
+  through 20,000 String allocations, blocking `append()` calls on the NimBLE
+  host task for hundreds of milliseconds and starving BLE connection events.
+- **Fix (v0.3.4)**:
+  - Replaced `readStringUntil('\n')` with a 256-byte raw buffer scan (same
+    approach the SdFat backend already used). O(N) cost is now pure byte reads,
+    no heap allocation.
+  - For the **active recording session**, `listSessions()` returns `sampleCount_`
+    from memory instead of touching the file at all (the active session is
+    filtered out by the WiFi uploader immediately anyway).
+
 
 ### V1.2 vs V2 Panel
 

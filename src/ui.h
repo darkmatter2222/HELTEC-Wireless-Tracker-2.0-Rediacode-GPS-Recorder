@@ -72,9 +72,11 @@ private:
     // Stopping recording requires two consecutive long-presses within
     // kConfirmStopTimeoutMs.  The first long-press arms this flag; the
     // second actually executes the stop.  Prevents accidental mid-trip stops.
+    // 10 s gives enough margin even when a BLE connect attempt (~1-5 s)
+    // fires between the two presses.
     bool               confirmStopPending_ = false;
     uint32_t           confirmStopArmMs_   = 0;
-    static constexpr uint32_t kConfirmStopTimeoutMs = 5000;
+    static constexpr uint32_t kConfirmStopTimeoutMs = 10000;
     bool               forceFullRedraw_ = true;
     Screen             lastDrawnScreen_ = SCREEN_NORMAL_COUNT;
 
