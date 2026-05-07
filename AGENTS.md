@@ -410,14 +410,23 @@ All routes on `susmannet.duckdns.org` (tracker, API, root redirect) require
 HTTP Basic Auth. The firmware uploads directly to `http://192.168.86.48:8030`
 (bypasses the ingress proxy entirely) and are NOT affected.
 
+**Auth is enforced at two layers:**
+1. **`susman-ingress`** (port 443) — protects all public HTTPS traffic
+2. **`vega-tracker-viewer`** (port 8031) — also enforces auth on direct LAN access
+
+Both use the same credentials, generated identically via `openssl passwd -apr1`.
+
 **How it works:**
-- `entrypoint.sh` reads `TRACKER_USER` and `TRACKER_PASS` env vars at container
-  startup. Uses `openssl passwd -apr1` to generate an Apache-compatible MD5-crypt
-  hash and writes it to `/etc/nginx/tracker_htpasswd` (mode 644).
+- `entrypoint.sh` (susman-ingress) and `10-config.sh` (viewer) each read
+  `TRACKER_USER` and `TRACKER_PASS` env vars at container startup.
+  `openssl passwd -apr1` generates an Apache-compatible MD5-crypt hash and
+  writes it to `/etc/nginx/tracker_htpasswd` (mode 644).
 - If either var is unset, a dummy `disabled:!` entry is written — nginx starts
   but no password will ever match (effectively locks the site).
 - `htpasswd` file permissions must be **644** (not 600): nginx worker process
   runs as the `nginx` user inside the container, not as root.
+- The viewer's `Dockerfile` includes `RUN apk add --no-cache openssl` to ensure
+  openssl is available in the `nginx:alpine` runtime stage.
 
 **Credentials are stored in `~/docucraft/.env` on the server** (gitignored):
 ```
@@ -432,20 +441,38 @@ environment:
   - TRACKER_PASS=${TRACKER_PASS:-}
 ```
 
+The viewer's `~/vega-tracker-viewer/.env` also holds the credentials:
+```
+TRACKER_USER=<username>
+TRACKER_PASS=<password>
+```
+And `~/vega-tracker-viewer/docker-compose.yml` passes them through:
+```yaml
+environment:
+  TRACKER_USER: ${TRACKER_USER:-}
+  TRACKER_PASS: ${TRACKER_PASS:-}
+```
+
 **To change credentials:**
 ```powershell
 # Edit on server
 ssh -i ~/.ssh/id_rsa darkmatter2222@192.168.86.48
-# Update TRACKER_USER / TRACKER_PASS in ~/docucraft/.env, then:
+# Update TRACKER_USER / TRACKER_PASS in both:
+#   ~/docucraft/.env  (susman-ingress)
+#   ~/vega-tracker-viewer/.env  (viewer direct)
+# Then restart both:
 cd ~/docucraft && docker compose -f docker-compose.prod.yml up -d susman-ingress
+cd ~/vega-tracker-viewer && docker compose up -d
 ```
 
 **To verify auth:**
 ```powershell
-# Should return 401
+# Public HTTPS proxy (should return 401 then 200)
 ssh -i ~/.ssh/id_rsa darkmatter2222@192.168.86.48 "curl -sk -o /dev/null -w '%{http_code}' -H 'Host: susmannet.duckdns.org' https://localhost/tracker/"
-# Should return 200
 ssh -i ~/.ssh/id_rsa darkmatter2222@192.168.86.48 "curl -sk -o /dev/null -w '%{http_code}' -u 'USER:PASS' -H 'Host: susmannet.duckdns.org' https://localhost/tracker/"
+# Direct LAN viewer port (should also return 401 then 200)
+ssh -i ~/.ssh/id_rsa darkmatter2222@192.168.86.48 "curl -s -o /dev/null -w '%{http_code}' http://localhost:8031/tracker/"
+ssh -i ~/.ssh/id_rsa darkmatter2222@192.168.86.48 "curl -s -o /dev/null -w '%{http_code}' -u 'USER:PASS' http://localhost:8031/tracker/"
 ```
 
 ### Initial deploy / re-deploy
