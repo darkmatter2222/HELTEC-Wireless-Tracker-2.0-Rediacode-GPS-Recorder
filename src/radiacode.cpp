@@ -942,40 +942,6 @@ static bool connectToAddress(const std::string& addr, uint8_t addrType) {
     return finishConnect(g.client);
 }
 
-static void doScan(uint32_t durMs) {
-    setState(RadiaCode::State::Scanning);
-    if (g.foundDev) { delete g.foundDev; g.foundDev = nullptr; }
-    g.scanResults.clear();
-
-    NimBLEScan* scan = NimBLEDevice::getScan();
-    scan->setAdvertisedDeviceCallbacks(&gScanCb, /*wantDuplicates=*/true);
-    scan->setActiveScan(true);
-    scan->setInterval(100);
-    scan->setWindow(99);
-    scan->setDuplicateFilter(false);
-    scan->start(durMs / 1000, false);
-    scan->stop();
-
-    if (g.foundDev) {
-        connectToFound();
-    } else {
-        setState(RadiaCode::State::Disconnected);
-    }
-}
-
-// Non-blocking scan (uses NimBLE's async start). Results land in g.scanResults
-// via the existing ScanCb. Caller polls isManualScanComplete().
-static void startAsyncScan(uint32_t durMs) {
-    g.scanResults.clear();
-    if (g.foundDev) { delete g.foundDev; g.foundDev = nullptr; }
-    NimBLEScan* scan = NimBLEDevice::getScan();
-    scan->setAdvertisedDeviceCallbacks(&gScanCb, /*wantDuplicates=*/true);
-    scan->setActiveScan(true);
-    scan->setInterval(100);
-    scan->setWindow(99);
-    scan->setDuplicateFilter(false);
-    scan->start(durMs / 1000, nullptr, false);   // async, no completion cb
-}
 
 // ----------------- public surface ---------------------------------------------
 void RadiaCode::begin(ReadingCb onReading, StateCb onState) {
