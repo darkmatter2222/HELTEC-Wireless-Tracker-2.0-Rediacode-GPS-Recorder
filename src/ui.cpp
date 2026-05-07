@@ -271,12 +271,17 @@ void Ui::renderHeader() {
                                    : (vbatPct_ < 40 ? COL_AMBER : COL_FG));
     field(2, 84, 2, 54, 8, bbuf, bcol, COL_HEADER, 1);
 
-    // Recording dot (drawn directly; only paint state changes are noticeable)
+    // Recording dot: always draw a circle so the indicator position is obvious.
+    // Filled red = recording; dim outline = idle.
     const bool rec = store_ && store_->isRecording();
     static bool prevRec = false;
     if (forceFullRedraw_ || rec != prevRec) {
         tft.fillRect(140, 1, 18, 10, COL_HEADER);
-        if (rec) tft.fillCircle(149, 6, 4, COL_RED);
+        if (rec) {
+            tft.fillCircle(149, 6, 4, COL_RED);
+        } else {
+            tft.drawCircle(149, 6, 4, COL_DIM);
+        }
         prevRec = rec;
     }
 }
@@ -321,18 +326,20 @@ void Ui::renderStats() {
         field(15, 116, 50, 42, 8, "", COL_DIM, COL_BG, 1);
     }
 
-    // Footer line: state hint + last 5 of MAC
-    char foot[24];
+    // Footer: GPS accuracy when connected; scan hint when not connected.
+    char foot[28];
+    uint16_t footCol = COL_DIM;
     if (rcState_ != RadiaCode::State::Ready) {
         snprintf(foot, sizeof(foot), "Hold: pick RC");
-    } else if (rcAddr_.length() >= 5) {
-        snprintf(foot, sizeof(foot), "RC %s%s",
-                 rcAddr_.substring(rcAddr_.length() - 5).c_str(),
-                 (gps_ && gps_->hasFix()) ? "" : " *noGPS");
+    } else if (gps_ && gps_->hasFix()) {
+        const float acc = (float)gps_->hdop() * 3.0f;
+        snprintf(foot, sizeof(foot), "+/-%4.1fm  hdop %.1f", acc, (float)gps_->hdop());
+        footCol = COL_GREEN;
     } else {
-        strcpy(foot, "");
+        snprintf(foot, sizeof(foot), "GPS: searching...");
+        footCol = COL_AMBER;
     }
-    field(16, 4, 66, 156, 8, foot, COL_DIM, COL_BG, 1);
+    field(16, 4, 66, 156, 8, foot, footCol, COL_BG, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -378,7 +385,18 @@ void Ui::renderGps() {
         field(27, 84, 50, 76, 8, "  ---  ", COL_DIM, COL_BG, 1);
     }
 
-    field(28, 4, 66, 156, 8, "Acquiring fix outdoors", COL_DIM, COL_BG, 1);
+    // Footer hint: guide user when searching; show smoothed bearing when locked.
+    if (!gps_->hasFix()) {
+        field(28, 4, 66, 156, 8, "Acquiring fix outdoors", COL_DIM, COL_BG, 1);
+    } else {
+        const double brg = gps_->bearingFromHistory();
+        if (brg >= 0.0) {
+            snprintf(buf, sizeof(buf), "Hdg %3.0f deg", brg);
+            field(28, 4, 66, 156, 8, buf, COL_DIM, COL_BG, 1);
+        } else {
+            field(28, 4, 66, 156, 8, "Fix OK", COL_GREEN, COL_BG, 1);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

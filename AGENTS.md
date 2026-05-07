@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.3.4`.
+Current: `0.3.5`.
 
 ---
 
@@ -302,10 +302,19 @@ Empty `WIFI_SSID` or `INGEST_URL` disables the Wi-Fi uploader silently.
 - Screens cycled by short-press: STATS → GPS → STORAGE → PICKER (long-press)
 - **Stop-recording requires DOUBLE long-press** (added v0.2.0):
   - First long-press on STORAGE while recording: shows red "HOLD AGAIN: STOP REC"
-  - Second long-press within 5 seconds: stops recording
-  - Single press, short press, or 5-second timeout cancels — recording continues
+  - Second long-press within 10 seconds (v0.3.4+): stops recording
+  - Single press, short press, or timeout cancels — recording continues
   - Starting recording still requires only one long-press (no confirmation)
 - This prevents accidental stop from road vibration bumping the button
+- **Header status bar** (v0.3.5): RC state badge (GREEN=OK, AMBER=scanning/init, RED=disconnected);
+  GPS badge (GREEN=3D fix, RED=no fix); battery with color threshold; recording dot always visible
+  (dim outline = idle, filled red = recording)
+- **STATS screen footer** (v0.3.5): Shows GPS positional accuracy `+/- X.Xm  hdop Y.Y` (green)
+  when RC connected and GPS fix; `GPS: searching...` (amber) when no fix; `Hold: pick RC` when disconnected.
+  Replaces the old RC-address + `*noGPS` footer.
+- **GPS screen footer** (v0.3.5): Shows smoothed bearing `Hdg NNN deg` when fix is locked (same
+  bearing logged to CSV via `bearingFromHistory()`); `Fix OK` if bearing not yet computed; reverts
+  to `Acquiring fix outdoors` only when there is no GPS fix.
 
 ### Wi-Fi Uploader — `wifi_uploader.{h,cpp}`
 

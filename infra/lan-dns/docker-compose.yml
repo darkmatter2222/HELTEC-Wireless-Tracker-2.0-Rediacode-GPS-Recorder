@@ -1,0 +1,19 @@
+services:
+  lan-dns:
+    image: jpillora/dnsmasq:latest
+    container_name: lan-dns
+    restart: unless-stopped
+    # Bind ONLY to the server's LAN IP on port 53 so systemd-resolved on
+    # loopback (127.0.0.53) is left untouched.
+    ports:
+      - "192.168.86.48:53:53/udp"
+      - "192.168.86.48:53:53/tcp"
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - ./dnsmasq.conf:/etc/dnsmasq.conf:ro
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "2"
