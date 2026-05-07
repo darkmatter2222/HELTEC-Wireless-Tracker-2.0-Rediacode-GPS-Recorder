@@ -58,6 +58,9 @@ static bool get_field(const char* row, int idx, char* dst, size_t dstsz) {
 }
 
 // ---------------------------------------------------------------------------
+void setUp(void) {}    // Required by Unity
+void tearDown(void) {} // Required by Unity
+// ---------------------------------------------------------------------------
 // Timestamp gate tests
 // ---------------------------------------------------------------------------
 

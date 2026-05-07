@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 // ---------------------------------------------------------------------------
 // Algorithm under test (faithfully replicated from session_store.cpp fix).
@@ -69,6 +70,9 @@ static size_t make_csv(uint8_t* dst, size_t dstsize, int num_rows) {
     return pos;
 }
 
+// ---------------------------------------------------------------------------
+void setUp(void) {}    // Required by Unity
+void tearDown(void) {} // Required by Unity
 // ---------------------------------------------------------------------------
 // Test cases
 // ---------------------------------------------------------------------------

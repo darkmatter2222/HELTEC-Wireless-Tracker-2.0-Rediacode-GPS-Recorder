@@ -565,6 +565,53 @@ The viewer has a persistent top navigation bar with **Explore** and **Data Manag
 
 ---
 
+## Testing
+
+### Native unit tests (runs on host PC — no hardware required)
+
+Three test suites live under `test/`:
+
+| Suite                    | Tests | What it validates |
+|--------------------------|-------|-------------------|
+| `test_line_count_native` | 10    | Buffered newline-count algorithm (the O(1) fix from v0.3.4) |
+| `test_battery_native`    | 11    | LiPo voltage-to-percent interpolation table |
+| `test_csv_schema_native` | 15    | MIN_VALID_TS_MS gate, 10-column schema, field extraction |
+
+**Prerequisites on Windows**: PlatformIO's native env calls `gcc`/`g++`/`ar` which
+are not in PATH by default. If VS Build Tools 2022 is installed, create one-time
+batch wrappers in any temp dir and prepend that dir to PATH:
+
+```powershell
+# Run once per shell session (or add to profile)
+$wrapDir = "$env:TEMP\pio_gcc_wrap"
+New-Item -ItemType Directory -Force -Path $wrapDir | Out-Null
+$llvm = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin"
+Set-Content "$wrapDir\gcc.bat"  "@echo off`r`n`"$llvm\clang.exe`" %*"   -Encoding Ascii
+Set-Content "$wrapDir\g++.bat"  "@echo off`r`n`"$llvm\clang++.exe`" %*" -Encoding Ascii
+Set-Content "$wrapDir\ar.bat"   "@echo off`r`n`"$llvm\llvm-ar.exe`" %*" -Encoding Ascii
+$env:PATH = "$wrapDir;$env:PATH"
+```
+
+Then run all three host-side suites:
+
+```powershell
+pio test -e native
+# Expected: 36 test cases: 36 succeeded
+```
+
+### Integration tests (requires device on serial port)
+
+```powershell
+# Device must be connected to USB-CDC before running.
+python scripts\test_device.py                 # defaults to COM4
+python scripts\test_device.py --port COM3
+```
+
+Tests heartbeat format/cadence, every REPL command timing, sample-count
+consistency, and 30-second serial latency loop (the non-blocking BLE regression).
+
+---
+
 ## Python Dev Tools (scripts/)
 
 ```powershell
