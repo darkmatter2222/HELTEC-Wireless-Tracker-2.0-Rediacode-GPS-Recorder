@@ -77,6 +77,12 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 │   ├── plot_session_map.py       # interactive Folium map from CSV
 │   ├── overnight_watch.py        # log-tailing watchdog with reconnect
 │   └── capture_boot.py           # trigger ESP32 reset via DTR/RTS and capture boot log
+├── infra/
+│   └── duckdns/                  # DuckDNS dynamic DNS — Docker Compose (server-side)
+│       ├── .env                  # real token — gitignored, lives only on server
+│       ├── .env.example          # template (safe to commit)
+│       ├── .gitignore            # ensures .env is never committed
+│       └── docker-compose.yml
 ├── api/
 │   └── vega-tracker-ingest/      # Radiological Map Ingest API — FastAPI service (Docker)
 │       ├── .env                  # real credentials — gitignored
@@ -153,6 +159,12 @@ SSH_KEY_PATH=~/.ssh/id_rsa
 REMOTE_PATH=/home/darkmatter2222/vega-tracker-viewer
 WEB_PORT=8031
 API_BASE=http://192.168.86.48:8030
+```
+
+`infra/duckdns/.env` (lives only on server at `~/docker/duckdns/.env` — never in repo):
+```
+DUCKDNS_SUBDOMAINS=susmannet
+DUCKDNS_TOKEN=<token — see DuckDNS account page>
 ```
 
 ---
@@ -338,6 +350,66 @@ Heartbeat format (every 3 s):
 ```
 [HB] uptime=Xs fix=N sats=N hdop=H gpsB=N gpsAge=Xms baud=N rcState=N rec=0/1 samples=N
 ```
+
+---
+
+## DuckDNS Dynamic DNS (infra/duckdns)
+
+Keeps `susmannet.duckdns.org` pointed at the home server's current public IPv4 address.
+Fully automated — no manual intervention ever needed.
+
+| Item              | Value                                          |
+|-------------------|------------------------------------------------|
+| Container name    | `duckdns`                                      |
+| Image             | `lscr.io/linuxserver/duckdns:latest`           |
+| Subdomain         | `susmannet` → `susmannet.duckdns.org`          |
+| Update interval   | every 5 minutes (built into linuxserver image) |
+| Restart policy    | `unless-stopped` (survives reboots)            |
+| Server path       | `~/docker/duckdns/`                            |
+| Timezone          | America/New_York                               |
+| Ports exposed     | none                                           |
+
+The `.env` file with the real token lives **only on the server** at
+`~/docker/duckdns/.env`. It is never in the repo. The repo contains only
+`infra/duckdns/.env.example` as a safe template.
+
+### Initial deploy / re-deploy
+
+```powershell
+# Copy compose file to server
+scp infra/duckdns/docker-compose.yml darkmatter2222@192.168.86.48:~/docker/duckdns/
+
+# Write .env on server (replace token as needed)
+ssh darkmatter2222@192.168.86.48 "printf 'DUCKDNS_SUBDOMAINS=susmannet\nDUCKDNS_TOKEN=<your-token>\n' > ~/docker/duckdns/.env"
+
+# Start container
+ssh darkmatter2222@192.168.86.48 "cd ~/docker/duckdns && docker compose up -d"
+```
+
+### Verify
+
+```powershell
+# Check container is running
+ssh darkmatter2222@192.168.86.48 "docker ps --filter name=duckdns"
+
+# Check logs (should show "successful" within first update cycle)
+ssh darkmatter2222@192.168.86.48 "docker logs duckdns 2>&1 | tail -5"
+
+# Manual API hit to confirm token is valid
+ssh darkmatter2222@192.168.86.48 "curl -s 'https://www.duckdns.org/update?domains=susmannet&token=<your-token>&ip='"
+# Expected: OK
+
+# DNS resolution
+ssh darkmatter2222@192.168.86.48 "nslookup susmannet.duckdns.org"
+```
+
+### Notes
+
+- Do not include `UPDATE_IP=ipv4` unless auto-detection fails; omitting it lets
+  DuckDNS detect the public IPv4 itself.
+- A `502 Bad Gateway` in the logs on first startup is a transient DuckDNS server
+  blip — not a config error. The 5-minute retry cycle resolves it automatically.
+  Verify with `curl` if you see it.
 
 ---
 
