@@ -373,6 +373,34 @@ The `.env` file with the real token lives **only on the server** at
 `~/docker/duckdns/.env`. It is never in the repo. The repo contains only
 `infra/duckdns/.env.example` as a safe template.
 
+### Public URLs
+
+| URL                                      | Description                       |
+|------------------------------------------|-----------------------------------|
+| `https://susmannet.duckdns.org/`         | Radiological Map Viewer           |
+| `https://susmannet.duckdns.org/api/`     | Radiological Map Ingest API       |
+
+Traffic flows: browser → router (443 forwarded) → `susman-ingress` nginx → upstream service.
+Local direct access (192.168.86.48:8031 / 8030) is preserved for firmware and LAN tools.
+
+### susman-ingress nginx integration
+
+`susmannet.duckdns.org` is served by the **existing `susman-ingress`** container
+(`~/docucraft/docker-compose.prod.yml`). The nginx template at
+`~/docucraft/nginx/nginx.conf.template` was extended with:
+- HTTP server block (port 80): ACME challenge passthrough + redirect to HTTPS
+- HTTPS server block (port 443):
+  - `/api/` → `http://192.168.86.48:8030/` (vega-tracker-ingest, prefix stripped)
+  - `/` → `http://192.168.86.48:8031/` (vega-tracker-viewer)
+
+SSL: Let's Encrypt cert issued via HTTP-01 webroot challenge using the shared
+`docucraft_susman-certbot-www` volume. Cert path in the shared `docucraft_susman-certs`
+volume: `/etc/nginx/certs/live/susmannet.duckdns.org/`. Auto-renewed by the
+`docucraft-certbot-renew-1` container (every 12 h, `certbot renew`).
+
+The viewer's `API_BASE` on the server (`~/vega-tracker-viewer/.env`) is set to
+`https://susmannet.duckdns.org/api` so the SPA makes API calls through the proxy.
+
 ### Initial deploy / re-deploy
 
 ```powershell
