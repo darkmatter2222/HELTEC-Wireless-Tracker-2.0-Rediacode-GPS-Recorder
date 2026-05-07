@@ -377,8 +377,9 @@ The `.env` file with the real token lives **only on the server** at
 
 | URL                                      | Description                       |
 |------------------------------------------|-----------------------------------|
-| `https://susmannet.duckdns.org/`         | Radiological Map Viewer           |
+| `https://susmannet.duckdns.org/tracker/` | Radiological Map Viewer           |
 | `https://susmannet.duckdns.org/api/`     | Radiological Map Ingest API       |
+| `https://susmannet.duckdns.org/`         | 302 redirect → `/tracker/`        |
 
 Traffic flows: browser → router (443 forwarded) → `susman-ingress` nginx → upstream service.
 Local direct access (192.168.86.48:8031 / 8030) is preserved for firmware and LAN tools.
@@ -390,8 +391,9 @@ Local direct access (192.168.86.48:8031 / 8030) is preserved for firmware and LA
 `~/docucraft/nginx/nginx.conf.template` was extended with:
 - HTTP server block (port 80): ACME challenge passthrough + redirect to HTTPS
 - HTTPS server block (port 443):
+  - `/tracker/` → `http://192.168.86.48:8031/` (vega-tracker-viewer, prefix stripped)
   - `/api/` → `http://192.168.86.48:8030/` (vega-tracker-ingest, prefix stripped)
-  - `/` → `http://192.168.86.48:8031/` (vega-tracker-viewer)
+  - `location = /` → 302 redirect to `/tracker/`
 
 SSL: Let's Encrypt cert issued via HTTP-01 webroot challenge using the shared
 `docucraft_susman-certbot-www` volume. Cert path in the shared `docucraft_susman-certs`
@@ -531,10 +533,14 @@ cd web\vega-tracker-viewer
 ```
 
 The React app is built inside the Docker image at build time (Vite build).
+`vite.config.js` has `base: '/tracker/'` so all compiled asset paths are prefixed with
+`/tracker/`. This matches the `susman-ingress` nginx proxy which strips that prefix before
+forwarding to the container on port 8031 — so the container still serves at its own root.
 `API_BASE` env var is injected at container runtime via `nginx.conf` + `/docker-entrypoint.d/10-config.sh`,
 patching `public/config.js` so the compiled JS references the right API URL.
 
-Viewer URL: `http://192.168.86.48:8031/`
+Viewer URL (LAN direct): `http://192.168.86.48:8031/`
+Viewer URL (public): `https://susmannet.duckdns.org/tracker/`
 
 ### Viewer Layout — Two Top-Level Modes
 
