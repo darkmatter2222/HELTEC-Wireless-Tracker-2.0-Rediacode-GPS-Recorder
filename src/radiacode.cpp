@@ -1117,11 +1117,25 @@ void RadiaCode::loop() {
     // unresponsive. The scan now runs in the BLE stack task; loop() just polls
     // g.foundDev each call. connectToFound() still blocks (~1-5 s) but only
     // fires once per reconnect, not once per scan window.
-    if (g.state == State::Idle || g.state == State::Disconnected) {
+    //
+    // IMPORTANT: State::Scanning is included here intentionally. When the async
+    // scan starts we call setState(Scanning) but must still manage the scan on
+    // every subsequent loop() call (check g.foundDev, check deadline). Without
+    // Scanning in this condition the management block is skipped entirely once
+    // the scan starts, leaving the device stuck in Scanning state indefinitely.
+    if (g.state == State::Idle || g.state == State::Disconnected ||
+        g.state == State::Scanning) {
         if (g.autoRetryHalted) {
             // Don't auto-retry. The previous connect attempt failed
             // post-link (likely an SMP timeout from a soft-bricked 110).
-            // Wait for explicit user command to resume.
+            // Wait for explicit user command to resume. Also stop any scan
+            // that may have been running before the halt was set.
+            NimBLEScan* haltScan = NimBLEDevice::getScan();
+            if (g.autoScanActive) {
+                if (haltScan->isScanning()) haltScan->stop();
+                g.autoScanActive = false;
+                setState(State::Disconnected);
+            }
             return;
         }
 

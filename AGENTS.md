@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.3.5`.
+Current: `0.3.6`.
 
 ---
 
@@ -975,6 +975,32 @@ Otherwise, iterate to completion.
 - Backup telemetry written to `tracker_backups` MongoDB collection with `source`, `status`, `elapsedSec`, `sizeBytes`.
 - DatabasePanel in the viewer shows backup history with source/status badges and allows manual trigger + restore.
 
+
+### Auto-Scan State Machine — Stuck in Scanning Forever (v0.3.6)
+
+- **Root cause**: In `RadiaCode::loop()`, the auto-reconnect management block
+  was guarded by `if (g.state == Idle || Disconnected)`. When starting an async
+  scan, the code called `setState(State::Scanning)`, which changed `g.state` to
+  `State::Scanning`. On every subsequent `loop()` call, the guard (`Idle ||
+  Disconnected`) evaluated false, so the entire auto-scan management block was
+  skipped. `g.foundDev` and `scan->isScanning()` were never checked. The device
+  stayed stuck in `rcState=1` (Scanning) indefinitely — observed at 90+ minutes
+  in the field.
+- **Symptoms**: After a BLE disconnect (range loss, power-cycle, etc.), `rcState`
+  showed `1` (Scanning) in heartbeat logs but never advanced to `2` (Connecting)
+  or `4` (Ready). Required a physical device reboot to recover.
+- **Why initial boot worked**: The first session was connected via the manual
+  picker UI (`connectTo()` → `pendingConnectAddr`), which bypasses the auto-scan
+  loop entirely. The auto-scan path was always broken post-disconnect.
+- **Fix (v0.3.6)**: Extended the outer condition to include `State::Scanning`:
+  ```cpp
+  if (g.state == State::Idle || g.state == State::Disconnected ||
+      g.state == State::Scanning) {
+  ```
+  Now, while the async scan is running (`state == Scanning`, `autoScanActive ==
+  true`), subsequent `loop()` calls still enter the block and check `g.foundDev`
+  and the scan deadline. Also hardened the `autoRetryHalted` handler to stop any
+  in-progress scan cleanly before returning.
 
 ### Hex Bin Layer (replaced Heatmap)
 
