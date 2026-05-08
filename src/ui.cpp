@@ -35,9 +35,12 @@ constexpr uint16_t COL_BG       = ST77XX_BLACK;
 constexpr uint16_t COL_FG       = 0xFFFF;
 constexpr uint16_t COL_DIM      = 0x8C71;     // light gray, readable on black
 constexpr uint16_t COL_GREEN    = 0x07E0;
-constexpr uint16_t COL_RED      = 0xF800;
-constexpr uint16_t COL_AMBER    = 0xFD20;
-constexpr uint16_t COL_CYAN     = 0x07FF;
+// This panel's MADCTL is BGR, not RGB, so R and B bit fields are swapped
+// relative to the Adafruit defaults.  Green (center 6 bits) is unaffected.
+// 0xF800 renders blue; 0x001F renders red.  0xFD20 renders cyan; 0x053F renders amber.
+constexpr uint16_t COL_RED      = 0x001F;
+constexpr uint16_t COL_AMBER    = 0x053F;
+constexpr uint16_t COL_CYAN     = 0xFFE0;     // BGR-corrected cyan
 constexpr uint16_t COL_HEADER   = 0x10A2;     // dark blue band
 constexpr uint16_t COL_PICK     = 0x041F;     // selected row highlight
 
@@ -261,7 +264,10 @@ void Ui::renderHeader() {
 
     const bool fix = gps_ && gps_->hasFix();
     char gbuf[10]; snprintf(gbuf, sizeof(gbuf), "GPS %s", fix ? "3D" : "NO");
-    field(1, 36, 2, 44, 8, gbuf, fix ? COL_GREEN : COL_RED, COL_HEADER, 1);
+    // Red text on header bg when no fix; green text on header bg when locked.
+    field(1, 36, 2, 44, 8, gbuf,
+          fix ? COL_GREEN : COL_RED,
+          COL_HEADER, 1);
 
     char bbuf[12];
     if (vbatPct_ >= 0) snprintf(bbuf, sizeof(bbuf), "BAT %3d%%", vbatPct_);
@@ -271,17 +277,14 @@ void Ui::renderHeader() {
                                    : (vbatPct_ < 40 ? COL_AMBER : COL_FG));
     field(2, 84, 2, 54, 8, bbuf, bcol, COL_HEADER, 1);
 
-    // Recording dot: always draw a circle so the indicator position is obvious.
+    // Recording dot: always draw the circle so the position is always visible.
     // Filled red = recording; dim outline = idle.
     const bool rec = store_ && store_->isRecording();
     static bool prevRec = false;
     if (forceFullRedraw_ || rec != prevRec) {
         tft.fillRect(140, 1, 18, 10, COL_HEADER);
-        if (rec) {
-            tft.fillCircle(149, 6, 4, COL_RED);
-        } else {
-            tft.drawCircle(149, 6, 4, COL_DIM);
-        }
+        if (rec) tft.fillCircle(149, 6, 4, COL_RED);
+        else     tft.drawCircle(149, 6, 4, COL_DIM);
         prevRec = rec;
     }
 }
@@ -326,15 +329,16 @@ void Ui::renderStats() {
         field(15, 116, 50, 42, 8, "", COL_DIM, COL_BG, 1);
     }
 
-    // Footer: GPS accuracy when connected; scan hint when not connected.
+    // Footer: GPS accuracy when RC connected + fix; searching prompt or pick hint otherwise.
     char foot[28];
     uint16_t footCol = COL_DIM;
     if (rcState_ != RadiaCode::State::Ready) {
         snprintf(foot, sizeof(foot), "Hold: pick RC");
     } else if (gps_ && gps_->hasFix()) {
-        const float acc = (float)gps_->hdop() * 3.0f;
-        snprintf(foot, sizeof(foot), "+/-%4.1fm  hdop %.1f", acc, (float)gps_->hdop());
-        footCol = COL_GREEN;
+        const float hdopF = (float)gps_->hdop();
+        const float acc   = hdopF * 3.0f;
+        snprintf(foot, sizeof(foot), "+/-%4.1fm  hdop %.1f", acc, hdopF);
+        footCol = (acc > 15.0f) ? COL_RED : (acc > 6.0f ? COL_AMBER : COL_GREEN);
     } else {
         snprintf(foot, sizeof(foot), "GPS: searching...");
         footCol = COL_AMBER;
@@ -350,26 +354,36 @@ void Ui::renderGps() {
     if (!gps_) return;
     char buf[24];
 
-    snprintf(buf, sizeof(buf), "FIX %s", gps_->hasFix() ? "3D" : "NO");
+    // FIX badge: green text on black when locked; red text on black when not.
+    const bool hasFix = gps_->hasFix();
+    snprintf(buf, sizeof(buf), "FIX %s", hasFix ? "3D" : "NO");
     field(20, 4, 14, 76, 8, buf,
-          gps_->hasFix() ? COL_GREEN : COL_RED, COL_BG, 1);
+          hasFix ? COL_GREEN : COL_RED,
+          COL_BG, 1);
 
-    snprintf(buf, sizeof(buf), "Sats %u", (unsigned)gps_->satellites());
-    field(21, 4, 26, 76, 8, buf, COL_FG, COL_BG, 1);
+    // Satellites: red < 4, amber 4-6, green >= 7
+    const uint8_t sats = gps_->satellites();
+    const uint16_t satCol = (sats < 4) ? COL_RED : (sats < 7 ? COL_AMBER : COL_GREEN);
+    snprintf(buf, sizeof(buf), "Sats %u", (unsigned)sats);
+    field(21, 4, 26, 76, 8, buf, satCol, COL_BG, 1);
 
-    snprintf(buf, sizeof(buf), "HDOP %.1f", gps_->hdop());
-    field(22, 4, 38, 76, 8, buf, COL_FG, COL_BG, 1);
+    // HDOP: red > 5, amber 2-5, green <= 2
+    const float hdop = (float)gps_->hdop();
+    const uint16_t hdopCol = (hdop > 5.0f) ? COL_RED : (hdop > 2.0f ? COL_AMBER : COL_GREEN);
+    snprintf(buf, sizeof(buf), "HDOP %.1f", hdop);
+    field(22, 4, 38, 76, 8, buf, hdopCol, COL_BG, 1);
 
-    // Estimated horizontal accuracy: HDOP * UERE (~3 m typical for L1 GNSS).
-    if (gps_->hasFix() && gps_->hdop() < 50.0) {
-        const float acc = (float)gps_->hdop() * 3.0f;
+    // Accuracy: HDOP * ~3m UERE; red > 15m, amber 6-15m, green <= 6m
+    if (hasFix && hdop < 50.0f) {
+        const float acc = hdop * 3.0f;
+        const uint16_t accCol = (acc > 15.0f) ? COL_RED : (acc > 6.0f ? COL_AMBER : COL_GREEN);
         snprintf(buf, sizeof(buf), "+/-%4.1fm", acc);
-        field(23, 4, 50, 76, 8, buf, COL_GREEN, COL_BG, 1);
+        field(23, 4, 50, 76, 8, buf, accCol, COL_BG, 1);
     } else {
         field(23, 4, 50, 76, 8, "+/- ---", COL_DIM, COL_BG, 1);
     }
 
-    if (gps_->hasFix()) {
+    if (hasFix) {
         snprintf(buf, sizeof(buf), "%.5f", gps_->latitude());
         field(24, 84, 14, 76, 8, buf, COL_FG, COL_BG, 1);
         snprintf(buf, sizeof(buf), "%.5f", gps_->longitude());
@@ -385,8 +399,8 @@ void Ui::renderGps() {
         field(27, 84, 50, 76, 8, "  ---  ", COL_DIM, COL_BG, 1);
     }
 
-    // Footer hint: guide user when searching; show smoothed bearing when locked.
-    if (!gps_->hasFix()) {
+    // Footer: show smoothed bearing when fix locked, else nudge to go outside.
+    if (!hasFix) {
         field(28, 4, 66, 156, 8, "Acquiring fix outdoors", COL_DIM, COL_BG, 1);
     } else {
         const double brg = gps_->bearingFromHistory();

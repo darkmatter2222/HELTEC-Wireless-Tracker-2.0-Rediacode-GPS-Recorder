@@ -11,6 +11,7 @@ RUN npm run build
 
 # --- runtime stage ---
 FROM nginx:1.27-alpine
+RUN apk add --no-cache openssl
 COPY --from=build /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY docker-entrypoint.d/10-config.sh /docker-entrypoint.d/10-config.sh
