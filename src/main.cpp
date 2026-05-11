@@ -208,6 +208,7 @@ void setup() {
     gWifi.begin(&gStore);
 
     gUi.setSources(&gGps, &gStore, &gRadia);
+    gUi.setWifi(&gWifi);
     gUi.setRadiaState(RadiaCode::State::Idle, String());
 
     gRadia.begin(

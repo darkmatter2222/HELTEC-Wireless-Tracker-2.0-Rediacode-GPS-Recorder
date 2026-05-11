@@ -109,6 +109,7 @@ void WifiUploader::taskLoop() {
             mult = 1u << shift;
         }
         const uint32_t sleepMs = secrets::UPLOAD_INTERVAL_MS * mult;
+        nextAttempt_ = millis() + sleepMs;
         if (mult > 1) {
             Serial.printf("[WIFI] backoff: %u consecutive failures, next attempt in %us\n",
                           (unsigned)consecutiveFailures, (unsigned)(sleepMs / 1000));
@@ -308,6 +309,19 @@ uint32_t WifiUploader::runOnce() {
 
     uint32_t ok = 0;
     for (const auto& p : pending) {
+        // v0.4.5: stale zero-byte .up.csv files (left over from earlier
+        // panic-crashes that rotated but died before writing) would pile
+        // up forever and trip the exponential backoff. Treat them as a
+        // successful upload so they get deleted from disk.
+        if (p.sizeBytes == 0) {
+            Serial.printf("[UPLOAD] %s: stale zero-byte file, removing (%s)\n",
+                          p.sessionId.c_str(), p.filename.c_str());
+            if (store_->removePendingUpload(p.filename)) {
+                ++ok;
+                ++uploadedCount_;
+            }
+            continue;
+        }
         event_log::markPhase("WIFI_POST");
         if (uploadOne(p.filename, p.sessionId, p.sizeBytes)) {
             ++ok;

@@ -46,6 +46,8 @@ public:
     uint32_t  failedCount()    const { return failedCount_; }
     uint32_t  lastAttemptMs()  const { return lastAttempt_; }
     uint32_t  lastSuccessMs()  const { return lastSuccess_; }
+    // millis() at which the next upload cycle is scheduled (0 if unknown).
+    uint32_t  nextAttemptMs()  const { return nextAttempt_; }
     int       lastHttpStatus() const { return lastHttpStatus_; }
 
 private:
@@ -62,6 +64,7 @@ private:
     volatile bool busy_           = false;
     volatile uint32_t lastAttempt_   = 0;
     volatile uint32_t lastSuccess_   = 0;
+    volatile uint32_t nextAttempt_   = 0;
     volatile uint32_t uploadedCount_ = 0;
     volatile uint32_t failedCount_   = 0;
     volatile int      lastHttpStatus_ = 0;

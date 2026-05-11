@@ -2,6 +2,7 @@
 #include "config.h"
 #include "gps_module.h"
 #include "session_store.h"
+#include "wifi_uploader.h"
 
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
@@ -457,6 +458,34 @@ void Ui::renderStorage() {
 
     snprintf(buf, sizeof(buf), "Files on disk: %d", store_->sessionCount());
     field(35, 4, 66, 156, 8, buf, COL_DIM, COL_BG, 1);
+
+    // v0.4.5: upload countdown / status line.
+    char wifiBuf[40];
+    uint16_t wifiCol = COL_DIM;
+    if (!wifi_ || !wifi_->enabled()) {
+        snprintf(wifiBuf, sizeof(wifiBuf), "Wi-Fi: disabled");
+    } else if (wifi_->busy()) {
+        snprintf(wifiBuf, sizeof(wifiBuf), "Wi-Fi: uploading...");
+        wifiCol = COL_AMBER;
+    } else {
+        const uint32_t next = wifi_->nextAttemptMs();
+        const uint32_t now  = millis();
+        if (next > now) {
+            uint32_t remainMs = next - now;
+            uint32_t remainS  = (remainMs + 999) / 1000;
+            if (remainS >= 60) {
+                snprintf(wifiBuf, sizeof(wifiBuf), "Next sync: %um %02us",
+                         (unsigned)(remainS / 60), (unsigned)(remainS % 60));
+            } else {
+                snprintf(wifiBuf, sizeof(wifiBuf), "Next sync: %us", (unsigned)remainS);
+            }
+            wifiCol = COL_GREEN;
+        } else {
+            snprintf(wifiBuf, sizeof(wifiBuf), "Next sync: soon");
+            wifiCol = COL_GREEN;
+        }
+    }
+    field(36, 4, 78, 156, 8, wifiBuf, wifiCol, COL_BG, 1);
 }
 
 // ---------------------------------------------------------------------------

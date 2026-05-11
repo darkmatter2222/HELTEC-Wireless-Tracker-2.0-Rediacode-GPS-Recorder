@@ -5,6 +5,7 @@
 
 class GpsModule;
 class SessionStore;
+class WifiUploader;
 
 class Ui {
 public:
@@ -18,6 +19,7 @@ public:
 
     void begin();
     void setSources(GpsModule* gps, SessionStore* store, RadiaCode* rc);
+    void setWifi(WifiUploader* w) { wifi_ = w; }
 
     void onShortPress();
     void onLongPress();
@@ -61,6 +63,7 @@ private:
     GpsModule*    gps_ = nullptr;
     SessionStore* store_ = nullptr;
     RadiaCode*    rc_ = nullptr;
+    WifiUploader* wifi_ = nullptr;
 
     RadiaCode::Reading lastReading_{};
     RadiaCode::State   rcState_ = RadiaCode::State::Idle;
