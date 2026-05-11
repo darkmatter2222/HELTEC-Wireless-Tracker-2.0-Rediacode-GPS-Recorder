@@ -529,18 +529,18 @@ void Ui::renderPicker() {
             // Label: name if present; if it's a likely RadiaCode without a
             // resolved name, show "RadiaCode?" so the user knows to pick it.
             // Otherwise fall back to last 3 octets of the MAC.
-            char label[16];
+            char label[20];
             if (!r.name.empty()) {
-                snprintf(label, sizeof(label), "%-12.12s", r.name.c_str());
+                snprintf(label, sizeof(label), "%-16.16s", r.name.c_str());
             } else if (r.likelyMatch) {
-                snprintf(label, sizeof(label), "%-12.12s", "RadiaCode?");
+                snprintf(label, sizeof(label), "%-16.16s", "RadiaCode?");
             } else {
                 std::string a = r.address;
                 std::string tail = a.length() >= 8
                     ? a.substr(a.length() - 8) : a;     // "xx:xx:xx"
-                char tmp[16];
+                char tmp[20];
                 snprintf(tmp, sizeof(tmp), "?%s", tail.c_str());
-                snprintf(label, sizeof(label), "%-12.12s", tmp);
+                snprintf(label, sizeof(label), "%-16.16s", tmp);
             }
             const uint16_t fg = r.likelyMatch ? COL_GREEN : 0xFFFF;
             const char marker = r.likelyMatch ? '*' : (selected ? '>' : ' ');

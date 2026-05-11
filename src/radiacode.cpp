@@ -284,12 +284,16 @@ public:
             }
         }
 
-        // Picker mode: collect EVERY advertiser. The user picks one and we
-        // attempt to connect; if it's not a RadiaCode the connection will
-        // simply fail at service-discovery and we return to disconnected.
-        // RadiaCode 110 advertises with no name, so name-only filtering is
-        // not enough.
+        // Picker mode: only collect devices that credibly look like RadiaCode
+        // units. Matching on the real RadiaCode GATT service UUID (SVC_UUID)
+        // or the name prefix is reliable. NORDIC_UART_SVC (0xfeaf) is far too
+        // broad -- many unrelated Nordic-based peripherals (smart-home sensors,
+        // fitness trackers, etc.) advertise that UUID and produce false
+        // positives labelled "RadiaCode?" that confuse users.
         if (g.manualScanActive) {
+            const bool rcCandidate = nameMatch || dev->isAdvertisingService(SVC_UUID);
+            if (!rcCandidate) return;
+
             const uint8_t aType = dev->getAddressType();
             bool found = false;
             for (auto& r : g.scanResults) {
@@ -1081,6 +1085,9 @@ void RadiaCode::loop() {
                     }
                 }
                 if (!foundIt) {
+                    // Same filter as ScanCb: only admit real RadiaCode candidates.
+                    const bool rcCandidate = nameMatch || d.isAdvertisingService(SVC_UUID);
+                    if (!rcCandidate) continue;
                     RadiaCode::ScanResult nr;
                     nr.address     = addr;
                     nr.name        = name;
