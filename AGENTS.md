@@ -583,6 +583,7 @@ ssh darkmatter2222@192.168.86.48 "curl -s http://localhost:8030/info"
 | PATCH  | /sessions/{id}/restore     | restore a soft-deleted session |
 | POST   | /admin/purge/{id}          | permanent hard-delete; requires session already soft-deleted + `?confirm=PURGE_CONFIRMED` |
 | POST   | /admin/recompute-sessions  | purge pre-2020 rows, recompute all session metadata |
+| POST   | /admin/migrate-to-daily-sessions | one-shot v0.5.0 migration: rekey samples to local-eastern `YYYY-MM-DD` (requires `?confirm=MIGRATE_CONFIRMED`) |
 | POST   | /admin/backup              | trigger full-db mongodump; `?source=cron\|manual` |
 | GET    | /admin/backups             | list backups with source/status/elapsed |
 | POST   | /admin/restore/{name}      | restore from a named backup (full mongorestore) |

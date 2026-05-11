@@ -33,6 +33,7 @@ POST   /admin/merge-sessions            merge N source sessions into one target
 GET    /sessions/{id}/export            download session as CSV (format=internal|radiacode)
 POST   /sessions/export-bulk            download multiple sessions merged as one CSV
 POST   /admin/recompute-sessions        recompute session metadata from sample data
+POST   /admin/migrate-to-daily-sessions  one-shot migration (v0.5.0): rekey samples by local-eastern YYYY-MM-DD
 GET    /admin/db-stats                  database size/storage metrics
 GET    /admin/backups                   list available mongodump backups
 POST   /admin/backup                   trigger a mongodump snapshot now
