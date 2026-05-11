@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.3.7`.
+Current: `0.3.8`.
 
 ---
 
@@ -1001,6 +1001,51 @@ Otherwise, iterate to completion.
   true`), subsequent `loop()` calls still enter the block and check `g.foundDev`
   and the scan deadline. Also hardened the `autoRetryHalted` handler to stop any
   in-progress scan cleanly before returning.
+
+### BLE Picker Long-Press Crash — Dual-Core Use-After-Free on g.foundDev (v0.3.8)
+
+- **Root cause**: The ESP32-S3 is dual-core. ScanCb runs in the NimBLE host task
+  (Core 0); the Arduino loop and BLE `connect()` calls run on Core 1. When the
+  user long-pressed a device in the picker, `connectToAddress()` called
+  `waitForConnectableAdv()`. That function found a connectable adv, called
+  `scan->stop()`, cleared `g.targetAddr`, then returned `true`. Immediately after
+  `scan->stop()`, buffered adv packets still in the BLE host's event queue fired
+  more `ScanCb::onResult()` callbacks. With `g.targetAddr` now empty, these fell
+  into the auto-mode ScanCb path, which did:
+  ```cpp
+  delete g.foundDev;            // Core 0: frees the object
+  g.foundDev = new NimBLEAdvertisedDevice(*dev);
+  ```
+  Meanwhile the main task (Core 1) was calling
+  `g.client->connect(g.foundDev, ...)`, internally reading fields (address,
+  address type, PHY) from the object that Core 0 had just freed → heap
+  corruption → crash.
+- **Symptoms**: Device rebooted immediately after long-pressing a device in the
+  picker (RC-110 in particular, which uses BT5 extended advertising and fires
+  many buffered post-stop callbacks).
+- **Why RC-102 was less affected**: RC-102 uses legacy advertising (single adv
+  packet per interval). RC-110 uses BT5 extended advertising on secondary
+  channels, which queues more packets and makes the race much more likely.
+- **Fix (v0.3.8)**:
+  - Added `portMUX_TYPE foundDevMux` to `Internal` struct.
+  - All three `g.foundDev` write sites in `ScanCb` (targetAddr path, grab-pattern
+    path, auto-mode path) wrapped with `portENTER_CRITICAL/portEXIT_CRITICAL`.
+  - `waitForConnectableAdv` changed to return `NimBLEAdvertisedDevice*` instead
+    of `bool`. The poll loop atomically takes ownership via spinlock:
+    `cap = g.foundDev; g.foundDev = nullptr;` under the lock, then calls
+    `cap->isConnectable()` safely (ScanCb can no longer delete cap). Returns the
+    pointer to caller on success; caller must `delete` it after the connect attempt.
+  - `connectToAddress` uses the returned `capDev` pointer for `connect()`, then
+    deletes it on both success and failure paths.
+  - `connectToFound` (auto-mode reconnect path) applies the same ownership-transfer
+    pattern at function entry: takes `capDev = g.foundDev; g.foundDev = nullptr;`
+    under spinlock before reading any fields or calling `connect()`.
+  - **Key rule**: never pass `g.foundDev` directly to `connect()` — always
+    transfer ownership to a local pointer under the spinlock first.
+- **Secondary fix**: `manualScanArmed` in `main.cpp` was never cleared in the
+  `ACTION_PICK_DEVICE` and `ACTION_CANCEL_PICKER` handlers, so the scan-
+  completion handler could re-open the picker after a device was already chosen.
+  Added `manualScanArmed = false` in both cases.
 
 ### Hex Bin Layer (replaced Heatmap)
 
