@@ -870,10 +870,13 @@ static NimBLEAdvertisedDevice* waitForConnectableAdv(const std::string& addr, ui
 
 // Legacy entry: wait for ANY adv from address. Kept for callers that don't
 // require the peer to be connectable (e.g. picker UI showing presence).
+// NOTE: currently unused -- connectToAddress uses waitForConnectableAdv.
 static bool waitForTargetAdv(const std::string& addr, uint32_t waitMs) {
     NimBLEScan* scan = NimBLEDevice::getScan();
     if (scan->isScanning()) scan->stop();
+    portENTER_CRITICAL(&g.foundDevMux);
     if (g.foundDev) { delete g.foundDev; g.foundDev = nullptr; }
+    portEXIT_CRITICAL(&g.foundDevMux);
     g.targetAddr = addr;
     g.manualScanActive = false;
 
@@ -889,7 +892,12 @@ static bool waitForTargetAdv(const std::string& addr, uint32_t waitMs) {
     const uint32_t reportEvery = 5000;
     uint32_t nextReport = start + reportEvery;
     while (millis() - start < waitMs) {
-        if (g.foundDev) {
+        // Atomically check and clear foundDev under spinlock.
+        bool found = false;
+        portENTER_CRITICAL(&g.foundDevMux);
+        if (g.foundDev) { delete g.foundDev; g.foundDev = nullptr; found = true; }
+        portEXIT_CRITICAL(&g.foundDevMux);
+        if (found) {
             scan->stop();
             log_i("Target adv captured after %lu ms", (unsigned long)(millis() - start));
             g.targetAddr.clear();
@@ -1207,7 +1215,11 @@ void RadiaCode::loop() {
         // Start a fresh async scan once the inter-scan cooldown elapses.
         if ((int32_t)(now - nextAutoScan) >= 0) {
             setState(State::Scanning);
+            // Clear any stale foundDev under spinlock -- ScanCb on Core 0 may
+            // have written it concurrently since the last loop() call.
+            portENTER_CRITICAL(&g.foundDevMux);
             if (g.foundDev) { delete g.foundDev; g.foundDev = nullptr; }
+            portEXIT_CRITICAL(&g.foundDevMux);
             scan->setAdvertisedDeviceCallbacks(&gScanCb, /*wantDuplicates=*/true);
             scan->setActiveScan(true);
             scan->setInterval(100);

@@ -181,7 +181,7 @@ bool SessionStore::begin() {
             Serial.println("[SD_MMC] setPins() failed, falling through to SPI");
         }
 
-        // ===== Attempt 2: SD over SPI =======================================
+        // ===== Attempt 3: SD over SPI =======================================
         Serial.printf("[SD] trying SPI: SCK=%u MISO=%u MOSI=%u CS=%u (init@1MHz)\n",
                       cfg::SD_SCK_PIN, cfg::SD_MISO_PIN, cfg::SD_MOSI_PIN,
                       cfg::SD_CS_PIN);
@@ -667,15 +667,19 @@ bool SessionStore::dumpSession(const String& id, Stream& out) const {
     }
 
     // Re-count samples for the header so the host can verify byte/sample
-    // integrity after streaming.
+    // integrity after streaming. Use a raw byte buffer rather than
+    // readStringUntil('\n') which heap-allocates a String per row and holds
+    // the LittleFS volume mutex the whole time, starving concurrent append().
     uint32_t samples = 0;
     File counter = fs_->open(path, "r");
     if (counter) {
-        while (counter.available()) {
-            counter.readStringUntil('\n');
-            ++samples;
+        uint8_t cbuf[256];
+        size_t cn;
+        while ((cn = counter.read(cbuf, sizeof(cbuf))) > 0) {
+            for (size_t ci = 0; ci < cn; ++ci)
+                if (cbuf[ci] == '\n') ++samples;
         }
-        if (samples > 0) --samples;
+        if (samples > 0) --samples; // header
         counter.close();
     }
 
