@@ -24,6 +24,24 @@ RadiaCode     gRadia;
 SessionStore  gStore;
 Ui            gUi;
 WifiUploader  gWifi;
+
+// Pending sample queue. The BLE notification callback runs on the NimBLE
+// host task (Core 0) which has a small stack; doing LittleFS open/write/close
+// directly there overflowed the stack and panicked ("Stack canary watchpoint
+// triggered (nimble_host)") right after the first GPS fix. The callback now
+// just snapshots GPS+reading into this slot; the main Arduino loop (Core 1)
+// picks it up and does the file I/O on its larger 8 KB stack.
+struct PendingSample {
+    bool      valid = false;
+    uint64_t  ts = 0;
+    float     uSv = 0.f, cps = 0.f;
+    bool      hasGps = false;
+    double    lat = 0.0, lng = 0.0;
+    String    deviceId;
+    float     speed = -1.f, bearing = -1.f, alt = -9999.f, hdop = -1.f;
+};
+portMUX_TYPE  gSampleMux = portMUX_INITIALIZER_UNLOCKED;
+PendingSample gPendingSample;
 } // namespace
 
 // LiPo single-cell OCV-based discharge table (settled, ~20 °C, slow-to-moderate
@@ -202,23 +220,28 @@ void setup() {
             String id = gRadia.peerAddress();
             id.replace(":", "");
 
-            // The always-on contract gates live inside SessionStore::append():
-            //   - no GPS fix  -> sample dropped
-            //   - ts pre-2020 -> sample dropped (no UTC yet)
-            //   - day rollover-> previous day's file rotated to pending-upload,
-            //                    new <today>.csv opened transparently.
-            // bestEpochMs() projects forward via millis() through GPS outages
-            // so every accepted sample gets a unique, monotonic timestamp.
-            const uint64_t ts = gGps.bestEpochMs();
-            event_log::markPhase("RC_APPEND");
-            gStore.append(0, ts, r.uSvPerHour, r.cps,
-                          gGps.hasFix(), gGps.latitude(), gGps.longitude(),
-                          id,
-                          cfg::FIELD_SPEED_KPH   ? (float)gGps.speedKph()           : -1.f,
-                          cfg::FIELD_BEARING_DEG ? (float)gGps.bearingFromHistory() : -1.f,
-                          cfg::FIELD_ALTITUDE_M  ? (float)gGps.altitudeMeters()     : -9999.f,
-                          cfg::FIELD_HDOP        ? (float)gGps.hdop()               : -1.f);
-            event_log::markPhase("RC_APPEND_OUT");
+            // CRITICAL (v0.4.4): do NOT touch the filesystem here. This
+            // callback runs on the NimBLE host task (Core 0, ~4 KB stack);
+            // LittleFS.open() during ST_OPEN_DAY consumed enough stack to
+            // trip the canary and crash on the first GPS-fixed sample. We
+            // snapshot the data into a portMUX-protected slot and let the
+            // main Arduino loop (Core 1, 8 KB stack) call gStore.append().
+            PendingSample snap;
+            snap.valid    = true;
+            snap.ts       = gGps.bestEpochMs();
+            snap.uSv      = r.uSvPerHour;
+            snap.cps      = r.cps;
+            snap.hasGps   = gGps.hasFix();
+            snap.lat      = gGps.latitude();
+            snap.lng      = gGps.longitude();
+            snap.deviceId = id;
+            snap.speed    = cfg::FIELD_SPEED_KPH   ? (float)gGps.speedKph()           : -1.f;
+            snap.bearing  = cfg::FIELD_BEARING_DEG ? (float)gGps.bearingFromHistory() : -1.f;
+            snap.alt      = cfg::FIELD_ALTITUDE_M  ? (float)gGps.altitudeMeters()     : -9999.f;
+            snap.hdop     = cfg::FIELD_HDOP        ? (float)gGps.hdop()               : -1.f;
+            portENTER_CRITICAL(&gSampleMux);
+            gPendingSample = snap;
+            portEXIT_CRITICAL(&gSampleMux);
         },
         // onState
         [](RadiaCode::State s, const String& addr) {
@@ -521,6 +544,25 @@ void loop() {
     }
     gRadia.loop();
     gWifi.tick();
+
+    // Drain pending sample from BLE callback. Filesystem work runs here
+    // (Core 1, main loop stack), not on the NimBLE host task.
+    PendingSample s;
+    bool have = false;
+    portENTER_CRITICAL(&gSampleMux);
+    if (gPendingSample.valid) {
+        s = gPendingSample;
+        gPendingSample.valid = false;
+        have = true;
+    }
+    portEXIT_CRITICAL(&gSampleMux);
+    if (have) {
+        event_log::markPhase("MAIN_APPEND");
+        gStore.append(0, s.ts, s.uSv, s.cps,
+                      s.hasGps, s.lat, s.lng, s.deviceId,
+                      s.speed, s.bearing, s.alt, s.hdop);
+        event_log::markPhase("MAIN_LOOP");
+    }
 
     // If a manual scan was kicked off and just completed, hand the results
     // to the UI so the picker is populated.
