@@ -43,6 +43,7 @@ struct Internal {
     RadiaCode::StateCb   onState;
 
     NimBLEAdvertisedDevice* foundDev = nullptr;
+    portMUX_TYPE            foundDevMux = portMUX_INITIALIZER_UNLOCKED;
     NimBLEClient*           client = nullptr;
     NimBLERemoteCharacteristic* writeChar = nullptr;
     NimBLERemoteCharacteristic* notifyChar = nullptr;
@@ -342,8 +343,10 @@ public:
                 // accept connections even from NONCONN_IND state once the
                 // central has the address; worst case it times out and we
                 // retry on the next adv).
+                portENTER_CRITICAL(&g.foundDevMux);
                 if (g.foundDev) delete g.foundDev;
                 g.foundDev = new NimBLEAdvertisedDevice(*dev);
+                portEXIT_CRITICAL(&g.foundDevMux);
             }
             return;
         }
@@ -364,8 +367,10 @@ public:
                 g.prefs.putString(PREFS_KEY_PINNED, String(addr.c_str()));
                 g.grabPattern.clear();
                 g.prefs.remove("grab_pat");
+                portENTER_CRITICAL(&g.foundDevMux);
                 if (g.foundDev) delete g.foundDev;
                 g.foundDev = new NimBLEAdvertisedDevice(*dev);
+                portEXIT_CRITICAL(&g.foundDevMux);
                 return;
             }
         }
@@ -382,10 +387,12 @@ public:
         // address. Prevents wasted connect attempts on imposter peers that
         // happen to advertise the RadiaCode service UUID but fail svc disc.
         if (!g.pinnedAddr.empty() && addr != g.pinnedAddr) return;
+        portENTER_CRITICAL(&g.foundDevMux);
         if (!g.foundDev || dev->getRSSI() > g.foundDev->getRSSI()) {
             if (g.foundDev) delete g.foundDev;
             g.foundDev = new NimBLEAdvertisedDevice(*dev);
         }
+        portEXIT_CRITICAL(&g.foundDevMux);
     }
 };
 static ScanCb gScanCb;
@@ -756,11 +763,17 @@ static void freshClient() {
 }
 
 static bool connectToFound() {
-    if (!g.foundDev) return false;
+    // Atomically transfer ownership of foundDev so ScanCb on the other core
+    // cannot delete the object while we read its fields or pass it to connect().
+    portENTER_CRITICAL(&g.foundDevMux);
+    NimBLEAdvertisedDevice* capDev = g.foundDev;
+    g.foundDev = nullptr;
+    portEXIT_CRITICAL(&g.foundDevMux);
+    if (!capDev) return false;
 
-    g.peerAddr = g.foundDev->getAddress().toString().c_str();
-    g.peerName = g.foundDev->getName().c_str();
-    g.rssi     = g.foundDev->getRSSI();
+    g.peerAddr = capDev->getAddress().toString().c_str();
+    g.peerName = capDev->getName().c_str();
+    g.rssi     = capDev->getRSSI();
     setState(RadiaCode::State::Connecting);
 
     NimBLEScan* sc = NimBLEDevice::getScan();
@@ -770,11 +783,13 @@ static bool connectToFound() {
     bool ok = false;
     for (int attempt = 1; attempt <= 4; ++attempt) {
         freshClient();
-        ok = g.client->connect(g.foundDev, /*deleteAttibutes=*/true);
+        ok = g.client->connect(capDev, /*deleteAttibutes=*/true);
         if (ok) break;
         log_w("connectToFound attempt %d failed", attempt);
         delay(600);
     }
+    delete capDev;
+    capDev = nullptr;
     if (!ok) {
         log_e("connect() failed");
         return false;
@@ -782,16 +797,17 @@ static bool connectToFound() {
     return finishConnect(g.client);
 }
 
-// Wait (scanning) for the peer to advertise as CONNECTABLE. Returns true if
-// g.foundDev was populated with a connectable adv from the target. Sleepy
-// RadiaCode peers (and peers that are currently connected to another central)
-// often broadcast NONCONN_IND for long periods between brief connectable
-// windows. We only return success on a genuinely connectable adv so the
-// subsequent CONNECT_REQ has a real chance of being ACKed.
-static bool waitForConnectableAdv(const std::string& addr, uint32_t waitMs) {
+// Wait (scanning) for the peer to advertise as CONNECTABLE.
+// Returns a heap-allocated NimBLEAdvertisedDevice* (caller must delete) when
+// a connectable adv is captured, or nullptr on timeout.
+// Ownership is transferred under portMUX spinlock so ScanCb on the other core
+// cannot free the object while the caller reads its fields or calls connect().
+static NimBLEAdvertisedDevice* waitForConnectableAdv(const std::string& addr, uint32_t waitMs) {
     NimBLEScan* scan = NimBLEDevice::getScan();
     if (scan->isScanning()) scan->stop();
+    portENTER_CRITICAL(&g.foundDevMux);
     if (g.foundDev) { delete g.foundDev; g.foundDev = nullptr; }
+    portEXIT_CRITICAL(&g.foundDevMux);
     g.targetAddr = addr;
     g.manualScanActive = false;
 
@@ -808,18 +824,28 @@ static bool waitForConnectableAdv(const std::string& addr, uint32_t waitMs) {
     uint32_t nextReport = start + reportEvery;
     int sawNonConn = 0;
     while (millis() - start < waitMs) {
-        if (g.foundDev) {
-            // ScanCb captures every adv from target. Check if THIS one is connectable.
-            if (g.foundDev->isConnectable()) {
+        // Atomically take ownership so ScanCb (Core 0) cannot free the object
+        // while we call isConnectable() on it (we run on Core 1).
+        NimBLEAdvertisedDevice* cap = nullptr;
+        portENTER_CRITICAL(&g.foundDevMux);
+        cap = g.foundDev;
+        g.foundDev = nullptr;
+        portEXIT_CRITICAL(&g.foundDevMux);
+
+        if (cap) {
+            if (cap->isConnectable()) {
                 scan->stop();
+                g.targetAddr.clear();
                 log_i("Connectable adv captured from %s after %lu ms",
                       addr.c_str(), (unsigned long)(millis() - start));
-                g.targetAddr.clear();
-                return true;
+                // Drain any adv that arrived between stop() and targetAddr.clear().
+                portENTER_CRITICAL(&g.foundDevMux);
+                if (g.foundDev) { delete g.foundDev; g.foundDev = nullptr; }
+                portEXIT_CRITICAL(&g.foundDevMux);
+                return cap;  // caller owns this; must delete after connect attempt
             }
             // Non-connectable adv: discard and keep waiting.
-            delete g.foundDev;
-            g.foundDev = nullptr;
+            delete cap;
             sawNonConn++;
         }
         if (millis() >= nextReport) {
@@ -834,9 +860,12 @@ static bool waitForConnectableAdv(const std::string& addr, uint32_t waitMs) {
     }
     scan->stop();
     g.targetAddr.clear();
+    portENTER_CRITICAL(&g.foundDevMux);
+    if (g.foundDev) { delete g.foundDev; g.foundDev = nullptr; }
+    portEXIT_CRITICAL(&g.foundDevMux);
     log_w("%s never went connectable in %lu s window (saw %d non-conn adv)",
           addr.c_str(), (unsigned long)(waitMs / 1000), sawNonConn);
-    return false;
+    return nullptr;
 }
 
 // Legacy entry: wait for ANY adv from address. Kept for callers that don't
@@ -910,7 +939,8 @@ static bool connectToAddress(const std::string& addr, uint8_t addrType) {
         attempt++;
         log_i("Connect %s attempt %d -- waiting for connectable adv", addr.c_str(), attempt);
         // Wait up to 5 minutes per cycle for a connectable adv.
-        if (!waitForConnectableAdv(addr, 300000)) {
+        NimBLEAdvertisedDevice* capDev = waitForConnectableAdv(addr, 300000);
+        if (!capDev) {
             log_w("attempt %d: no connectable adv in 5min window. The peer may be busy with another central (e.g. your phone). Retrying.", attempt);
             teardownClient();
             delay(1000);
@@ -926,7 +956,9 @@ static bool connectToAddress(const std::string& addr, uint8_t addrType) {
         // Short connect timeout (5 s) -- the connectable window is brief; if
         // CONNECT_REQ isn't ACKed quickly it never will be on this adv.
         g.client->setConnectTimeout(5);
-        ok = g.client->connect(g.foundDev, /*deleteAttibutes=*/true);
+        ok = g.client->connect(capDev, /*deleteAttibutes=*/true);
+        delete capDev;   // release ownership; heap freed on both success and failure
+        capDev = nullptr;
         if (ok) {
             log_i("connect ok on attempt %d (connectable hit #%d)", attempt, connectableHits);
             break;

@@ -509,11 +509,13 @@ void loop() {
                     String addr = gUi.pickedAddress();
                     uint8_t aType = gUi.pickedAddrType();
                     Serial.printf("[UI] picker chose %s (type=%u)\n", addr.c_str(), (unsigned)aType);
+                    manualScanArmed = false;
                     gRadia.connectTo(std::string(addr.c_str()), aType);
                     gUi.exitPicker();
                     break;
                 }
                 case Ui::ACTION_CANCEL_PICKER:
+                    manualScanArmed = false;
                     gRadia.cancelManualScan();
                     gUi.exitPicker();
                     break;
