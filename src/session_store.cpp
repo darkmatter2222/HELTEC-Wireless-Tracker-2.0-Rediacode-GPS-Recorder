@@ -2,6 +2,7 @@
 #include "config.h"
 
 #include <LittleFS.h>
+#include "event_log.h"
 #include <SD.h>
 #include <SD_MMC.h>
 #include <SdFat.h>
@@ -608,15 +609,21 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
     if (day.length() != 10) return;
 
     Lock lk(mutex_);
+    event_log::markPhase("ST_APPEND");
 
     // ---- Auto-rotate on day rollover / first sample ---------------------
     if (!recording_ || activeId_ != day) {
         if (recording_ && activeId_.length() && activeId_ != day) {
             // Day boundary crossed mid-trip. Rotate previous day's file
             // immediately so the uploader can post it without waiting.
+            event_log::markPhase("ST_ROTATE_DAY");
             rotateActiveToPending_();
         }
-        if (!openDayFile_(day)) return;
+        event_log::markPhase("ST_OPEN_DAY");
+        if (!openDayFile_(day)) {
+            event_log::markPhase("ST_OPEN_FAIL");
+            return;
+        }
     }
 
     // ---- Format the CSV row ---------------------------------------------
@@ -643,10 +650,14 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
         return;
     }
     if (!fs_) return;
+    event_log::markPhase("ST_OPEN_APPEND");
     File f = fs_->open(path, "a");
-    if (!f) { log_w("append: open failed"); return; }
+    if (!f) { log_w("append: open failed"); event_log::markPhase("ST_OPEN_FAIL2"); return; }
+    event_log::markPhase("ST_WRITE");
     size_t written = f.print(line);
+    event_log::markPhase("ST_CLOSE");
     f.close();
+    event_log::markPhase("ST_DONE");
     if ((int)written < len) {
         Serial.printf("[REC] WRITE ERR: tried %d bytes wrote %u heap=%u\n",
                       len, (unsigned)written, (unsigned)ESP.getFreeHeap());
@@ -715,10 +726,12 @@ int SessionStore::sessionCount() const {
 uint32_t SessionStore::rotateForUpload() {
     if (!hasUsableBackend()) return 0;
     Lock lk(mutex_);
+    event_log::markPhase("ST_ROT_FOR_UP");
     if (recording_ && sampleCount_ > 0) {
         rotateActiveToPending_();
     }
     rotateStaleDayFiles_();
+    event_log::markPhase("ST_ROT_DONE");
     return (uint32_t)listPendingUploads().size();
 }
 

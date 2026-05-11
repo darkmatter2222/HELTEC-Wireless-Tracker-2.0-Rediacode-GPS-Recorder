@@ -161,8 +161,10 @@ bool WifiUploader::connectWifi() {
 
 
 void WifiUploader::disconnectWifi() {
+    event_log::markPhase("WIFI_DISCO_IN");
     WiFi.disconnect(true, true);
     WiFi.mode(WIFI_OFF);
+    event_log::markPhase("WIFI_DISCO_OUT");
 }
 
 
@@ -293,6 +295,7 @@ uint32_t WifiUploader::runOnce() {
     // during connect, the next boot will see wifiInFlight=1 in the log
     // and we can correlate the reset reason to the PA current spike.
     event_log::markWifiInFlight(true);
+    event_log::markPhase("WIFI_CONNECT");
     event_log::appendEvent("WIFI", "cycle_start");
 
     if (!connectWifi()) {
@@ -305,6 +308,7 @@ uint32_t WifiUploader::runOnce() {
 
     uint32_t ok = 0;
     for (const auto& p : pending) {
+        event_log::markPhase("WIFI_POST");
         if (uploadOne(p.filename, p.sessionId, p.sizeBytes)) {
             ++ok;
             ++uploadedCount_;

@@ -21,6 +21,7 @@ bool g_ready = false;
 RTC_NOINIT_ATTR uint32_t g_rtcMagic;     // sentinel "TRKR"
 RTC_NOINIT_ATTR uint32_t g_rtcUptimeMs;  // millis() of last successful tick
 RTC_NOINIT_ATTR uint32_t g_rtcWifiFlag;  // 1 if Wi-Fi cycle was in-flight
+RTC_NOINIT_ATTR char     g_rtcPhase[16]; // last marked phase tag
 
 constexpr uint32_t kMagic = 0x544B5252;  // 'TKRR'
 
@@ -88,11 +89,23 @@ void beginBoot() {
     bool magicValid = (g_rtcMagic == kMagic);
     uint32_t lastUptime = magicValid ? g_rtcUptimeMs : 0u;
     uint32_t wifiInFlight = magicValid ? g_rtcWifiFlag : 0u;
+    char lastPhase[16] = {0};
+    if (magicValid) {
+        memcpy(lastPhase, g_rtcPhase, sizeof(lastPhase));
+        lastPhase[15] = '\0';
+        // Sanitize so we never crash on garbage RTC contents.
+        for (int i = 0; i < 15 && lastPhase[i]; ++i) {
+            char c = lastPhase[i];
+            if (c < 32 || c > 126 || c == ',' || c == '\n') { lastPhase[i] = '?'; }
+        }
+    }
 
     // Reset RTC state for the new boot cycle.
     g_rtcMagic     = kMagic;
     g_rtcUptimeMs  = 0;
     g_rtcWifiFlag  = 0;
+    memset((void*)g_rtcPhase, 0, sizeof(g_rtcPhase));
+    strncpy((char*)g_rtcPhase, "BOOTED", sizeof(g_rtcPhase) - 1);
 
     // Battery voltage at boot (mV). If the ADC hasn't been sampled yet
     // (likely on the first call), -1 is fine; main loop will sample within
@@ -100,15 +113,28 @@ void beginBoot() {
     const float vbat = trackerLastVbat();
     int vbatMv = (vbat > 0.0f) ? (int)(vbat * 1000.0f + 0.5f) : -1;
 
-    char buf[160];
+    char buf[200];
     snprintf(buf, sizeof(buf),
-             "%u,%u,BOOT,%s,vbatMv=%d,lastUptimeMs=%u,wifiInFlight=%u",
+             "%u,%u,BOOT,%s,vbatMv=%d,lastUptimeMs=%u,wifiInFlight=%u,lastPhase=%s",
              (unsigned)millis(), (unsigned)millis(), rname,
-             vbatMv, (unsigned)lastUptime, (unsigned)wifiInFlight);
+             vbatMv, (unsigned)lastUptime, (unsigned)wifiInFlight,
+             lastPhase[0] ? lastPhase : "NONE");
     appendLineRaw(String(buf));
 
     // Also print to serial so anyone tailing sees it immediately.
     Serial.printf("[LOG] %s\n", buf);
+}
+
+void markPhase(const char* phase) {
+    if (!phase) phase = "";
+    // Write directly into RTC slow memory; survives a panic on the next
+    // instruction.
+    size_t i = 0;
+    for (; i < sizeof(g_rtcPhase) - 1 && phase[i]; ++i) {
+        g_rtcPhase[i] = phase[i];
+    }
+    g_rtcPhase[i] = '\0';
+    g_rtcMagic = kMagic;
 }
 
 void appendEvent(const char* tag, const char* msg) {

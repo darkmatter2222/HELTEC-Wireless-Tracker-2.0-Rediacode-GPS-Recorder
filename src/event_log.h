@@ -41,6 +41,12 @@ void appendEvent(const char* tag, const char* msg);
 // connect attempt can be attributed correctly on the next boot.
 void markWifiInFlight(bool inFlight);
 
+// Record a short "current phase" tag in RTC memory. The next boot will
+// include it in the BOOT record so we can pinpoint where a panic happened
+// even when serial isn't connected. Max 15 chars; longer strings are
+// truncated. Examples: "GPS_FIX", "RC_SAMPLE", "WIFI_DISCO", "ROTATE".
+void markPhase(const char* phase);
+
 // Stream the entire log file to a Stream (typically Serial). Returns the
 // total bytes printed.
 size_t dump(Stream& out);

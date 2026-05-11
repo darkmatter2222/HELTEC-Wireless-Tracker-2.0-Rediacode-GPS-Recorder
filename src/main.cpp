@@ -195,6 +195,7 @@ void setup() {
     gRadia.begin(
         // onReading
         [](const RadiaCode::Reading& r) {
+            event_log::markPhase("RC_CB");
             gUi.setReading(r);
 
             // Build deviceId = address w/o colons (compact)
@@ -209,6 +210,7 @@ void setup() {
             // bestEpochMs() projects forward via millis() through GPS outages
             // so every accepted sample gets a unique, monotonic timestamp.
             const uint64_t ts = gGps.bestEpochMs();
+            event_log::markPhase("RC_APPEND");
             gStore.append(0, ts, r.uSvPerHour, r.cps,
                           gGps.hasFix(), gGps.latitude(), gGps.longitude(),
                           id,
@@ -216,6 +218,7 @@ void setup() {
                           cfg::FIELD_BEARING_DEG ? (float)gGps.bearingFromHistory() : -1.f,
                           cfg::FIELD_ALTITUDE_M  ? (float)gGps.altitudeMeters()     : -9999.f,
                           cfg::FIELD_HDOP        ? (float)gGps.hdop()               : -1.f);
+            event_log::markPhase("RC_APPEND_OUT");
         },
         // onState
         [](RadiaCode::State s, const String& addr) {
