@@ -7,8 +7,12 @@
 #include <algorithm>
 
 #include "config.h"
+#include "event_log.h"
 #include "session_store.h"
 #include "secrets.h"
+
+// Defined in main.cpp: last sampled battery voltage (-1 until first sample).
+extern float trackerLastVbat();
 
 namespace {
 
@@ -126,14 +130,11 @@ bool WifiUploader::connectWifi() {
     vTaskDelay(pdMS_TO_TICKS(150));
     WiFi.mode(WIFI_STA);
 
-    // Cap TX power at 11 dBm before begin(). The default 19.5 dBm draws
-    // very large PA current spikes during scan/associate, especially when
-    // the AP is unreachable and the supplicant probes every channel at
-    // full power. On a marginal USB-only or partially-charged-LiPo supply
-    // those spikes collapse the rail and trigger ESP_RST_BROWNOUT (the
-    // "boot loop when out of Wi-Fi range" symptom). 11 dBm halves the
-    // peak current and is still plenty for any indoor home AP.
-    WiFi.setTxPower(WIFI_POWER_11dBm);
+    // Cap TX power at 8.5 dBm before begin(). v0.4.1 used 11 dBm but
+    // brown-outs continued on battery, so we drop another notch. 8.5 dBm
+    // is still ample for any indoor home AP at <30 m and cuts the PA peak
+    // current roughly in half again vs. 11 dBm.
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
 
     // Modem sleep + active scan is unstable in the ESP-IDF Wi-Fi driver.
     // Disable sleep for the duration of the connect attempt; we re-enable
@@ -250,6 +251,21 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
 uint32_t WifiUploader::runOnce() {
     if (!enabled_ || !store_) return 0;
 
+    // v0.4.2: VBAT gate. The Wi-Fi PA spikes (200-400 mA) collapse a weak
+    // battery rail and brown-out the MCU mid-cycle, leading to reboots
+    // every 1-2 minutes on a partially discharged pack. Recording (BLE +
+    // GPS, ~80 mA steady) is fine; only the radio is risky. Skip the cycle
+    // and try again next interval -- pending files stay queued.
+    const float vbat = trackerLastVbat();
+    if (vbat > 0.0f && vbat < cfg::VBAT_MIN_FOR_WIFI) {
+        char msg[64];
+        snprintf(msg, sizeof(msg), "skip vbat=%.2fV<%.2fV",
+                 vbat, cfg::VBAT_MIN_FOR_WIFI);
+        Serial.printf("[WIFI] %s -- recording continues\n", msg);
+        event_log::appendEvent("WIFI", msg);
+        return 0;
+    }
+
     // v0.4.0: only rotate the active day file to pending-upload state when
     // there are zero pending files already. This prevents fragmenting the
     // active file into dozens of tiny .up.csv slices when we are out of
@@ -271,9 +287,17 @@ uint32_t WifiUploader::runOnce() {
     Serial.printf("[UPLOAD] cycle start; %u file(s) pending heap_free=%u\n",
                   (unsigned)pending.size(), (unsigned)ESP.getFreeHeap());
 
+    // Plant the RTC marker BEFORE turning on the radio. If we brown-out
+    // during connect, the next boot will see wifiInFlight=1 in the log
+    // and we can correlate the reset reason to the PA current spike.
+    event_log::markWifiInFlight(true);
+    event_log::appendEvent("WIFI", "cycle_start");
+
     if (!connectWifi()) {
         ++failedCount_;
         busy_ = false;
+        event_log::markWifiInFlight(false);
+        event_log::appendEvent("WIFI", "connect_fail");
         return 0;
     }
 
@@ -303,6 +327,11 @@ uint32_t WifiUploader::runOnce() {
 
     disconnectWifi();
     busy_ = false;
+    event_log::markWifiInFlight(false);
+    char done[48];
+    snprintf(done, sizeof(done), "cycle_done ok=%u/%u",
+             (unsigned)ok, (unsigned)pending.size());
+    event_log::appendEvent("WIFI", done);
     Serial.printf("[UPLOAD] cycle done; ok=%u/%u heap_free=%u\n",
                   (unsigned)ok, (unsigned)pending.size(), (unsigned)ESP.getFreeHeap());
     return ok;

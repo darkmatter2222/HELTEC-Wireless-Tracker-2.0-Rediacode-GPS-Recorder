@@ -10,6 +10,7 @@
 #include <esp_system.h>
 #include "config.h"
 #include "button.h"
+#include "event_log.h"
 #include "gps_module.h"
 #include "radiacode.h"
 #include "session_store.h"
@@ -55,7 +56,13 @@ static const struct { float v; int pct; } kLipoTable[] = {
     {3.30f,   3},
     {3.27f,   0},
 };
-static const int kLipoTableLen = (int)(sizeof(kLipoTable) / sizeof(kLipoTable[0]));
+static int kLipoTableLen = (int)(sizeof(kLipoTable) / sizeof(kLipoTable[0]));
+
+// Last measured VBAT voltage. Updated by readBatteryPercent() each call;
+// queried by wifi_uploader to skip Wi-Fi when the battery is too weak to
+// safely run the PA (which spikes 200-400 mA during scan/associate).
+static volatile float g_lastVbat = -1.0f;
+float trackerLastVbat() { return g_lastVbat; }
 
 static int readBatteryPercent() {
     digitalWrite(cfg::VBAT_EN_PIN, HIGH);    // enable divider
@@ -73,6 +80,7 @@ static int readBatteryPercent() {
 
     // Reconstruct battery voltage (V), compensating for the resistor divider.
     const float volts = (sumMv / 4.0f / 1000.0f) * cfg::VBAT_DIV_MULT;
+    g_lastVbat = volts;
 
     // Clamp to table extremes.
     if (volts >= kLipoTable[0].v)             return kLipoTable[0].pct;
@@ -173,6 +181,12 @@ void setup() {
         gStore.resumeIfActive();
     }
 
+    // Initialise the persistent event log on LittleFS. Reads RTC slow
+    // memory markers from the previous boot, appends a BOOT record (incl.
+    // reset reason + wifiInFlight flag) so we can diagnose battery
+    // brown-outs that happen while the user isn't watching serial.
+    event_log::beginBoot();
+
     gWifi.begin(&gStore);
 
     gUi.setSources(&gGps, &gStore, &gRadia);
@@ -240,6 +254,8 @@ static void handleSerialCommand(const String& line) {
         Serial.println("[CMD]           SYNC                - force Wi-Fi upload now");
         Serial.println("[CMD]           WIFISTAT            - Wi-Fi uploader status");
         Serial.println("[CMD]           SDSTAT              - SD/LittleFS backend status");
+        Serial.println("[CMD]           LOG                 - dump persistent event log");
+        Serial.println("[CMD]           LOGCLEAR            - erase persistent event log");
         return;
     }
 
@@ -275,6 +291,14 @@ static void handleSerialCommand(const String& line) {
             Serial.printf(" cardSizeMB=%llu", (unsigned long long)gStore.cardSizeMb());
         }
         Serial.println();
+        return;
+    }
+    if (upper == "LOG") {
+        event_log::dump(Serial);
+        return;
+    }
+    if (upper == "LOGCLEAR") {
+        event_log::clear();
         return;
     }
     if (upper == "SDSTAT") {

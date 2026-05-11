@@ -126,7 +126,16 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "0.4.1";
+constexpr const char* FW_VERSION = "0.4.2";
+
+// ---------------- Battery / Wi-Fi safety gate (v0.4.2) -----------------------
+// Skip the Wi-Fi upload cycle entirely if VBAT is below this threshold (V).
+// The Wi-Fi PA pulls 200-400 mA spikes during scan/associate; on a partially
+// discharged battery those spikes collapse the rail and trigger a brown-out
+// reset. 3.60 V is well above the BMS cutoff but below "fresh off charger",
+// so day-to-day operation is unaffected and only critically low cells skip
+// uploads. Recording (BLE + GPS + storage, ~80 mA) is always allowed.
+constexpr float    VBAT_MIN_FOR_WIFI = 3.60f;
 
 // ----------- Always-on autonomous recording (v0.4.0) ------------------------
 // Recording is no longer user-toggled. As long as the RadiaCode is connected
