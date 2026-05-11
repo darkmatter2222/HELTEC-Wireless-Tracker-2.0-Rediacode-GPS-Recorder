@@ -457,9 +457,9 @@ void Ui::renderStorage() {
     }
 
     snprintf(buf, sizeof(buf), "Files on disk: %d", store_->sessionCount());
-    field(35, 4, 66, 156, 8, buf, COL_DIM, COL_BG, 1);
+    field(35, 4, 58, 156, 8, buf, COL_DIM, COL_BG, 1);
 
-    // v0.4.5: upload countdown / status line.
+    // v0.4.5: upload countdown / status line. Sits at y=70 so it fits the 80px tall panel.
     char wifiBuf[40];
     uint16_t wifiCol = COL_DIM;
     if (!wifi_ || !wifi_->enabled()) {
@@ -485,7 +485,7 @@ void Ui::renderStorage() {
             wifiCol = COL_GREEN;
         }
     }
-    field(36, 4, 78, 156, 8, wifiBuf, wifiCol, COL_BG, 1);
+    field(36, 4, 70, 156, 8, wifiBuf, wifiCol, COL_BG, 1);
 }
 
 // ---------------------------------------------------------------------------

@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.4.1`.
+Current: `0.4.5`.
 
 ---
 
@@ -830,6 +830,53 @@ Otherwise, iterate to completion.
 ---
 
 ## Lessons Learned — Do Not Re-Litigate
+
+### Upload Cadence & Stale Zero-Byte Pending Files (v0.4.5)
+
+- **Base upload cadence**: every `secrets::UPLOAD_INTERVAL_MS` (default 60 s)
+  the WifiUploader task wakes, takes the recording mutex briefly to call
+  `rotateForUpload()`, then iterates `listPendingUploads()` posting each
+  `.up.csv` to `POST /ingest/csv`. On success the file is deleted.
+- **Exponential backoff**: on consecutive failures the wait stretches
+  1x, 2x, 4x, 8x, 16x of the base — capped at ~16 minutes. A single
+  successful upload resets the counter back to 60 s.
+- **`nextAttemptMs()` accessor**: `WifiUploader` exposes the absolute `millis()`
+  deadline of the next wake. The STORAGE screen renders it as a live
+  countdown (`Next sync: Xm YYs` / `Next sync: Xs` / `Next sync: soon`).
+  Use this — not `lastAttemptMs() + interval` — because it already reflects
+  any active backoff multiplier.
+- **Stale 0-byte `.up.csv` files**: if the firmware panics or browns out
+  between `rotateForUpload()` and the first `append()` to the fresh day
+  file, the rotated `.up.csv` can be 0 bytes. Old uploader logic logged
+  `zero bytes, skipping` and left the file on disk; every subsequent cycle
+  re-encountered it, counted it as a failure, and the backoff ramped to
+  16 min. Real data in the new active file then waited 16 min between
+  attempts.
+- **Fix (v0.4.5)** in `wifi_uploader.cpp::runOnce()`: when `p.sizeBytes == 0`,
+  call `store_->removePendingUpload(p.filename)` immediately and count it as
+  a successful upload. No POST, no backoff increment. This silently cleans
+  up debris from prior crashes on the next cycle the device is online.
+- **Symptom that meant this was happening**: `[UPLOAD] cycle done; ok=0/N`
+  with `[UPLOAD] ...: file_bytes=0` and `[WIFI] backoff: N consecutive
+  failures, next attempt in 960s`. If you see that with no actual HTTP
+  failures, you are looking at stale zero-byte debris.
+
+### TFT Layout — 80 px Tall Panel, Don't Render Below y=72 (v0.4.5)
+
+- **The display is 160 x 80**. The header (status bar) eats y=0..11. The
+  body is y=12..79. Text at the default 5x8 font occupies 8 rows, so the
+  last usable text baseline is y=72 (drawing 72..79). Anything at y=78 is
+  clipped to the top two rows of the glyph and looks broken.
+- **STORAGE screen layout** (post v0.4.5):
+  - y=14: REC / AUTO state / sample count
+  - y=26: Day xxx
+  - y=38: Disk N% used
+  - y=50: 6 px progress bar (y=50..55)
+  - y=58: Files on disk: N
+  - y=70: Wi-Fi countdown / status
+- **Rule of thumb**: never place a `field()` call with default font at
+  y > 72. When in doubt, draw it and look at the device — the
+  `data/sessions_dump/*/boot_*.html` screenshots are great verification.
 
 ### Wi-Fi Brown-Out Boot Loop When Out of Range (v0.4.1)
 
