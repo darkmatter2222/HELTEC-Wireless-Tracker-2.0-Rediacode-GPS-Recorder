@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.4.0`.
+Current: `0.4.1`.
 
 ---
 
@@ -830,6 +830,35 @@ Otherwise, iterate to completion.
 ---
 
 ## Lessons Learned — Do Not Re-Litigate
+
+### Wi-Fi Brown-Out Boot Loop When Out of Range (v0.4.1)
+
+- **Symptom**: device boot-loops repeatedly the moment it leaves the home Wi-Fi
+  network's range; reboots stop the moment it returns to range.
+- **Root cause**: when the AP is unreachable, `WiFi.begin()` puts the supplicant
+  into a continuous full-power active scan across every channel. The PA pulls
+  large current spikes at the default 19.5 dBm; on a marginal USB-only or
+  partially-charged-LiPo supply those spikes collapse the rail and trigger
+  `ESP_RST_BROWNOUT`. The resulting boot brings Wi-Fi back up, immediately
+  starts scanning again, and the cycle repeats.
+- **Fix (v0.4.1)** in `wifi_uploader.cpp::connectWifi()`:
+  - `WiFi.setTxPower(WIFI_POWER_11dBm)` before `begin()` — roughly halves the
+    PA peak current with no perceptible range loss for an indoor home AP.
+  - `WiFi.setSleep(false)` for the duration of the connect attempt — modem
+    sleep + active scan is buggy in the ESP-IDF Wi-Fi driver.
+- **Fix (v0.4.1)** in `wifi_uploader.cpp::taskLoop()`:
+  - Exponential backoff on consecutive failures (1x, 2x, 4x, 8x, 16x of the
+    60 s cadence, capped at ~16 min). Stops the radio from churning every
+    minute during long out-of-range stretches.
+- **Fix (v0.4.1)** in `wifi_uploader.cpp::runOnce()`:
+  - Only call `rotateForUpload()` when there are zero pending files already.
+    Previously every cycle would rotate the active day file, fragmenting it
+    into dozens of tiny `.up.csv` slices when out of range. Now the active
+    file just keeps growing until we successfully upload whatever was
+    queued, then a single larger pending file is created next cycle.
+- **Diagnostic**: `main.cpp::setup()` now logs `esp_reset_reason()` at boot
+  (`[BOOT] reset reason: BROWNOUT (...)` etc.) so any future field reset is
+  immediately visible in the serial log instead of looking like a power-on.
 
 ### Always-On Day-Bucketed Recording (v0.4.0)
 

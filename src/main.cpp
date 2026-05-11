@@ -7,6 +7,7 @@
 //     timestampMs,uSvPerHour,cps,latitude,longitude,deviceId
 
 #include <Arduino.h>
+#include <esp_system.h>
 #include "config.h"
 #include "button.h"
 #include "gps_module.h"
@@ -116,6 +117,28 @@ void setup() {
     while (!Serial && millis() < cdcDeadline) { delay(10); }
     Serial.println();
     Serial.printf("HTIT-Tracker firmware v%s starting...\n", cfg::FW_VERSION);
+
+    // Log the previous reset reason so out-of-range / brown-out / watchdog
+    // resets are immediately visible in the boot log instead of looking
+    // like a normal power-on. Critical for diagnosing field reboots.
+    {
+        const esp_reset_reason_t rr = esp_reset_reason();
+        const char* name = "unknown";
+        switch (rr) {
+            case ESP_RST_POWERON:   name = "POWERON";       break;
+            case ESP_RST_EXT:       name = "EXT";           break;
+            case ESP_RST_SW:        name = "SW";            break;
+            case ESP_RST_PANIC:     name = "PANIC";         break;
+            case ESP_RST_INT_WDT:   name = "INT_WDT";       break;
+            case ESP_RST_TASK_WDT:  name = "TASK_WDT";      break;
+            case ESP_RST_WDT:       name = "WDT";           break;
+            case ESP_RST_DEEPSLEEP: name = "DEEPSLEEP";     break;
+            case ESP_RST_BROWNOUT:  name = "BROWNOUT";      break;
+            case ESP_RST_SDIO:      name = "SDIO";          break;
+            default: break;
+        }
+        Serial.printf("[BOOT] reset reason: %s (%d)\n", name, (int)rr);
+    }
 
     // Configure the local timezone so SessionStore::dayIdFromEpochMs() returns
     // local Eastern-time YYYY-MM-DD instead of UTC. Done once at boot so all

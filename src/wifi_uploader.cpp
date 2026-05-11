@@ -84,10 +84,33 @@ void WifiUploader::taskTrampoline(void* arg) {
 void WifiUploader::taskLoop() {
     // 15s post-boot grace so BLE/GPS finish coming up before we light Wi-Fi.
     vTaskDelay(pdMS_TO_TICKS(15000));
+    // Backoff state for repeated connect failures (e.g. when out of Wi-Fi
+    // range for hours). Without backoff we churn the radio and PA every
+    // 60 s, which on a marginal power supply triggers a brown-out reset.
+    uint32_t consecutiveFailures = 0;
     for (;;) {
+        const uint32_t okBefore = uploadedCount_;
+        const uint32_t failBefore = failedCount_;
         runOnce();
+        if (failedCount_ > failBefore && uploadedCount_ == okBefore) {
+            ++consecutiveFailures;
+        } else if (uploadedCount_ > okBefore) {
+            consecutiveFailures = 0;
+        }
+        // Exponential backoff: 1x, 2x, 4x, 8x, 16x cadence (cap ~16 min).
+        // Caps at 5 to avoid silly long sleeps when the AP eventually returns.
+        uint32_t mult = 1u;
+        if (consecutiveFailures > 0) {
+            uint32_t shift = consecutiveFailures > 5 ? 5 : (consecutiveFailures - 1);
+            mult = 1u << shift;
+        }
+        const uint32_t sleepMs = secrets::UPLOAD_INTERVAL_MS * mult;
+        if (mult > 1) {
+            Serial.printf("[WIFI] backoff: %u consecutive failures, next attempt in %us\n",
+                          (unsigned)consecutiveFailures, (unsigned)(sleepMs / 1000));
+        }
         // Sleep until either the cadence elapses or requestNow() pokes us.
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(secrets::UPLOAD_INTERVAL_MS));
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(sleepMs));
     }
 }
 
@@ -102,7 +125,20 @@ bool WifiUploader::connectWifi() {
     WiFi.mode(WIFI_OFF);
     vTaskDelay(pdMS_TO_TICKS(150));
     WiFi.mode(WIFI_STA);
-    WiFi.setSleep(true);
+
+    // Cap TX power at 11 dBm before begin(). The default 19.5 dBm draws
+    // very large PA current spikes during scan/associate, especially when
+    // the AP is unreachable and the supplicant probes every channel at
+    // full power. On a marginal USB-only or partially-charged-LiPo supply
+    // those spikes collapse the rail and trigger ESP_RST_BROWNOUT (the
+    // "boot loop when out of Wi-Fi range" symptom). 11 dBm halves the
+    // peak current and is still plenty for any indoor home AP.
+    WiFi.setTxPower(WIFI_POWER_11dBm);
+
+    // Modem sleep + active scan is unstable in the ESP-IDF Wi-Fi driver.
+    // Disable sleep for the duration of the connect attempt; we re-enable
+    // it implicitly by calling WiFi.mode(WIFI_OFF) below on either path.
+    WiFi.setSleep(false);
     WiFi.begin(secrets::WIFI_SSID, secrets::WIFI_PASSWORD);
 
     const uint32_t deadline = millis() + secrets::WIFI_CONNECT_TIMEOUT_MS;
@@ -214,12 +250,17 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
 uint32_t WifiUploader::runOnce() {
     if (!enabled_ || !store_) return 0;
 
-    // v0.4.0: rotate any currently-open day file (and stale day files) to
-    // pending-upload state under the same mutex as append(). After this call
-    // append() will transparently open a fresh day file on the next sample,
-    // so we never block recording while we upload.
-    store_->rotateForUpload();
+    // v0.4.0: only rotate the active day file to pending-upload state when
+    // there are zero pending files already. This prevents fragmenting the
+    // active file into dozens of tiny .up.csv slices when we are out of
+    // Wi-Fi range for a long time -- recording keeps appending to the
+    // existing day file and we make a single, larger pending file once we
+    // succeed in uploading whatever was already queued.
     auto pending = store_->listPendingUploads();
+    if (pending.empty()) {
+        store_->rotateForUpload();
+        pending = store_->listPendingUploads();
+    }
 
     if (pending.empty()) {
         return 0;   // nothing pending; don't bring up Wi-Fi
