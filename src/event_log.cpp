@@ -70,14 +70,15 @@ namespace event_log {
 bool ready() { return g_ready; }
 
 void beginBoot() {
-    // LittleFS is mounted in SessionStore::begin(); we assume the caller
-    // invoked that already. If LittleFS.begin() wasn't called yet we just
-    // skip - the device is in a bad state anyway.
-    if (!LittleFS.begin(false)) {
-        // Try to mount; if it still fails, give up silently. Storage failure
-        // is already reported on the TFT.
-        if (!LittleFS.begin(true)) return;
-    }
+    // CRITICAL: do NOT call LittleFS.begin() here. SessionStore already
+    // mounted LittleFS with a custom partition label ("littlefs"). The
+    // Arduino LittleFS singleton can only mount one partition at a time,
+    // and calling begin() again with the default "spiffs" label silently
+    // UNMOUNTS the previously-mounted partition before failing to find
+    // "spiffs" -- this is what caused the v0.4.2 boot loop (sessions/*.csv
+    // suddenly returned "no permits for creation" and the nimble_host task
+    // stack-canary'd while error-handling the SessionStore append failure).
+    // We trust the caller to have invoked gStore.begin() first.
     g_ready = true;
 
     const esp_reset_reason_t rr = esp_reset_reason();

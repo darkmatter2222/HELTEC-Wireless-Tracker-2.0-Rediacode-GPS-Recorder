@@ -136,10 +136,12 @@ bool WifiUploader::connectWifi() {
     // current roughly in half again vs. 11 dBm.
     WiFi.setTxPower(WIFI_POWER_8_5dBm);
 
-    // Modem sleep + active scan is unstable in the ESP-IDF Wi-Fi driver.
-    // Disable sleep for the duration of the connect attempt; we re-enable
-    // it implicitly by calling WiFi.mode(WIFI_OFF) below on either path.
-    WiFi.setSleep(false);
+    // CRITICAL (v0.4.3): leave Wi-Fi modem sleep ENABLED. With BT (NimBLE)
+    // running simultaneously, the ESP32 Wi-Fi/BT coex driver calls abort()
+    // if modem sleep is off:
+    //   "Should enable WiFi modem sleep when both WiFi and Bluetooth are enabled"
+    // The v0.4.1 setSleep(false) call (intended to stabilize connect) was
+    // the actual root cause of the boot loop, not brown-outs.
     WiFi.begin(secrets::WIFI_SSID, secrets::WIFI_PASSWORD);
 
     const uint32_t deadline = millis() + secrets::WIFI_CONNECT_TIMEOUT_MS;
