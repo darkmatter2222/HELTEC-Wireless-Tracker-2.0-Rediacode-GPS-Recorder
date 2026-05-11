@@ -127,30 +127,29 @@ void WifiUploader::disconnectWifi() {
 }
 
 
-bool WifiUploader::uploadOne(const String& sessionId, size_t expectedBytes, uint32_t expectedSamples) {
-    Serial.printf("[UPLOAD] %s: file_bytes=%u expect_samples=%u heap_free=%u\n",
-                  sessionId.c_str(), (unsigned)expectedBytes,
-                  (unsigned)expectedSamples, (unsigned)ESP.getFreeHeap());
+bool WifiUploader::uploadOne(const String& filename, const String& sessionId, size_t expectedBytes) {
+    Serial.printf("[UPLOAD] %s (file=%s): file_bytes=%u heap_free=%u\n",
+                  sessionId.c_str(), filename.c_str(), (unsigned)expectedBytes,
+                  (unsigned)ESP.getFreeHeap());
 
     // --- Stream directly from the file into HTTPClient ---------------------
     // Avoids loading the whole CSV into a heap String. On a 320 KB DRAM
-    // device a session with >~1500 rows (~225 KB) would exhaust the heap
+    // device a file with >~1500 rows (~225 KB) would exhaust the heap
     // mid-String, silently truncate the upload, and the partial 2xx response
     // would cause the file to be deleted with data permanently lost.
     // Using HTTPClient::sendRequest(type, Stream*, size) bypasses the heap
-    // entirely: the HTTP stack reads the LittleFS file in small chunks as it
-    // sends TCP segments.
+    // entirely: the HTTP stack reads the file in small chunks as it sends.
     size_t fileSize = 0;
-    Stream* fileStream = store_->openSessionStream(sessionId, fileSize);
+    Stream* fileStream = store_->openPendingUploadStream(filename, fileSize);
 
     String body;  // only used as fallback for SdFat backend
     if (!fileStream) {
         // SdFat backend (V1.2): fall back to buffered read.
-        // 1 MB cap keeps us within available heap on smaller sessions.
+        // 1 MB cap keeps us within available heap on smaller files.
         constexpr size_t MAX_FALLBACK_BYTES = 1 * 1024 * 1024;
         Serial.printf("[UPLOAD] %s: stream unavailable (SdFat?), falling back to String read\n",
                       sessionId.c_str());
-        if (!store_->readSessionToString(sessionId, MAX_FALLBACK_BYTES, body) || body.length() == 0) {
+        if (!store_->readPendingUploadToString(filename, MAX_FALLBACK_BYTES, body) || body.length() == 0) {
             Serial.printf("[UPLOAD] %s: read failed (bytes=%u maxFallback=%u)\n",
                           sessionId.c_str(), (unsigned)expectedBytes, (unsigned)MAX_FALLBACK_BYTES);
             return false;
@@ -215,35 +214,21 @@ bool WifiUploader::uploadOne(const String& sessionId, size_t expectedBytes, uint
 uint32_t WifiUploader::runOnce() {
     if (!enabled_ || !store_) return 0;
 
-    auto sessions = store_->listSessions();
+    // v0.4.0: rotate any currently-open day file (and stale day files) to
+    // pending-upload state under the same mutex as append(). After this call
+    // append() will transparently open a fresh day file on the next sample,
+    // so we never block recording while we upload.
+    store_->rotateForUpload();
+    auto pending = store_->listPendingUploads();
 
-    // Never touch the actively-recording session.
-    sessions.erase(std::remove_if(sessions.begin(), sessions.end(),
-                                  [this](const SessionStore::SessionInfo& s) {
-                                      return store_->isActive(s.id);
-                                  }),
-                   sessions.end());
-
-    // When keeping files on device, skip sessions already uploaded this boot
-    // so we don't re-upload (and waste bandwidth) every cycle.
-    if (cfg::KEEP_UPLOADS_ON_DEVICE && !uploadedThisBoot_.empty()) {
-        sessions.erase(std::remove_if(sessions.begin(), sessions.end(),
-                                      [this](const SessionStore::SessionInfo& s) {
-                                          return std::find(uploadedThisBoot_.begin(),
-                                                           uploadedThisBoot_.end(),
-                                                           s.id) != uploadedThisBoot_.end();
-                                      }),
-                       sessions.end());
-    }
-
-    if (sessions.empty()) {
+    if (pending.empty()) {
         return 0;   // nothing pending; don't bring up Wi-Fi
     }
 
     busy_ = true;
     lastAttempt_ = millis();
-    Serial.printf("[UPLOAD] cycle start; %u session(s) pending heap_free=%u\n",
-                  (unsigned)sessions.size(), (unsigned)ESP.getFreeHeap());
+    Serial.printf("[UPLOAD] cycle start; %u file(s) pending heap_free=%u\n",
+                  (unsigned)pending.size(), (unsigned)ESP.getFreeHeap());
 
     if (!connectWifi()) {
         ++failedCount_;
@@ -252,37 +237,32 @@ uint32_t WifiUploader::runOnce() {
     }
 
     uint32_t ok = 0;
-    for (const auto& s : sessions) {
-        if (uploadOne(s.id, s.sizeBytes, s.samples)) {
+    for (const auto& p : pending) {
+        if (uploadOne(p.filename, p.sessionId, p.sizeBytes)) {
             ++ok;
             ++uploadedCount_;
             lastSuccess_ = millis();
-            if (cfg::KEEP_UPLOADS_ON_DEVICE) {
-                // Keep the file on device; record that we've uploaded it this
-                // boot so we don't re-upload until the device reboots.
-                uploadedThisBoot_.push_back(s.id);
-                Serial.printf("[UPLOAD] %s: kept on device (KEEP_UPLOADS_ON_DEVICE)\n",
-                              s.id.c_str());
+            // v0.4.0: always delete after confirmed server receipt.
+            // The "never duplicate data on device" contract is the whole
+            // point of the rotate-then-delete model.
+            if (store_->removePendingUpload(p.filename)) {
+                Serial.printf("[UPLOAD] %s: removed from device (%s)\n",
+                              p.sessionId.c_str(), p.filename.c_str());
             } else {
-                // Legacy mode: remove after confirmed server receipt.
-                if (store_->removeSession(s.id)) {
-                    Serial.printf("[UPLOAD] %s removed from device\n", s.id.c_str());
-                } else {
-                    Serial.printf("[UPLOAD] %s: server OK but local remove failed\n",
-                                  s.id.c_str());
-                    ++failedCount_;
-                }
+                Serial.printf("[UPLOAD] %s: server OK but local remove failed (%s)\n",
+                              p.sessionId.c_str(), p.filename.c_str());
+                ++failedCount_;
             }
         } else {
             ++failedCount_;
         }
-        // Brief yield between sessions so BLE/UI tasks keep running.
+        // Brief yield between files so BLE/UI tasks keep running.
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
     disconnectWifi();
     busy_ = false;
     Serial.printf("[UPLOAD] cycle done; ok=%u/%u heap_free=%u\n",
-                  (unsigned)ok, (unsigned)sessions.size(), (unsigned)ESP.getFreeHeap());
+                  (unsigned)ok, (unsigned)pending.size(), (unsigned)ESP.getFreeHeap());
     return ok;
 }

@@ -117,6 +117,14 @@ void setup() {
     Serial.println();
     Serial.printf("HTIT-Tracker firmware v%s starting...\n", cfg::FW_VERSION);
 
+    // Configure the local timezone so SessionStore::dayIdFromEpochMs() returns
+    // local Eastern-time YYYY-MM-DD instead of UTC. Done once at boot so all
+    // subsequent localtime_r() calls (in any task) see the same TZ.
+    setenv("TZ", cfg::LOCAL_TZ, 1);
+    tzset();
+    Serial.printf("[BOOT] timezone set to %s (always-on day-bucketed recording)\n",
+                  cfg::LOCAL_TZ);
+
     enablePeripherals();
     gButton.begin(cfg::BUTTON_PIN, cfg::BUTTON_DEBOUNCE_MS, cfg::BUTTON_LONG_PRESS_MS);
 
@@ -156,34 +164,18 @@ void setup() {
             String id = gRadia.peerAddress();
             id.replace(":", "");
 
-            // Require GPS UTC before persisting. millis()-since-boot would
-            // collapse the timeline (e.g. a row with ts=1777ms makes the
-            // session span 56 years on the server). Skipping the first few
-            // samples is far better than poisoning the session.
-            //
-            // bestEpochMs() projects forward from the last GPS UTC anchor
-            // using millis(), so timestamps keep advancing (and stay unique
-            // against the server's {sessionId,timestampMs} index) even when
-            // GPS is lost indoors. Without this, every sample during an
-            // outage gets the *same* frozen UTC and is silently dropped as
-            // a duplicate by the ingest API.
+            // The always-on contract gates live inside SessionStore::append():
+            //   - no GPS fix  -> sample dropped
+            //   - ts pre-2020 -> sample dropped (no UTC yet)
+            //   - day rollover-> previous day's file rotated to pending-upload,
+            //                    new <today>.csv opened transparently.
+            // bestEpochMs() projects forward via millis() through GPS outages
+            // so every accepted sample gets a unique, monotonic timestamp.
             const uint64_t ts = gGps.bestEpochMs();
-            // Sanity floor: ignore anything older than 2020-01-01 UTC, which
-            // catches a NEMA parser glitch that occasionally yields tiny ts.
-            constexpr uint64_t MIN_VALID_TS_MS = 1577836800000ULL;
-            if (ts < MIN_VALID_TS_MS) {
-                static uint32_t skipped = 0;
-                if ((++skipped % 30) == 1) {
-                    Serial.printf("[REC] skip sample: no UTC yet (skipped=%u)\n",
-                                  (unsigned)skipped);
-                }
-                return;
-            }
-
             gStore.append(0, ts, r.uSvPerHour, r.cps,
                           gGps.hasFix(), gGps.latitude(), gGps.longitude(),
                           id,
-                          cfg::FIELD_SPEED_KPH   ? (float)gGps.speedKph()          : -1.f,
+                          cfg::FIELD_SPEED_KPH   ? (float)gGps.speedKph()           : -1.f,
                           cfg::FIELD_BEARING_DEG ? (float)gGps.bearingFromHistory() : -1.f,
                           cfg::FIELD_ALTITUDE_M  ? (float)gGps.altitudeMeters()     : -9999.f,
                           cfg::FIELD_HDOP        ? (float)gGps.hdop()               : -1.f);
@@ -496,9 +488,8 @@ void loop() {
         case Button::LONG_PRESS:
             gUi.onLongPress();
             switch (gUi.lastLongAction()) {
-                case Ui::ACTION_TOGGLE_REC:
-                    gStore.toggle();
-                    break;
+                // ACTION_TOGGLE_REC is gone in v0.4.0 (always-on recording).
+                // Long-press on STORAGE / GPS is a no-op now.
                 case Ui::ACTION_START_PICKER:
                     Serial.println("[UI] starting RadiaCode picker scan");
                     gRadia.startManualScan(15000);

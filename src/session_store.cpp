@@ -43,24 +43,56 @@ void sdBitBangWakeup(uint8_t sckPin, uint8_t mosiPin, uint8_t csPin) {
     digitalWrite(mosiPin, HIGH);
 }
 String makeSessionId() {
-    // YYYYMMDD_HHMMSS using system time, falling back to millis if unset.
-    time_t now = time(nullptr);
-    if (now > 1700000000) {
-        struct tm tmv;
-        gmtime_r(&now, &tmv);
-        char buf[24];
-        snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d",
-                 tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
-                 tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
-        return String(buf);
-    }
+    // Legacy helper kept only because some old callers may reference it.
+    // In the always-on v0.4.0+ model day-file naming is canonical and the
+    // public API never generates synthetic boot ids.
     char buf[24];
     snprintf(buf, sizeof(buf), "boot_%lu", (unsigned long)millis());
     return String(buf);
 }
 
 String pathFor(const String& id) {
+    // Bare id like "2026-05-11" -> /sessions/2026-05-11.csv
+    // Id with embedded ".up" (rotated pending-upload) -> /sessions/<id>.csv
     return String(cfg::SESSIONS_DIR) + "/" + id + ".csv";
+}
+
+String pendingFilename(const String& dayId, uint32_t bootMs) {
+    char buf[40];
+    snprintf(buf, sizeof(buf), "%s.%lu.up.csv", dayId.c_str(),
+             (unsigned long)bootMs);
+    return String(buf);
+}
+
+String stripCsvSuffix(const String& fname) {
+    if (fname.endsWith(".csv")) return fname.substring(0, fname.length() - 4);
+    return fname;
+}
+
+String fileBaseName(const String& path) {
+    int slash = path.lastIndexOf('/');
+    return (slash >= 0) ? path.substring(slash + 1) : path;
+}
+
+bool isPendingFilename(const String& name) {
+    // matches "<day>.<digits>.up.csv"
+    return name.endsWith(".up.csv");
+}
+
+bool isDayFilename(const String& name) {
+    // matches "<day>.csv" only (no .up.). Note ".up.csv" also ends with ".csv"
+    // so we explicitly exclude pending-upload files here.
+    if (!name.endsWith(".csv")) return false;
+    if (isPendingFilename(name)) return false;
+    return true;
+}
+
+String dayIdFromFilename(const String& name) {
+    // "<day>.csv"                 -> <day>
+    // "<day>.<bootMs>.up.csv"     -> <day>
+    int firstDot = name.indexOf('.');
+    if (firstDot <= 0) return String();
+    return name.substring(0, firstDot);
 }
 } // namespace
 
@@ -68,6 +100,7 @@ bool SessionStore::begin() {
     fs_ = nullptr;
     backend_ = Backend::None;
     cardSizeMb_ = 0;
+    if (!mutex_) mutex_ = xSemaphoreCreateMutex();
 
     // ---- Try SD first ------------------------------------------------------
     if (cfg::SD_ENABLED) {
@@ -300,124 +333,252 @@ const char* SessionStore::backendName() const {
     }
 }
 
-bool SessionStore::resumeIfActive() {
-    if (!hasUsableBackend()) return false;
+
+// =============================================================================
+// Locking helper: hold mutex_ for the duration of a scope. Safe to construct
+// even before begin() runs (mutex_ may be null) -- becomes a no-op in that
+// case so unit tests / cold paths don't crash.
+// =============================================================================
+namespace {
+struct Lock {
+    SemaphoreHandle_t s_;
+    explicit Lock(SemaphoreHandle_t s) : s_(s) {
+        if (s_) xSemaphoreTake(s_, portMAX_DELAY);
+    }
+    ~Lock() { if (s_) xSemaphoreGive(s_); }
+    Lock(const Lock&) = delete;
+    Lock& operator=(const Lock&) = delete;
+};
+} // namespace
+
+// =============================================================================
+// Public: day-id derivation (local Eastern time)
+// =============================================================================
+String SessionStore::dayIdFromEpochMs(uint64_t epochMs) {
+    constexpr uint64_t MIN_VALID_TS_MS = 1577836800000ULL;
+    if (epochMs < MIN_VALID_TS_MS) return String();
+    time_t t = (time_t)(epochMs / 1000ULL);
+    struct tm tmv;
+    // localtime_r honours the TZ env var set in setup() to cfg::LOCAL_TZ
+    // ("EST5EDT,M3.2.0,M11.1.0"). On ESP32 newlib supports the POSIX TZ
+    // string fully including the DST start/end rules so this is correct
+    // year-round without any NTP roundtrip.
+    localtime_r(&t, &tmv);
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%04d-%02d-%02d",
+             tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+    return String(buf);
+}
+
+// =============================================================================
+// Internal helpers (called with mutex_ held)
+// =============================================================================
+
+// Create or reopen <dayId>.csv and recompute sampleCount_. Returns true if
+// the file is ready for appending.
+bool SessionStore::openDayFile_(const String& dayId) {
+    activeId_   = dayId;
+    sampleCount_ = 0;
+    String path = pathFor(dayId);
+
     if (backend_ == Backend::SdFat) {
-        if (!gSdFat.exists(cfg::ACTIVE_FILE)) return false;
-        FsFile f = gSdFat.open(cfg::ACTIVE_FILE, O_RDONLY);
-        if (!f) return false;
-        char buf[64] = {0};
-        int n = f.read(buf, sizeof(buf) - 1);
-        f.close();
-        if (n <= 0) return false;
-        activeId_ = String(buf);
-        activeId_.trim();
-        if (!activeId_.length()) return false;
-        String path = pathFor(activeId_);
-        if (!gSdFat.exists(path.c_str())) {
-            gSdFat.remove(cfg::ACTIVE_FILE);
+        bool existed = gSdFat.exists(path.c_str());
+        FsFile f = gSdFat.open(path.c_str(),
+                               existed ? (O_RDWR | O_APPEND) : (O_WRONLY | O_CREAT | O_TRUNC));
+        if (!f) {
+            log_e("openDayFile_: open failed for %s", path.c_str());
             activeId_ = "";
+            recording_ = false;
             return false;
         }
+        if (!existed) {
+            f.println("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop");
+        }
+        f.close();
+        if (existed) {
+            FsFile data = gSdFat.open(path.c_str(), O_RDONLY);
+            if (data) {
+                uint8_t buf[256];
+                int n;
+                while ((n = data.read(buf, sizeof(buf))) > 0) {
+                    for (int i = 0; i < n; ++i) if (buf[i] == '\n') ++sampleCount_;
+                }
+                if (sampleCount_ > 0) --sampleCount_;
+                data.close();
+            }
+        }
         recording_ = true;
-        FsFile data = gSdFat.open(path.c_str(), O_RDONLY);
+        Serial.printf("[REC] open day file: %s existed=%d samples=%u\n",
+                      dayId.c_str(), (int)existed, (unsigned)sampleCount_);
+        return true;
+    }
+
+    if (!fs_) { activeId_ = ""; recording_ = false; return false; }
+    bool existed = fs_->exists(path);
+    File f = fs_->open(path, existed ? "a" : "w", true);
+    if (!f) {
+        log_e("openDayFile_: open failed for %s", path.c_str());
+        activeId_ = "";
+        recording_ = false;
+        return false;
+    }
+    if (!existed) {
+        f.println(F("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop"));
+    }
+    f.close();
+    if (existed) {
+        // Pre-count rows so the UI sample counter reflects pre-existing data.
+        File data = fs_->open(path, "r");
         if (data) {
-            sampleCount_ = 0;
-            char ch;
-            while (data.read(&ch, 1) == 1) {
-                if (ch == '\n') ++sampleCount_;
+            uint8_t buf[256];
+            size_t n;
+            while ((n = data.read(buf, sizeof(buf))) > 0) {
+                for (size_t i = 0; i < n; ++i) if (buf[i] == '\n') ++sampleCount_;
             }
             if (sampleCount_ > 0) --sampleCount_;
             data.close();
         }
-        return true;
-    }
-    if (!fs_) return false;
-    if (!fs_->exists(cfg::ACTIVE_FILE)) return false;
-    File f = fs_->open(cfg::ACTIVE_FILE, "r");
-    if (!f) return false;
-    activeId_ = f.readString();
-    activeId_.trim();
-    f.close();
-    if (!activeId_.length()) return false;
-    if (!fs_->exists(pathFor(activeId_))) {
-        fs_->remove(cfg::ACTIVE_FILE);
-        activeId_ = "";
-        return false;
     }
     recording_ = true;
+    Serial.printf("[REC] open day file: %s existed=%d samples=%u backend=%s\n",
+                  dayId.c_str(), (int)existed, (unsigned)sampleCount_, backendName());
+    return true;
+}
 
-    // Recompute sample count by scanning lines (skip header).
-    // Use a raw byte buffer rather than readStringUntil() which allocates a
-    // heap String for every row -- O(N) heap churn stalls append() on large
-    // sessions because LittleFS uses a global volume mutex.
-    File data = fs_->open(pathFor(activeId_), "r");
-    if (data) {
-        sampleCount_ = 0;
-        uint8_t buf[256];
-        size_t n;
-        while ((n = data.read(buf, sizeof(buf))) > 0) {
-            for (size_t i = 0; i < n; ++i) {
-                if (buf[i] == '\n') ++sampleCount_;
+// Rename the currently-open <activeId>.csv to <activeId>.<millis>.up.csv.
+// Resets recording_ / activeId_ / sampleCount_. Returns true if a rename
+// actually happened.
+bool SessionStore::rotateActiveToPending_() {
+    if (!recording_ || !activeId_.length()) return false;
+    String oldName = activeId_ + ".csv";
+    String newName = pendingFilename(activeId_, millis());
+    String oldPath = String(cfg::SESSIONS_DIR) + "/" + oldName;
+    String newPath = String(cfg::SESSIONS_DIR) + "/" + newName;
+
+    bool ok = false;
+    if (backend_ == Backend::SdFat) {
+        ok = gSdFat.rename(oldPath.c_str(), newPath.c_str());
+    } else if (fs_) {
+        ok = fs_->rename(oldPath, newPath);
+    }
+    if (ok) {
+        Serial.printf("[REC] rotate: %s -> %s (samples=%u)\n",
+                      oldName.c_str(), newName.c_str(), (unsigned)sampleCount_);
+    } else {
+        Serial.printf("[REC] rotate FAILED: %s -> %s\n",
+                      oldPath.c_str(), newPath.c_str());
+    }
+    recording_   = false;
+    activeId_    = "";
+    sampleCount_ = 0;
+    return ok;
+}
+
+// Rename any non-today <day>.csv files to pending-upload state. Useful at
+// boot after a power-cycle and at every upload cycle to make sure stale
+// daily files don't accumulate. Returns count of files rotated.
+uint32_t SessionStore::rotateStaleDayFiles_() {
+    // "today" is computed from current best-known epoch ms. If we haven't
+    // acquired UTC yet, todayId is empty and EVERY day file is considered
+    // stale, which is the correct behaviour: we'd rather upload pre-reboot
+    // data eagerly than risk overwriting it once UTC arrives.
+    String todayId;
+    {
+        time_t now = time(nullptr);
+        if (now > 1700000000) {
+            todayId = dayIdFromEpochMs((uint64_t)now * 1000ULL);
+        }
+    }
+
+    std::vector<String> toRotate;
+    if (backend_ == Backend::SdFat) {
+        FsFile dir = gSdFat.open(cfg::SESSIONS_DIR, O_RDONLY);
+        if (!dir || !dir.isDir()) return 0;
+        FsFile child;
+        while (child.openNext(&dir, O_RDONLY)) {
+            if (!child.isDir()) {
+                char nameBuf[64];
+                child.getName(nameBuf, sizeof(nameBuf));
+                String name(nameBuf);
+                if (isDayFilename(name)) {
+                    String dayId = dayIdFromFilename(name);
+                    if (todayId.length() == 0 || dayId != todayId) {
+                        toRotate.push_back(name);
+                    }
+                }
+            }
+            child.close();
+        }
+    } else if (fs_) {
+        File dir = fs_->open(cfg::SESSIONS_DIR);
+        if (!dir || !dir.isDirectory()) return 0;
+        File f = dir.openNextFile();
+        while (f) {
+            if (!f.isDirectory()) {
+                String name = fileBaseName(String(f.name()));
+                if (isDayFilename(name)) {
+                    String dayId = dayIdFromFilename(name);
+                    if (todayId.length() == 0 || dayId != todayId) {
+                        toRotate.push_back(name);
+                    }
+                }
+            }
+            f = dir.openNextFile();
+        }
+    }
+
+    uint32_t rotated = 0;
+    uint32_t seq = millis();
+    for (const auto& name : toRotate) {
+        String dayId = dayIdFromFilename(name);
+        String newName = pendingFilename(dayId, seq++);
+        String oldPath = String(cfg::SESSIONS_DIR) + "/" + name;
+        String newPath = String(cfg::SESSIONS_DIR) + "/" + newName;
+        bool ok;
+        if (backend_ == Backend::SdFat) {
+            ok = gSdFat.rename(oldPath.c_str(), newPath.c_str());
+        } else {
+            ok = fs_->rename(oldPath, newPath);
+        }
+        if (ok) {
+            Serial.printf("[REC] rotate stale: %s -> %s\n",
+                          name.c_str(), newName.c_str());
+            ++rotated;
+        }
+    }
+    return rotated;
+}
+
+// =============================================================================
+// Public: resume + append + rotate
+// =============================================================================
+
+bool SessionStore::resumeIfActive() {
+    if (!hasUsableBackend()) return false;
+    Lock lk(mutex_);
+
+    // No legacy /active.txt marker any more -- day file naming is canonical.
+    // If today's day file exists we reopen it; any other stale day files
+    // get rotated to pending-upload state so the next upload cycle picks
+    // them up.
+    rotateStaleDayFiles_();
+
+    // Best effort: only open today's file if we already know today's date.
+    // First append() will (re-)open it once GPS UTC anchors otherwise.
+    time_t now = time(nullptr);
+    if (now > 1700000000) {
+        String today = dayIdFromEpochMs((uint64_t)now * 1000ULL);
+        if (today.length() == 10) {
+            String path = pathFor(today);
+            bool exists = (backend_ == Backend::SdFat) ? gSdFat.exists(path.c_str())
+                                                       : (fs_ && fs_->exists(path));
+            if (exists) {
+                openDayFile_(today);
+                return true;
             }
         }
-        if (sampleCount_ > 0) --sampleCount_; // header
-        data.close();
     }
-    return true;
-}
-
-bool SessionStore::start() {
-    if (!hasUsableBackend()) { log_e("start: no backend"); return false; }
-    if (recording_) stop();
-    activeId_ = makeSessionId();
-    sampleCount_ = 0;
-
-    if (backend_ == Backend::SdFat) {
-        String path = pathFor(activeId_);
-        FsFile f = gSdFat.open(path.c_str(), O_WRONLY | O_CREAT | O_TRUNC);
-        if (!f) { log_e("open session file failed"); activeId_ = ""; return false; }
-        f.println("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop");
-        f.close();
-        FsFile a = gSdFat.open(cfg::ACTIVE_FILE, O_WRONLY | O_CREAT | O_TRUNC);
-        if (a) { a.print(activeId_); a.close(); }
-        recording_ = true;
-        log_i("Session started: %s", activeId_.c_str());
-        return true;
-    }
-    if (!fs_) { log_e("start: no backend"); return false; }
-
-    File f = fs_->open(pathFor(activeId_), "w", true);
-    if (!f) { log_e("open session file failed"); activeId_ = ""; return false; }
-    f.println(F("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop"));
-    f.close();
-
-    File a = fs_->open(cfg::ACTIVE_FILE, "w", true);
-    if (a) { a.print(activeId_); a.close(); }
-
-    recording_ = true;
-    log_i("Session started: %s", activeId_.c_str());
-    Serial.printf("[REC] START: id=%s backend=LittleFS\n", activeId_.c_str());
-    return true;
-}
-
-bool SessionStore::stop() {
-    if (!recording_) return false;
-    recording_ = false;
-    if (backend_ == Backend::SdFat) {
-        gSdFat.remove(cfg::ACTIVE_FILE);
-    } else if (fs_) {
-        fs_->remove(cfg::ACTIVE_FILE);
-    }
-    log_i("Session stopped: %s (%u samples)", activeId_.c_str(), (unsigned)sampleCount_);
-    Serial.printf("[REC] STOP: id=%s samples=%u\n",
-                  activeId_.c_str(), (unsigned)sampleCount_);
-    return true;
-}
-
-bool SessionStore::toggle() {
-    if (recording_) { stop(); return false; }
-    return start();
+    return false;
 }
 
 void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
@@ -426,10 +587,39 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
                           const String& deviceId,
                           float speedKph, float bearingDeg,
                           float altitudeM, float hdop) {
-    if (!recording_ || !activeId_.length()) return;
     if (!hasUsableBackend()) return;
 
-    // Format each optional extended field; empty string when sentinel value.
+    // ---- Always-on contract gates ----------------------------------------
+    // No GPS fix => sample is discarded entirely. The device's purpose is
+    // geo-tagged radiation logging; rows without coordinates have no value
+    // and would pad the database with noise.
+    if (!hasGps) {
+        static uint32_t skippedNoGps = 0;
+        if ((++skippedNoGps % 60) == 1) {
+            Serial.printf("[REC] skip: no GPS fix (skipped=%u)\n",
+                          (unsigned)skippedNoGps);
+        }
+        return;
+    }
+    constexpr uint64_t MIN_VALID_TS_MS = 1577836800000ULL;
+    if (timestampMsFull < MIN_VALID_TS_MS) return;
+
+    String day = dayIdFromEpochMs(timestampMsFull);
+    if (day.length() != 10) return;
+
+    Lock lk(mutex_);
+
+    // ---- Auto-rotate on day rollover / first sample ---------------------
+    if (!recording_ || activeId_ != day) {
+        if (recording_ && activeId_.length() && activeId_ != day) {
+            // Day boundary crossed mid-trip. Rotate previous day's file
+            // immediately so the uploader can post it without waiting.
+            rotateActiveToPending_();
+        }
+        if (!openDayFile_(day)) return;
+    }
+
+    // ---- Format the CSV row ---------------------------------------------
     char spd[12] = "", brg[12] = "", alt[12] = "", hdp[12] = "";
     if (speedKph   >= 0.f)     snprintf(spd, sizeof(spd), "%.2f", speedKph);
     if (bearingDeg >= 0.f)     snprintf(brg, sizeof(brg), "%.1f", bearingDeg);
@@ -437,22 +627,14 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
     if (hdop       >= 0.f)     snprintf(hdp, sizeof(hdp), "%.2f", hdop);
 
     char line[cfg::MAX_LINE_BYTES];
-    int len;
-    if (hasGps) {
-        len = snprintf(line, sizeof(line), "%llu,%.6f,%.3f,%.7f,%.7f,%s,%s,%s,%s,%s\n",
+    int len = snprintf(line, sizeof(line), "%llu,%.6f,%.3f,%.7f,%.7f,%s,%s,%s,%s,%s\n",
                        (unsigned long long)timestampMsFull,
                        uSvPerHour, cps, lat, lng, deviceId.c_str(),
                        spd, brg, alt, hdp);
-    } else {
-        len = snprintf(line, sizeof(line), "%llu,%.6f,%.3f,,,%s,%s,%s,%s,%s\n",
-                       (unsigned long long)timestampMsFull,
-                       uSvPerHour, cps, deviceId.c_str(),
-                       spd, brg, alt, hdp);
-    }
     if (len <= 0) return;
 
+    String path = pathFor(activeId_);
     if (backend_ == Backend::SdFat) {
-        String path = pathFor(activeId_);
         FsFile f = gSdFat.open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND);
         if (!f) { log_w("append: open failed"); return; }
         f.write((const uint8_t*)line, (size_t)len);
@@ -460,41 +642,38 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
         ++sampleCount_;
         return;
     }
-
     if (!fs_) return;
-    File f = fs_->open(pathFor(activeId_), "a");
+    File f = fs_->open(path, "a");
     if (!f) { log_w("append: open failed"); return; }
     size_t written = f.print(line);
     f.close();
     if ((int)written < len) {
-        // LittleFS write failed or was short -- storage error. Log loudly.
         Serial.printf("[REC] WRITE ERR: tried %d bytes wrote %u heap=%u\n",
                       len, (unsigned)written, (unsigned)ESP.getFreeHeap());
-        return;  // do NOT count a row we didn't fully write
+        return;
     }
     ++sampleCount_;
-    // Periodic diagnostics: log sample count + heap every 100 rows so we
-    // can verify file growth vs in-memory count in the serial log.
     if ((sampleCount_ % 100) == 0) {
-        Serial.printf("[REC] %u samples written heap=%u\n",
-                      (unsigned)sampleCount_, (unsigned)ESP.getFreeHeap());
+        Serial.printf("[REC] %u samples written today=%s heap=%u\n",
+                      (unsigned)sampleCount_, activeId_.c_str(),
+                      (unsigned)ESP.getFreeHeap());
     }
 }
 
+// =============================================================================
+// Public: storage stats
+// =============================================================================
+
 size_t SessionStore::totalBytes() const {
-    // SD reports values much larger than 32 bits; we clamp to size_t for the UI.
     if (backend_ == Backend::Sd)       return (size_t)std::min<uint64_t>(SD.totalBytes(),       SIZE_MAX);
     if (backend_ == Backend::SdFat)    return (size_t)std::min<uint64_t>(cardSizeMb_ * 1024ULL * 1024ULL, SIZE_MAX);
     if (backend_ == Backend::LittleFs) return LittleFS.totalBytes();
     return 0;
 }
+
 size_t SessionStore::usedBytes() const {
-    if (backend_ == Backend::Sd)       return (size_t)std::min<uint64_t>(SD.usedBytes(),        SIZE_MAX);
-    if (backend_ == Backend::SdFat) {
-        // SdFat doesn't track free clusters cheaply; freeClusterCount() walks
-        // the FAT and is slow on large cards. Skip it -- UI just shows total.
-        return 0;
-    }
+    if (backend_ == Backend::Sd)       return (size_t)std::min<uint64_t>(SD.usedBytes(), SIZE_MAX);
+    if (backend_ == Backend::SdFat)    return 0;     // SdFat freeClusterCount() is slow
     if (backend_ == Backend::LittleFs) return LittleFS.usedBytes();
     return 0;
 }
@@ -529,18 +708,126 @@ int SessionStore::sessionCount() const {
     return n;
 }
 
-// ---------------- export / wipe ------------------------------------------
+// =============================================================================
+// Public: upload integration
+// =============================================================================
 
-namespace {
-String stripCsvSuffix(const String& fname) {
-    if (fname.endsWith(".csv")) return fname.substring(0, fname.length() - 4);
-    return fname;
+uint32_t SessionStore::rotateForUpload() {
+    if (!hasUsableBackend()) return 0;
+    Lock lk(mutex_);
+    if (recording_ && sampleCount_ > 0) {
+        rotateActiveToPending_();
+    }
+    rotateStaleDayFiles_();
+    return (uint32_t)listPendingUploads().size();
 }
-String fileBaseName(const String& path) {
-    int slash = path.lastIndexOf('/');
-    return (slash >= 0) ? path.substring(slash + 1) : path;
+
+std::vector<SessionStore::PendingUpload> SessionStore::listPendingUploads() const {
+    std::vector<PendingUpload> out;
+    if (backend_ == Backend::SdFat) {
+        FsFile dir = gSdFat.open(cfg::SESSIONS_DIR, O_RDONLY);
+        if (!dir || !dir.isDir()) return out;
+        FsFile child;
+        while (child.openNext(&dir, O_RDONLY)) {
+            if (!child.isDir()) {
+                char nameBuf[64];
+                child.getName(nameBuf, sizeof(nameBuf));
+                String name(nameBuf);
+                if (isPendingFilename(name)) {
+                    PendingUpload p;
+                    p.filename  = name;
+                    p.sessionId = dayIdFromFilename(name);
+                    p.sizeBytes = (size_t)child.size();
+                    out.push_back(p);
+                }
+            }
+            child.close();
+        }
+        return out;
+    }
+    if (!fs_) return out;
+    File dir = fs_->open(cfg::SESSIONS_DIR);
+    if (!dir || !dir.isDirectory()) return out;
+    File f = dir.openNextFile();
+    while (f) {
+        if (!f.isDirectory()) {
+            String name = fileBaseName(String(f.name()));
+            if (isPendingFilename(name)) {
+                PendingUpload p;
+                p.filename  = name;
+                p.sessionId = dayIdFromFilename(name);
+                p.sizeBytes = (size_t)f.size();
+                out.push_back(p);
+            }
+        }
+        f = dir.openNextFile();
+    }
+    return out;
 }
-} // namespace
+
+bool SessionStore::removePendingUpload(const String& filename) {
+    if (filename.length() == 0 || !hasUsableBackend()) return false;
+    if (!isPendingFilename(filename)) return false;
+    String path = String(cfg::SESSIONS_DIR) + "/" + filename;
+    if (backend_ == Backend::SdFat) {
+        return gSdFat.remove(path.c_str());
+    }
+    if (!fs_) return false;
+    return fs_->remove(path);
+}
+
+Stream* SessionStore::openPendingUploadStream(const String& filename, size_t& outSizeBytes) {
+    if ((backend_ == Backend::LittleFs || backend_ == Backend::Sd) && fs_) {
+        String path = String(cfg::SESSIONS_DIR) + "/" + filename;
+        openedStreamFile_ = fs_->open(path, "r");
+        if (!openedStreamFile_) {
+            log_w("openPendingUploadStream: open failed for %s", filename.c_str());
+            return nullptr;
+        }
+        outSizeBytes = (size_t)openedStreamFile_.size();
+        return &openedStreamFile_;
+    }
+    return nullptr;
+}
+
+void SessionStore::closeSessionStream() {
+    if (openedStreamFile_) openedStreamFile_.close();
+}
+
+bool SessionStore::readPendingUploadToString(const String& filename, size_t maxBytes, String& out) const {
+    if (!hasUsableBackend()) return false;
+    String path = String(cfg::SESSIONS_DIR) + "/" + filename;
+    if (backend_ == Backend::SdFat) {
+        FsFile f = gSdFat.open(path.c_str(), O_RDONLY);
+        if (!f) return false;
+        size_t sz = (size_t)f.size();
+        if (sz > maxBytes) { f.close(); return false; }
+        out.reserve(sz);
+        uint8_t buf[256];
+        int n;
+        while ((n = f.read(buf, sizeof(buf))) > 0) {
+            for (int i = 0; i < n; ++i) out += (char)buf[i];
+        }
+        f.close();
+        return true;
+    }
+    if (!fs_) return false;
+    File f = fs_->open(path, "r");
+    if (!f) return false;
+    if (f.size() > maxBytes) { f.close(); return false; }
+    out.reserve((size_t)f.size());
+    uint8_t buf[256];
+    while (f.available()) {
+        size_t n = f.read(buf, sizeof(buf));
+        for (size_t i = 0; i < n; ++i) out += (char)buf[i];
+    }
+    f.close();
+    return true;
+}
+
+// =============================================================================
+// Public: diagnostic listing / dumping / wiping
+// =============================================================================
 
 std::vector<SessionStore::SessionInfo> SessionStore::listSessions() const {
     std::vector<SessionInfo> out;
@@ -558,7 +845,6 @@ std::vector<SessionStore::SessionInfo> SessionStore::listSessions() const {
                     info.id        = stripCsvSuffix(name);
                     info.sizeBytes = (size_t)child.size();
                     info.samples   = 0;
-                    // Count newlines via a separate read pass on the same file.
                     uint8_t buf[256];
                     int n;
                     child.seek(0);
@@ -576,7 +862,6 @@ std::vector<SessionStore::SessionInfo> SessionStore::listSessions() const {
     if (!fs_) return out;
     File dir = fs_->open(cfg::SESSIONS_DIR);
     if (!dir || !dir.isDirectory()) return out;
-
     File f = dir.openNextFile();
     while (f) {
         if (!f.isDirectory()) {
@@ -586,12 +871,9 @@ std::vector<SessionStore::SessionInfo> SessionStore::listSessions() const {
                 info.id        = stripCsvSuffix(name);
                 info.sizeBytes = f.size();
                 info.samples   = 0;
-                // For the active recording session use the in-memory count --
-                // no file read needed, and avoids holding the LittleFS mutex
-                // while append() may be waiting for it on the NimBLE task.
-                // For completed sessions, scan bytes from the file; a 256-byte
-                // buffer avoids the O(N) heap churn of readStringUntil().
                 if (info.id == activeId_) {
+                    // Active day file: use in-memory count instead of reading
+                    // through the global LittleFS mutex.
                     info.samples = sampleCount_;
                 } else {
                     File data = fs_->open(String(cfg::SESSIONS_DIR) + "/" + name, "r");
@@ -599,11 +881,9 @@ std::vector<SessionStore::SessionInfo> SessionStore::listSessions() const {
                         uint8_t buf[256];
                         size_t n;
                         while ((n = data.read(buf, sizeof(buf))) > 0) {
-                            for (size_t i = 0; i < n; ++i) {
-                                if (buf[i] == '\n') ++info.samples;
-                            }
+                            for (size_t i = 0; i < n; ++i) if (buf[i] == '\n') ++info.samples;
                         }
-                        if (info.samples > 0) --info.samples;  // header
+                        if (info.samples > 0) --info.samples;
                         data.close();
                     }
                 }
@@ -620,15 +900,14 @@ bool SessionStore::dumpSession(const String& id, Stream& out) const {
         out.printf("[DUMP-ERR] id=%s reason=no-backend\n", id.c_str());
         return false;
     }
+    String path = String(cfg::SESSIONS_DIR) + "/" + id + ".csv";
     if (backend_ == Backend::SdFat) {
-        String path = String(cfg::SESSIONS_DIR) + "/" + id + ".csv";
         FsFile f = gSdFat.open(path.c_str(), O_RDONLY);
         if (!f) {
             out.printf("[DUMP-ERR] id=%s reason=open-failed\n", id.c_str());
             return false;
         }
         uint32_t bytes = (uint32_t)f.size();
-        // Count samples in a separate pass.
         uint32_t samples = 0;
         {
             FsFile counter = gSdFat.open(path.c_str(), O_RDONLY);
@@ -659,43 +938,31 @@ bool SessionStore::dumpSession(const String& id, Stream& out) const {
         out.printf("[DUMP-ERR] id=%s reason=no-backend\n", id.c_str());
         return false;
     }
-    String path = String(cfg::SESSIONS_DIR) + "/" + id + ".csv";
     File f = fs_->open(path, "r");
     if (!f) {
         out.printf("[DUMP-ERR] id=%s reason=open-failed\n", id.c_str());
         return false;
     }
-
-    // Re-count samples for the header so the host can verify byte/sample
-    // integrity after streaming. Use a raw byte buffer rather than
-    // readStringUntil('\n') which heap-allocates a String per row and holds
-    // the LittleFS volume mutex the whole time, starving concurrent append().
     uint32_t samples = 0;
     File counter = fs_->open(path, "r");
     if (counter) {
         uint8_t cbuf[256];
         size_t cn;
         while ((cn = counter.read(cbuf, sizeof(cbuf))) > 0) {
-            for (size_t ci = 0; ci < cn; ++ci)
-                if (cbuf[ci] == '\n') ++samples;
+            for (size_t ci = 0; ci < cn; ++ci) if (cbuf[ci] == '\n') ++samples;
         }
-        if (samples > 0) --samples; // header
+        if (samples > 0) --samples;
         counter.close();
     }
-
     out.printf("[DUMP-BEGIN] id=%s bytes=%u samples=%u\n",
                id.c_str(), (unsigned)f.size(), (unsigned)samples);
-    // Stream raw bytes verbatim. The host side reads until [DUMP-END].
     uint8_t buf[256];
     while (f.available()) {
         size_t n = f.read(buf, sizeof(buf));
         if (n > 0) out.write(buf, n);
-        // Tiny yield so the BLE stack & WDT keep running on big files.
         yield();
     }
     f.close();
-    // Make sure the final line has a terminating newline so the marker
-    // appears on its own line regardless of CSV trailing state.
     out.print('\n');
     out.printf("[DUMP-END] id=%s\n", id.c_str());
     return true;
@@ -706,20 +973,19 @@ void SessionStore::dumpAll(Stream& out) const {
     out.printf("[DUMP-ALL-BEGIN] count=%u\n", (unsigned)sessions.size());
     uint32_t ok = 0;
     for (const auto& s : sessions) {
-        // Skip the active session's tail-of-write hazard by closing append
-        // handles between rows -- our append() already does that, so dump
-        // is safe to run concurrently with logging.
         if (dumpSession(s.id, out)) ++ok;
     }
     out.printf("[DUMP-DONE] ok=%u total=%u\n", (unsigned)ok, (unsigned)sessions.size());
 }
 
 uint32_t SessionStore::wipeAll() {
-    if (recording_) stop();
     if (!hasUsableBackend()) return 0;
+    Lock lk(mutex_);
+    recording_   = false;
+    activeId_    = "";
+    sampleCount_ = 0;
 
     if (backend_ == Backend::SdFat) {
-        gSdFat.remove(cfg::ACTIVE_FILE);
         FsFile dir = gSdFat.open(cfg::SESSIONS_DIR, O_RDONLY);
         if (!dir || !dir.isDir()) return 0;
         std::vector<String> paths;
@@ -736,20 +1002,12 @@ uint32_t SessionStore::wipeAll() {
         for (const auto& p : paths) {
             if (gSdFat.remove(p.c_str())) ++removed;
         }
-        activeId_    = "";
-        sampleCount_ = 0;
         return removed;
     }
-
     if (!fs_) return 0;
-    fs_->remove(cfg::ACTIVE_FILE);
-
     uint32_t removed = 0;
     File dir = fs_->open(cfg::SESSIONS_DIR);
     if (!dir || !dir.isDirectory()) return 0;
-
-    // Two-pass: collect names first, then remove. Removing while iterating
-    // openNextFile() is undefined behaviour on LittleFS.
     std::vector<String> paths;
     File f = dir.openNextFile();
     while (f) {
@@ -761,26 +1019,21 @@ uint32_t SessionStore::wipeAll() {
     for (const auto& p : paths) {
         if (fs_->remove(p)) ++removed;
     }
-
-    activeId_    = "";
-    sampleCount_ = 0;
     return removed;
 }
 
 bool SessionStore::removeSession(const String& id) {
     if (id.length() == 0 || !hasUsableBackend()) return false;
-    if (recording_ && activeId_ == id) return false;   // refuse to delete active
-    if (backend_ == Backend::SdFat) {
-        String path = pathFor(id);
-        return gSdFat.remove(path.c_str());
-    }
+    if (recording_ && activeId_ == id) return false;
+    String path = String(cfg::SESSIONS_DIR) + "/" + id + ".csv";
+    if (backend_ == Backend::SdFat) return gSdFat.remove(path.c_str());
     if (!fs_) return false;
-    return fs_->remove(pathFor(id));
+    return fs_->remove(path);
 }
 
 bool SessionStore::readSessionToString(const String& id, size_t maxBytes, String& out) const {
     if (!hasUsableBackend()) return false;
-    String path = pathFor(id);
+    String path = String(cfg::SESSIONS_DIR) + "/" + id + ".csv";
     if (backend_ == Backend::SdFat) {
         FsFile f = gSdFat.open(path.c_str(), O_RDONLY);
         if (!f) return false;
@@ -800,8 +1053,6 @@ bool SessionStore::readSessionToString(const String& id, size_t maxBytes, String
     if (!f) return false;
     if (f.size() > maxBytes) { f.close(); return false; }
     out.reserve((size_t)f.size());
-    // Read in buffered chunks -- character-by-character Arduino String growth
-    // is ~2x slower and triggers many extra reallocs on large files.
     uint8_t buf[256];
     while (f.available()) {
         size_t n = f.read(buf, sizeof(buf));
@@ -809,24 +1060,4 @@ bool SessionStore::readSessionToString(const String& id, size_t maxBytes, String
     }
     f.close();
     return true;
-}
-
-Stream* SessionStore::openSessionStream(const String& id, size_t& outSizeBytes) {
-    // Only LittleFS and SD (fs::FS) backends expose a Stream-compatible File.
-    // SdFat uses its own FsFile type which is not an fs::File / Stream.
-    if ((backend_ == Backend::LittleFs || backend_ == Backend::Sd) && fs_) {
-        openedStreamFile_ = fs_->open(pathFor(id), "r");
-        if (!openedStreamFile_) {
-            log_w("openSessionStream: open failed for %s", id.c_str());
-            return nullptr;
-        }
-        outSizeBytes = (size_t)openedStreamFile_.size();
-        return &openedStreamFile_;
-    }
-    // SdFat: caller must fall back to readSessionToString.
-    return nullptr;
-}
-
-void SessionStore::closeSessionStream() {
-    if (openedStreamFile_) openedStreamFile_.close();
 }

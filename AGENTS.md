@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.3.8`.
+Current: `0.4.0`.
 
 ---
 
@@ -787,7 +787,7 @@ All in `src/config.h` under `namespace cfg`. Edit here and recompile.
 
 | Knob                    | V2 default | V1.2 default | Notes |
 |-------------------------|------------|--------------|-------|
-| `KEEP_UPLOADS_ON_DEVICE`| `false`    | `false`      | Delete session CSV from device after successful upload. Set true to retain files (re-uploads are idempotent via server unique index on {sessionId,timestampMs}); re-upload within same boot is skipped via `uploadedThisBoot_` vector |
+| `LOCAL_TZ`              | `EST5EDT,M3.2.0,M11.1.0` | same | POSIX TZ string used by `tzset()` at boot; controls the local-eastern YYYY-MM-DD day boundary used for file rotation |
 | `SD_ENABLED`            | `false`    | `true`       | V2 uses internal LittleFS; SD disabled |
 | `SD_REQUIRED`           | `false`    | `true`       | V1.2: hard error on SD failure rather than silent LittleFS fallback |
 | `SD_INIT_RETRIES`       | 6          | 6            | cold-boot retries (LDO ramp time) |
@@ -829,6 +829,37 @@ Otherwise, iterate to completion.
 ---
 
 ## Lessons Learned — Do Not Re-Litigate
+
+### Always-On Day-Bucketed Recording (v0.4.0)
+
+- **Contract**: recording is no longer user-toggled. Whenever the RadiaCode is
+  connected AND `gps.hasFix()` is true AND `bestEpochMs()` returns a post-2020
+  UTC timestamp, samples are written to `/sessions/<YYYY-MM-DD>.csv` where the
+  date is computed in local-eastern time. Samples failing any of those gates
+  are silently dropped (logged every ~60th skip).
+- **Day rollover**: `SessionStore::append()` checks the day-id of every sample.
+  When it changes, the active file is rotated to `<prev-day>.<bootMs>.up.csv`
+  and a new `<today>.csv` is opened transparently. No samples are lost across
+  the boundary.
+- **Upload model**: `WifiUploader::runOnce()` calls `store_->rotateForUpload()`
+  first (under the recording mutex), then iterates `listPendingUploads()`. On
+  HTTP 2xx the `.up.csv` file is deleted from disk. The currently-open
+  `<today>.csv` is never touched mid-cycle by upload code. Result: zero risk
+  of duplicate samples on the device, and recording is never paused.
+- **Mutex**: `SessionStore::mutex_` (FreeRTOS semaphore) guards every append /
+  rotate / list operation. BLE callback (Core 1) and Wi-Fi uploader (Core 0)
+  contend cleanly.
+- **Removed surface**: `SessionStore::start()` / `stop()` / `toggle()`,
+  `Ui::ACTION_TOGGLE_REC`, the double-long-press confirmation, the
+  `cfg::KEEP_UPLOADS_ON_DEVICE` knob, and the `WifiUploader::uploadedThisBoot_`
+  vector are all deleted. `ACTIVE_FILE` marker is no longer used.
+- **API migration**: `POST /admin/migrate-to-daily-sessions?confirm=MIGRATE_CONFIRMED`
+  (API 0.5.0+) re-keys every existing sample's `sessionId` to its local-eastern
+  YYYY-MM-DD via aggregation-pipeline `$dateToString`, dedupes collisions, and
+  rebuilds the `tracker_sessions` metadata.
+- **`localtime_r()` requires `tzset()`**: `setenv("TZ", cfg::LOCAL_TZ, 1); tzset();`
+  must run in `setup()` before `gStore.begin()` or any append. Otherwise the
+  day-id falls back to UTC (silently wrong by 4-5 hours).
 
 ### BLE — RadiaCode-110
 

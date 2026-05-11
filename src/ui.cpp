@@ -101,7 +101,6 @@ void Ui::setSources(GpsModule* gps, SessionStore* store, RadiaCode* rc) {
 
 // ---------------------------------------------------------------------------
 void Ui::onShortPress() {
-    confirmStopPending_ = false;      // any screen navigation cancels pending stop
     if (screen_ == SCREEN_PICKER) {
         if (pickList_.empty()) return;
         // cursor 0..N-1 = device index, N = "Cancel"
@@ -120,21 +119,7 @@ void Ui::onLongPress() {
             pendingAction_ = ACTION_START_PICKER;
             break;
         case SCREEN_STORAGE:
-            if (store_ && store_->isRecording()) {
-                if (confirmStopPending_) {
-                    // Second long press within window: confirmed, actually stop
-                    confirmStopPending_ = false;
-                    pendingAction_ = ACTION_TOGGLE_REC;
-                } else {
-                    // First long press: arm confirmation, show prompt on screen
-                    confirmStopPending_ = true;
-                    confirmStopArmMs_ = millis();
-                    forceFullRedraw_ = true;
-                }
-            } else {
-                // Not recording: start immediately, no confirmation needed
-                pendingAction_ = ACTION_TOGGLE_REC;
-            }
+            // v0.4.0: recording is always-on. Long-press on STORAGE is a no-op.
             break;
         case SCREEN_PICKER:
             if (pickerCursor_ >= (int)pickList_.size()) {
@@ -225,11 +210,6 @@ void Ui::field(int idx, int x, int y, int w, int h,
 
 // ---------------------------------------------------------------------------
 void Ui::tick() {
-    // Expire the stop-recording confirmation if the user didn't confirm in time
-    if (confirmStopPending_ && (millis() - confirmStopArmMs_) >= kConfirmStopTimeoutMs) {
-        confirmStopPending_ = false;
-        forceFullRedraw_ = true;
-    }
     if (screen_ != lastDrawnScreen_) {
         tft.fillScreen(COL_BG);
         for (int i = 0; i < MAX_FIELDS; ++i) prevText_[i] = "";
@@ -437,18 +417,21 @@ void Ui::renderStorage() {
     const bool rec = store_->isRecording();
     const bool fix = gps_ && gps_->hasFix();
     field(30, 4, 14, 50, 8, "REC", COL_DIM, COL_BG, 1);
-    field(31, 36, 14, 60, 8,
-          rec ? (fix ? "ON     " : "ON noGPS") : "OFF    ",
-          rec ? (fix ? COL_GREEN : COL_AMBER) : COL_RED,
-          COL_BG, 1);
+    // v0.4.0: "AUTO" replaces ON/OFF since recording is no longer user-toggled.
+    // GREEN  = day file open AND GPS fix (samples being written)
+    // AMBER  = day file open but no GPS fix right now (samples being dropped)
+    // DIM    = waiting for the first valid GPS sample to open today's file
+    const char*    autoLabel = rec ? (fix ? "AUTO ok" : "AUTO -gps") : "AUTO ...";
+    const uint16_t autoCol   = rec ? (fix ? COL_GREEN : COL_AMBER) : COL_DIM;
+    field(31, 36, 14, 80, 8, autoLabel, autoCol, COL_BG, 1);
 
     snprintf(buf, sizeof(buf), "Samp %lu", (unsigned long)store_->sampleCount());
     field(32, 80, 14, 76, 8, buf, COL_FG, COL_BG, 1);
 
     if (rec) {
-        snprintf(buf, sizeof(buf), "ID %s", store_->activeId().c_str());
+        snprintf(buf, sizeof(buf), "Day %s", store_->activeId().c_str());
     } else {
-        strcpy(buf, "(idle)");
+        strcpy(buf, "(awaiting GPS UTC)");
     }
     field(33, 4, 26, 156, 8, buf, COL_FG, COL_BG, 1);
 
@@ -472,14 +455,8 @@ void Ui::renderStorage() {
         prevPct = pct;
     }
 
-    if (confirmStopPending_) {
-        field(35, 4, 66, 156, 8, "HOLD AGAIN: STOP REC", COL_RED, COL_BG, 1);
-    } else {
-        snprintf(buf, sizeof(buf), "%s   Sess:%d",
-                 rec ? "Hold: STOP" : "Hold: START",
-                 store_->sessionCount());
-        field(35, 4, 66, 156, 8, buf, COL_DIM, COL_BG, 1);
-    }
+    snprintf(buf, sizeof(buf), "Files on disk: %d", store_->sessionCount());
+    field(35, 4, 66, 156, 8, buf, COL_DIM, COL_BG, 1);
 }
 
 // ---------------------------------------------------------------------------

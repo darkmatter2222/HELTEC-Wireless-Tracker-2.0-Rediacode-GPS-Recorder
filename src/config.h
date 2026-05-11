@@ -126,15 +126,23 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "0.3.8";
+constexpr const char* FW_VERSION = "0.4.0";
 
-// When true the Wi-Fi uploader keeps the session CSV on-device after a
-// successful upload instead of deleting it. The server's unique index on
-// {sessionId,timestampMs} makes re-uploads idempotent, so if the device
-// is rebooted the file gets re-uploaded harmlessly. The only cost is disk
-// space -- with a 6 MB LittleFS partition and ~150 B/row that is ~40,000
-// rows before any cleanup is needed. Set false to restore auto-delete.
-constexpr bool KEEP_UPLOADS_ON_DEVICE = false;
+// ----------- Always-on autonomous recording (v0.4.0) ------------------------
+// Recording is no longer user-toggled. As long as the RadiaCode is connected
+// AND a valid GPS UTC timestamp is available AND the GPS has a fix, samples
+// are written to a per-day CSV file. There is no Start/Stop UI; the STORAGE
+// screen is purely informational. Files are named /sessions/<YYYY-MM-DD>.csv
+// where the date is local Eastern time (the user's home timezone) so a single
+// evening trip does not get split across two UTC days.
+//
+// POSIX TZ rule for America/New_York (EST/EDT, US DST rules since 2007).
+// Format: stdoffset[dst[offset][,start[/time],end[/time]]]
+//   EST5      = baseline UTC-5 (Eastern Standard Time)
+//   EDT       = daylight-saving abbreviation
+//   ,M3.2.0   = DST starts second Sunday of March at 02:00 local
+//   ,M11.1.0  = DST ends first Sunday of November at 02:00 local
+constexpr const char* LOCAL_TZ = "EST5EDT,M3.2.0,M11.1.0";
 
 // ----------- Extended per-record telemetry fields ---------------------------
 // Each flag controls whether that GPS field is sampled and written to the CSV.

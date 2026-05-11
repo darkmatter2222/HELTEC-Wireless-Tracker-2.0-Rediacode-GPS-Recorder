@@ -70,7 +70,7 @@ MONGO_DB          = os.getenv("MONGO_DB", "radiacode")
 SAMPLES_COLL      = os.getenv("MONGO_SAMPLES_COLLECTION", "tracker_samples")
 SESSIONS_COLL     = os.getenv("MONGO_SESSIONS_COLLECTION", "tracker_sessions")
 BACKUPS_COLL      = "tracker_backups"    # telemetry: one doc per backup attempt
-API_VERSION       = "0.4.0"
+API_VERSION       = "0.5.0"
 MAX_BODY_BYTES    = int(os.getenv("MAX_BODY_BYTES", str(8 * 1024 * 1024)))   # 8 MB
 INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "1000"))
 BACKUP_DIR        = os.getenv("BACKUP_DIR", "/backups")  # host-mounted volume
@@ -747,6 +747,142 @@ def recompute_sessions():
         "purgedSampleRows": purged,
         "sessionsUpdated":  updated,
         "minValidTsMs":     MIN_VALID_TS_MS,
+    }
+
+
+@app.post("/admin/migrate-to-daily-sessions")
+def migrate_to_daily_sessions(confirm: str = ""):
+    """One-shot migration to the firmware v0.4.0+ day-bucketed schema.
+
+    Re-keys every sample row so its sessionId is the local-eastern
+    YYYY-MM-DD string of its timestampMs (using the America/New_York
+    timezone, which honors DST automatically). Drops the
+    {sessionId,timestampMs} unique index for the duration of the rewrite,
+    deduplicates any rows that collide on the new key, recreates the
+    unique index, then rebuilds the tracker_sessions metadata collection.
+
+    Idempotent: safe to re-run after a partial failure. Old sessionIds
+    that already match `^\\d{4}-\\d{2}-\\d{2}$` are untouched.
+
+    Guard: ?confirm=MIGRATE_CONFIRMED is required.
+    """
+    if confirm != "MIGRATE_CONFIRMED":
+        raise HTTPException(
+            status_code=400,
+            detail="confirm=MIGRATE_CONFIRMED query parameter required",
+        )
+
+    samples       = app.state.samples
+    sessions_coll = app.state.sessions
+
+    # 1. Purge anything before 2020 - those rows have no usable date anyway
+    #    and would create bogus sessionIds like "1970-01-01".
+    pre2020 = samples.delete_many({"timestampMs": {"$lt": MIN_VALID_TS_MS}})
+    log.info("migrate: purged %d pre-2020 sample rows", pre2020.deleted_count)
+
+    # 2. Drop the unique index. Updating sessionId in-place would otherwise
+    #    fail on every row whose new key collides with an existing row in
+    #    a different (old) session - we'll dedupe explicitly in step 4.
+    try:
+        samples.drop_index("session_ts_unique")
+        log.info("migrate: dropped session_ts_unique index")
+    except Exception as e:
+        log.info("migrate: drop_index skipped (%s)", e)
+
+    # 3. Rewrite sessionId on every sample using a server-side aggregation
+    #    update so we don't pull the whole collection through Python.
+    upd = samples.update_many(
+        {},
+        [
+            {
+                "$set": {
+                    "sessionId": {
+                        "$dateToString": {
+                            "format":   "%Y-%m-%d",
+                            "date":     {"$toDate": "$timestampMs"},
+                            "timezone": "America/New_York",
+                        }
+                    }
+                }
+            }
+        ],
+    )
+    log.info("migrate: rewrote sessionId on %d sample rows", upd.modified_count)
+
+    # 4. Deduplicate rows that now collide on {sessionId,timestampMs}.
+    #    For each duplicate group we keep the first _id and delete the rest.
+    dedup_pipeline = [
+        {"$group": {
+            "_id":  {"sessionId": "$sessionId", "timestampMs": "$timestampMs"},
+            "ids":  {"$push": "$_id"},
+            "n":    {"$sum": 1},
+        }},
+        {"$match": {"n": {"$gt": 1}}},
+    ]
+    removed_dupes = 0
+    for grp in samples.aggregate(dedup_pipeline, allowDiskUse=True):
+        ids = grp["ids"]
+        # keep ids[0], delete the rest
+        r = samples.delete_many({"_id": {"$in": ids[1:]}})
+        removed_dupes += r.deleted_count
+    log.info("migrate: removed %d duplicate sample rows", removed_dupes)
+
+    # 5. Recreate the unique index.
+    samples.create_index(
+        [("sessionId", 1), ("timestampMs", 1)],
+        name="session_ts_unique",
+        unique=True,
+    )
+    log.info("migrate: recreated session_ts_unique index")
+
+    # 6. Drop legacy session metadata documents whose ids don't match the
+    #    new YYYY-MM-DD format. The recompute pass below will rebuild them.
+    legacy = sessions_coll.delete_many(
+        {"sessionId": {"$not": {"$regex": r"^\d{4}-\d{2}-\d{2}$"}}}
+    )
+    log.info("migrate: dropped %d legacy session metadata rows", legacy.deleted_count)
+
+    # 7. Rebuild tracker_sessions metadata from the now-renamed samples.
+    pipeline = [
+        {"$match": {"timestampMs": {"$gte": MIN_VALID_TS_MS}}},
+        {"$group": {
+            "_id":       "$sessionId",
+            "samples":   {"$sum": 1},
+            "firstTsMs": {"$min": "$timestampMs"},
+            "lastTsMs":  {"$max": "$timestampMs"},
+            "deviceId":  {"$last": "$deviceId"},
+            "trackerId": {"$last": "$trackerId"},
+            "firmware":  {"$last": "$firmware"},
+        }},
+    ]
+    rebuilt = 0
+    for row in samples.aggregate(pipeline, allowDiskUse=True):
+        sid = row["_id"]
+        sessions_coll.update_one(
+            {"sessionId": sid},
+            {"$set": {
+                "sessionId": sid,
+                "samples":   row["samples"],
+                "firstTsMs": row["firstTsMs"],
+                "lastTsMs":  row["lastTsMs"],
+                "deviceId":  row.get("deviceId"),
+                "trackerId": row.get("trackerId"),
+                "firmware":  row.get("firmware"),
+            }},
+            upsert=True,
+        )
+        rebuilt += 1
+        log.info("migrate: rebuilt session %s samples=%d firstTs=%d lastTs=%d",
+                 sid, row["samples"], row["firstTsMs"], row["lastTsMs"])
+
+    return {
+        "purgedPre2020":      pre2020.deleted_count,
+        "sampleRowsUpdated":  upd.modified_count,
+        "duplicatesRemoved":  removed_dupes,
+        "legacySessionsDropped": legacy.deleted_count,
+        "sessionsRebuilt":    rebuilt,
+        "timezone":           "America/New_York",
+        "apiVersion":         API_VERSION,
     }
 
 

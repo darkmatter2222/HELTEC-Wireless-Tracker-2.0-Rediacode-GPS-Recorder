@@ -1,45 +1,81 @@
 #pragma once
 #include <Arduino.h>
 #include <FS.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 #include <vector>
 
-// CSV session writer.
-// File format matches Android `SessionDataPoint.toCsv()`:
-//   timestampMs,uSvPerHour,cps,latitude,longitude,deviceId
-// One file per session at /sessions/<id>.csv on LittleFS.
+// =============================================================================
+// Always-on day-bucketed CSV writer (firmware v0.4.0+).
+//
+// The legacy "session" concept (one file per user-driven start/stop) has been
+// replaced by automatic per-day rotation. As long as the RadiaCode is connected
+// AND a valid GPS UTC timestamp with a GPS fix is available, samples flow into
+// /sessions/<YYYY-MM-DD>.csv where the date is computed in the user's local
+// timezone (see cfg::LOCAL_TZ in config.h).
+//
+// File lifecycle
+// --------------
+//   /sessions/<day>.csv               -- today's open, being-appended-to file.
+//   /sessions/<day>.<bootMs>.up.csv   -- a rotated file queued for upload.
+//
+// The Wi-Fi uploader (core 0) calls rotateForUpload() at the start of every
+// upload cycle. That call atomically renames the active <day>.csv to a
+// <day>.<bootMs>.up.csv file under the same recording mutex that protects
+// append(), then forgets it. The next append() reopens a fresh <day>.csv
+// and continues without losing a single sample. On HTTP 2xx the uploader
+// deletes the rotated file. On failure the .up.csv is retried next cycle.
+// At no point are duplicate sample rows kept on the device.
+//
+// Schema (10 columns, identical to firmware v0.3.x):
+//   timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,
+//   speedKph,bearingDeg,altitudeM,hdop
+// =============================================================================
 
 class SessionStore {
 public:
     enum class Backend { None, LittleFs, Sd, SdFat, Failed };
 
-    bool begin();   // mounts SD if enabled+detected, falls back to LittleFS
-                    // unless cfg::SD_REQUIRED -- in which case begin()
-                    // returns false and backend() is Backend::Failed.
+    struct SessionInfo {
+        String   id;          // either "<day>" or "<day>.<bootMs>.up" for rotated
+        size_t   sizeBytes;
+        uint32_t samples;
+    };
 
-    Backend       backend()     const { return backend_; }
-    const char*   backendName() const;
-    bool          sdMounted()   const { return backend_ == Backend::Sd || backend_ == Backend::SdFat; }
-    // True when SD was required but couldn't be initialized. Recording is
-    // refused; UI displays a "please reboot" message.
+    struct PendingUpload {
+        String filename;      // basename inside SESSIONS_DIR, e.g. "2026-05-11.1234567.up.csv"
+        String sessionId;     // <day> derived from prefix, e.g. "2026-05-11"
+        size_t sizeBytes;
+    };
+
+    bool begin();
+    Backend       backend()       const { return backend_; }
+    const char*   backendName()   const;
+    bool          sdMounted()     const { return backend_ == Backend::Sd || backend_ == Backend::SdFat; }
     bool          storageFailed() const { return backend_ == Backend::Failed; }
-    uint64_t      cardSizeMb()  const { return cardSizeMb_; }   // SD only; 0 otherwise
+    uint64_t      cardSizeMb()    const { return cardSizeMb_; }
 
-    bool isRecording() const { return recording_; }
-    const String& activeId() const { return activeId_; }
-    uint32_t sampleCount() const { return sampleCount_; }
+    // True while a day file is currently open and being appended to.
+    bool          isRecording() const { return recording_; }
+    // Current day id ("YYYY-MM-DD") or empty string when waiting for first sample.
+    const String& activeId()    const { return activeId_; }
+    // Rows written to the currently-open day file since the most recent rotate.
+    uint32_t      sampleCount() const { return sampleCount_; }
 
-    bool start();           // creates new session, sets active
-    bool stop();            // ends recording
-    bool toggle();          // flips state, returns new state
-    bool resumeIfActive();  // re-opens last active session if marked active
+    // Reopen today's day file if one is present from a previous run, and
+    // rotate any stale non-today day files to pending-upload state. Safe to
+    // call before GPS UTC is acquired (in that case stale files are left
+    // alone until the next upload cycle takes care of them).
+    bool resumeIfActive();
 
-    // Append one row. Drops silently if not recording.
-    // Extended GPS fields use sentinel values to mean "not recorded":
-    //   speedKph   < 0      -> empty column
-    //   bearingDeg < 0      -> empty column
-    //   altitudeM  < -9000  -> empty column
-    //   hdop       < 0      -> empty column
-    void append(uint32_t timestampMsLow,    // for legacy tests
+    // Append one sample. The always-on contract:
+    //   - drops if no backend, OR
+    //   - drops if hasGps == false, OR
+    //   - drops if timestampMsFull is older than 2020-01-01.
+    // When the local-eastern day rolls over mid-append, the previous day
+    // file is rotated to pending-upload state and a new <today>.csv is opened
+    // transparently. No samples are lost across the rollover.
+    void append(uint32_t timestampMsLow,    // legacy, ignored
                 uint64_t timestampMsFull,
                 float uSvPerHour,
                 float cps,
@@ -54,71 +90,67 @@ public:
     size_t totalBytes() const;
     size_t usedBytes() const;
     int    percentUsed() const;
-    int    sessionCount() const;
+    int    sessionCount() const;   // total .csv + .up.csv files
 
-    // Export / wipe -----------------------------------------------------
-    struct SessionInfo {
-        String   id;          // e.g. "20260426_104210" or "boot_1234567"
-        size_t   sizeBytes;
-        uint32_t samples;     // line count minus header (if present)
-    };
-    // Enumerate every CSV under /sessions. Order is whatever LittleFS
-    // returns from openNextFile (effectively insertion order).
-    std::vector<SessionInfo> listSessions() const;
+    // ---------------------------------------------------------------------
+    // Upload integration (called by WifiUploader on core 0).
+    // ---------------------------------------------------------------------
 
-    // Stream one session over the supplied Stream. Frames the body with
-    //   [DUMP-BEGIN] id=<id> bytes=<n> samples=<m>\n
-    //   <raw csv...>
-    //   [DUMP-END] id=<id>\n
-    // Returns true on success.
-    bool dumpSession(const String& id, Stream& out) const;
+    // Rotate the active day file (if any) to a unique <day>.<millis>.up.csv
+    // pending-upload file. Also rotates any stale non-today <day>.csv files.
+    // Returns the total number of pending-upload files on disk afterwards.
+    // Safe across cores: holds the same mutex as append().
+    uint32_t rotateForUpload();
 
-    // Stream every session in turn. Emits a [DUMP-DONE] count=N marker
-    // when finished.
-    void dumpAll(Stream& out) const;
+    // List every pending-upload file currently on disk (the .up.csv files
+    // produced by rotateForUpload()).
+    std::vector<PendingUpload> listPendingUploads() const;
 
-    // Delete every CSV under /sessions. If the active session is open it
-    // is stopped first. Returns number of files removed.
-    uint32_t wipeAll();
+    // Delete one pending-upload file by its basename.
+    bool removePendingUpload(const String& filename);
 
-    // Delete one session by id. Returns true on success. The active session
-    // can NOT be removed (returns false); stop() it first.
-    bool removeSession(const String& id);
-
-    // True if `id` is the currently-recording active session.
-    bool isActive(const String& id) const { return recording_ && activeId_ == id; }
-
-    // Read a session into a String. Returns false if the file is missing
-    // or larger than maxBytes. Backend-aware (SdFat / SD / LittleFS).
-    bool readSessionToString(const String& id, size_t maxBytes, String& out) const;
-
-    // Open a session file as a Stream so the caller can pipe it directly
-    // into an HTTPClient without buffering the whole file in heap. Works for
-    // LittleFS and SD backends. Returns nullptr for SdFat (caller should fall
-    // back to readSessionToString). outSizeBytes is set to the file size.
-    // The caller MUST call closeSessionStream() when the transfer is done.
-    Stream* openSessionStream(const String& id, size_t& outSizeBytes);
+    // Open a pending-upload file as a Stream so HTTPClient can post it
+    // without buffering the whole body in heap. Returns nullptr for SdFat
+    // (caller should fall back to readPendingUploadToString()).
+    Stream* openPendingUploadStream(const String& filename, size_t& outSizeBytes);
     void    closeSessionStream();
+    bool    readPendingUploadToString(const String& filename, size_t maxBytes, String& out) const;
+
+    // ---------------------------------------------------------------------
+    // Diagnostics / serial-console operations (unchanged surface).
+    // ---------------------------------------------------------------------
+    std::vector<SessionInfo> listSessions() const;
+    bool     dumpSession(const String& id, Stream& out) const;
+    void     dumpAll(Stream& out) const;
+    uint32_t wipeAll();
+    bool     removeSession(const String& id);
+    bool     isActive(const String& id) const { return recording_ && activeId_ == id; }
+    bool     readSessionToString(const String& id, size_t maxBytes, String& out) const;
+
+    // Convert an epoch-ms UTC timestamp to its local-eastern YYYY-MM-DD string.
+    // Returns "" if epochMs is pre-2020 (sentinel for "no UTC yet").
+    // Requires tzset() to have been called with cfg::LOCAL_TZ.
+    static String dayIdFromEpochMs(uint64_t epochMs);
 
 private:
-    // True iff a usable backend is mounted (excludes None and Failed).
     bool hasUsableBackend() const {
         return backend_ == Backend::SdFat
             || backend_ == Backend::Sd
             || backend_ == Backend::LittleFs;
     }
 
-    bool   recording_   = false;
-    String activeId_;
+    // Internal helpers. All called with mutex_ already held.
+    bool openDayFile_(const String& dayId);   // creates/reopens <dayId>.csv
+    bool rotateActiveToPending_();             // <activeId>.csv -> <activeId>.<ms>.up.csv
+    uint32_t rotateStaleDayFiles_();           // any non-today *.csv -> *.<ms>.up.csv
+
+    bool     recording_   = false;
+    String   activeId_;
     uint32_t sampleCount_ = 0;
     Backend  backend_     = Backend::None;
-    fs::FS*  fs_          = nullptr;     // -> SD or LittleFS, set in begin()
-    uint64_t cardSizeMb_  = 0;            // populated when SD mounts
-    bool     sdFatPreflightOk_ = false;   // true if SdFat managed to mount
-                                          // the card during the preflight
-    // Held open between openSessionStream() and closeSessionStream() so the
-    // HTTPClient can stream the file without buffering it in heap.
+    fs::FS*  fs_          = nullptr;
+    uint64_t cardSizeMb_  = 0;
+    bool     sdFatPreflightOk_ = false;
     fs::File openedStreamFile_;
-                                          // diagnostic, even if the stock
-                                          // driver subsequently failed
+    SemaphoreHandle_t mutex_ = nullptr;
 };

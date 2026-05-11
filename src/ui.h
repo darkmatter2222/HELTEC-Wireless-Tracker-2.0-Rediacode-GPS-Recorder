@@ -34,7 +34,6 @@ public:
 
     enum LongAction : uint8_t {
         ACTION_NONE = 0,
-        ACTION_TOGGLE_REC,
         ACTION_START_PICKER,    // Stats long-press: scan + show picker
         ACTION_PICK_DEVICE,     // Picker: connect to selected
         ACTION_CANCEL_PICKER,
@@ -69,14 +68,8 @@ private:
     int                vbatPct_ = -1;
 
     LongAction         pendingAction_ = ACTION_NONE;
-    // Stopping recording requires two consecutive long-presses within
-    // kConfirmStopTimeoutMs.  The first long-press arms this flag; the
-    // second actually executes the stop.  Prevents accidental mid-trip stops.
-    // 10 s gives enough margin even when a BLE connect attempt (~1-5 s)
-    // fires between the two presses.
-    bool               confirmStopPending_ = false;
-    uint32_t           confirmStopArmMs_   = 0;
-    static constexpr uint32_t kConfirmStopTimeoutMs = 10000;
+    // v0.4.0: recording is always-on whenever RadiaCode + GPS fix are present,
+    // so the legacy double-long-press stop-confirmation no longer exists.
     bool               forceFullRedraw_ = true;
     Screen             lastDrawnScreen_ = SCREEN_NORMAL_COUNT;
 
