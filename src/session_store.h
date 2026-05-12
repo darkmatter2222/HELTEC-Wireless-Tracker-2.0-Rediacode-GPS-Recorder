@@ -61,6 +61,10 @@ public:
     const String& activeId()    const { return activeId_; }
     // Rows written to the currently-open day file since the most recent rotate.
     uint32_t      sampleCount() const { return sampleCount_; }
+    // Total samples written this boot (never resets on rotate/rollover).
+    // Use this for any "how much have I captured?" UI — sampleCount() drops to
+    // 0 every upload cycle when the active file is rotated, which confuses users.
+    uint32_t      lifetimeSamples() const { return lifetimeSamples_; }
 
     // Reopen today's day file if one is present from a previous run, and
     // rotate any stale non-today day files to pending-upload state. Safe to
@@ -147,6 +151,7 @@ private:
     bool     recording_   = false;
     String   activeId_;
     uint32_t sampleCount_ = 0;
+    uint32_t lifetimeSamples_ = 0;   // monotonic since boot, never reset on rotate
     Backend  backend_     = Backend::None;
     fs::FS*  fs_          = nullptr;
     uint64_t cardSizeMb_  = 0;

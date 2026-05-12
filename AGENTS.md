@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.4.5`.
+Current: `0.4.6`.
 
 ---
 
@@ -830,6 +830,32 @@ Otherwise, iterate to completion.
 ---
 
 ## Lessons Learned — Do Not Re-Litigate
+
+### Sample Counter Resetting on Upload Looks Like Data Loss (v0.4.6)
+
+- **Symptom**: user watches the STORAGE screen show `Samp 326` while driving,
+  comes home, sees `Samp 40` then `Samp 0` after a Wi-Fi sync. Panics that
+  data was lost. Server confirms all 326 rows arrived. Nothing was lost.
+- **Root cause**: `SessionStore::sampleCount_` is the row count of the
+  **currently-open day file**. Every Wi-Fi upload cycle calls
+  `rotateForUpload()` which renames the active `<today>.csv` to
+  `<today>.<bootMs>.up.csv` and opens a fresh empty `<today>.csv`. That
+  reset `sampleCount_` to 0 (correctly — the new active file is empty).
+  But the user reads "Samp" as "samples I've captured today" and sees a
+  drop to 0 immediately after a successful sync.
+- **Fix (v0.4.6)** in `session_store.{h,cpp}`:
+  - Added `lifetimeSamples_` — incremented on every successful append,
+    never reset by rotate / day rollover / wipe-active. Public accessor
+    `lifetimeSamples()`.
+  - STORAGE screen `Samp NNN` field switched from `sampleCount()` to
+    `lifetimeSamples()` so the user sees a monotonic counter that only
+    grows. The number now reflects "samples written this boot" rather
+    than "samples in the open file" — far closer to user intuition.
+  - `[HB]` heartbeat extended with `life=N` field so serial logs also
+    show the monotonic count alongside the per-file count.
+- **Rule**: any UI that says "samples" without qualification should use the
+  monotonic counter. Reserve `sampleCount()` for diagnostic / API logic
+  that legitimately wants the rotation-window count.
 
 ### Upload Cadence & Stale Zero-Byte Pending Files (v0.4.5)
 

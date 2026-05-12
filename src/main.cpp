@@ -630,7 +630,7 @@ void loop() {
     }
     if ((now - lastBeat) > cfg::HEARTBEAT_MS) {
         lastBeat = now;
-        Serial.printf("[HB] uptime=%lus fix=%d sats=%u hdop=%.2f gpsB=%u gpsAge=%ums baud=%u rcState=%d rec=%d samples=%u\n",
+        Serial.printf("[HB] uptime=%lus fix=%d sats=%u hdop=%.2f gpsB=%u gpsAge=%ums baud=%u rcState=%d rec=%d samples=%u life=%u\n",
                       (unsigned long)(now / 1000),
                       (int)gGps.hasFix(),
                       (unsigned)gGps.satellites(),
@@ -640,7 +640,8 @@ void loop() {
                       (unsigned)gGps.baud(),
                       (int)gRadia.state(),
                       (int)gStore.isRecording(),
-                      (unsigned)gStore.sampleCount());
+                      (unsigned)gStore.sampleCount(),
+                      (unsigned)gStore.lifetimeSamples());
     }
 
     gUi.tick();

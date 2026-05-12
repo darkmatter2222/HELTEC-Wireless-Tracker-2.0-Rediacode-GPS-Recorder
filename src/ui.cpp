@@ -426,7 +426,11 @@ void Ui::renderStorage() {
     const uint16_t autoCol   = rec ? (fix ? COL_GREEN : COL_AMBER) : COL_DIM;
     field(31, 36, 14, 80, 8, autoLabel, autoCol, COL_BG, 1);
 
-    snprintf(buf, sizeof(buf), "Samp %lu", (unsigned long)store_->sampleCount());
+    // v0.4.6: show lifetime samples (never resets on rotate/upload) so the count
+    // doesn't appear to "drop" the moment Wi-Fi syncs. The user freaked when they
+    // saw 326 -> 0 right after a successful upload; that was just rotateForUpload()
+    // resetting sampleCount_. lifetimeSamples() keeps climbing across boot.
+    snprintf(buf, sizeof(buf), "Samp %lu", (unsigned long)store_->lifetimeSamples());
     field(32, 80, 14, 76, 8, buf, COL_FG, COL_BG, 1);
 
     if (rec) {

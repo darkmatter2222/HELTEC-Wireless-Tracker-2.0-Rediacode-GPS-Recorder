@@ -647,6 +647,7 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
         f.write((const uint8_t*)line, (size_t)len);
         f.close();
         ++sampleCount_;
+        ++lifetimeSamples_;
         return;
     }
     if (!fs_) return;
@@ -664,6 +665,7 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
         return;
     }
     ++sampleCount_;
+    ++lifetimeSamples_;
     if ((sampleCount_ % 100) == 0) {
         Serial.printf("[REC] %u samples written today=%s heap=%u\n",
                       (unsigned)sampleCount_, activeId_.c_str(),
