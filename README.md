@@ -1,141 +1,273 @@
-﻿# Heltec Tracker — RadiaCode Field Logger
+﻿# Heltec Tracker — RadiaCode GPS Field Logger
 
-Standalone radiation logging system built around the **Heltec HTIT-Tracker V2** (ESP32-S3).
-No phone required. The device connects to a RadiaCode dosimeter via BLE, pairs each reading
-with a GPS fix, writes to SD card, and auto-uploads to a self-hosted API when on Wi-Fi.
+[![Firmware](https://img.shields.io/badge/firmware-v0.4.9-green)](src/config.h)
+[![Platform](https://img.shields.io/badge/platform-ESP32--S3-blue)](https://www.espressif.com/en/products/socs/esp32-s3)
+[![PlatformIO](https://img.shields.io/badge/build-PlatformIO-orange)](https://platformio.org/)
+[![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder?style=social)](https://github.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/stargazers)
 
----
-
-## What This Repo Contains
-
-| Directory | What it is |
-|-----------|-----------|
-| `src/` | ESP32-S3 firmware (C++, PlatformIO) |
-| `scripts/` | Python dev-tools: serial console, data download, map plotting |
-| `api/vega-tracker-ingest/` | Radiological Map Ingest API — FastAPI + MongoDB (Docker) |
-| `web/vega-tracker-viewer/` | Radiological Map Viewer — React/Leaflet session map (Docker/nginx) |
+> **No phone. No cloud. No subscription.**  
+> Clip a RadiaCode to your bag, pocket the tracker, and every GPS-tagged radiation reading
+> lands in your own MongoDB database — automatically, over Wi-Fi, the moment you walk home.
 
 ---
 
-## System Overview
+## Screens
+
+| STATS | GPS | STORAGE | PICKER |
+|:-----:|:---:|:-------:|:------:|
+| ![stats](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_stats.png) | ![gps](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_gps.png) | ![storage](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_storage.png) | ![picker](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_picker.png) |
+| Live dose rate + CPS | Fix quality + coordinates | Recording status + upload pipeline | BLE device selection |
+
+> Rendered at 3× scale (480×240 px) from `scripts/render_screens.py`. Actual display is 160×80.
+
+---
+
+## What It Does
+
+The **Heltec HTIT-Tracker V2** acts as a headless bridge between a RadiaCode Geiger counter
+and a self-hosted database — confirmed working with both the **RadiaCode-102** and **RadiaCode-110**.
+
+1. **Scans BLE** for a RadiaCode dosimeter, auto-connects, and polls dose rate + CPS at 1 Hz
+2. **Paints each reading** with a GPS fix (latitude, longitude, altitude, speed, bearing, HDOP)
+3. **Writes a daily CSV** to internal flash — one row per second while connected and locked
+4. **Uploads automatically** over Wi-Fi whenever you're in range; data lands in MongoDB and
+   is immediately visible on the web map
+5. **Runs forever** on battery — no user interaction needed after first setup
+
+---
+
+## System Architecture
 
 ```
-RadiaCode dosimeter
-       | BLE
-       v
-Heltec HTIT-Tracker V2
-- polls dose rate + CPS at 1 Hz
-- pairs with GPS fix (UC6580 GNSS)
-- writes CSV to SD card
-- uploads over Wi-Fi when available
-       | HTTP POST /ingest/csv
-       v
-Radiological Map Ingest API (FastAPI)    port 8030
-- validates timestamps (reject pre-2020)
-- writes to MongoDB (radiacode DB)
-- soft-delete, restore, purge endpoints
-- weekly automated backups (5 rolling snapshots)
-- exposes session list + detail endpoints
-       |
-       v
-Radiological Map Viewer (React/nginx) port 8031
-- interactive session map (Leaflet, maxZoom 20)
-- Track / Dots / Heatmap / Arrows display modes
-- per-mode opacity and overlay controls
-- dose rate / CPS / speed / altitude / HDOP color channels
-- session soft-delete + restore + purge UI
-- database backup + restore panel
+┌──────────────────┐  BLE (NimBLE)  ┌────────────────────────────────────────┐
+│  RadiaCode-102/  │ ─────────────► │         Heltec HTIT-Tracker V2         │
+│  RadiaCode-110   │                │  ESP32-S3 · UC6580 GNSS · ST7735 TFT   │
+└──────────────────┘                │                                        │
+                                    │  ┌──────────┐  ┌──────────┐           │
+                                    │  │ BLE poll │  │ GPS poll │  1 Hz     │
+                                    │  │  1 Hz    │  │  1 Hz    │           │
+                                    │  └────┬─────┘  └────┬─────┘           │
+                                    │       └──────┬───────┘                 │
+                                    │              ▼                         │
+                                    │    append to /YYYY-MM-DD.csv           │
+                                    │    (LittleFS, day-bucketed)            │
+                                    └───────────────┬────────────────────────┘
+                                                    │
+                                          Wi-Fi · HTTP POST
+                                          /ingest/csv · 60s
+                                                    │
+                                                    ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│              Radiological Map Ingest API  (FastAPI · Docker)               │
+│                             port 8030                                      │
+│                                                                           │
+│  • validate timestamps (reject pre-2020 millis()-since-boot garbage)      │
+│  • upsert session metadata (deviceId, trackerId, firmware, time range)    │
+│  • store samples in MongoDB  {sessionId, timestampMs, uSvPerHour, cps,   │
+│    lat, lng, loc: GeoJSON, speedKph, bearingDeg, altitudeM, hdop}        │
+│  • soft-delete / restore / hard-purge sessions                            │
+│  • weekly automated backups (5 rolling snapshots, mongodump)              │
+└───────────────────────────────────┬───────────────────────────────────────┘
+                                    │ REST / JSON
+                                    ▼
+┌───────────────────────────────────────────────────────────────────────────┐
+│            Radiological Map Viewer  (React + Leaflet · Docker/nginx)       │
+│                             port 8031                                      │
+│                                                                           │
+│  Explore mode:           Data Management mode:                            │
+│  • Track polyline        • Rename sessions                                │
+│  • Dot markers           • Soft-delete + restore                          │
+│  • Hex-bin density       • Triple-confirm purge                           │
+│  • Bearing arrows        • Manual + scheduled backups                     │
+│  • 6 color channels      • DB stats + restore                             │
+│  • Timeline scrubber                                                      │
+└───────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Confirmed Hardware
+
+| Component | Part | Notes |
+|-----------|------|-------|
+| Tracker | **Heltec HTIT-Tracker V2** | ESP32-S3FN8 · UC6580 GNSS · ST7735 0.96" TFT (160×80) · SX1262 LoRa |
+| Dosimeter | **RadiaCode-102** | BLE legacy advertising; confirmed working |
+| Dosimeter | **RadiaCode-110** | BLE 5 extended advertising (BT5 flags required — see below); confirmed working |
+| SD card module | HiLetgo HW-125 | **VCC → 5V**, NOT 3V3 (onboard LDO needs headroom) |
+| SD card | any Class 10 FAT32 | ~70 bytes/row; 16 GB lasts decades at 1 Hz |
+
+> **RadiaCode-110 BLE note:** the RC-110 uses BT5 extended advertising on secondary channels.
+> The build flags `CONFIG_BT_NIMBLE_EXT_ADV=1` and related options in `platformio.ini` are
+> **mandatory** — without them the device scans forever and never connects.
+
+---
+
+## Repository Layout
+
+```
+heltec-tracker/
+├── src/                          ESP32-S3 firmware (C++)
+│   ├── main.cpp                  setup() / loop() / serial REPL
+│   ├── config.h                  all pin assignments + feature flags
+│   ├── secrets.h.example         template → copy to secrets.h
+│   ├── button.{h,cpp}            debounced GPIO 0, long-press engine
+│   ├── gps_module.{h,cpp}        UC6580 GNSS, bestEpochMs() timestamping
+│   ├── radiacode.{h,cpp}         NimBLE central + RadiaCode BLE protocol
+│   ├── session_store.{h,cpp}     LittleFS day-bucketed CSV writer
+│   ├── ui.{h,cpp}                ST7735 TFT screens + button state machine
+│   └── wifi_uploader.{h,cpp}     FreeRTOS uploader task (core 0)
+├── api/vega-tracker-ingest/      Ingest API (FastAPI + MongoDB, Docker)
+├── web/vega-tracker-viewer/      Web viewer (React + Leaflet, Docker/nginx)
+├── scripts/                      Python dev-tools
+│   ├── drive.py                  serial console / auto-connect
+│   ├── download_sessions.py      DUMPALL → local CSV files
+│   ├── plot_session_map.py       offline Folium map from CSV
+│   ├── render_screens.py         generate TFT screen PNG mockups (Pillow)
+│   └── capture_boot.py           reset device + capture boot log
+├── docs/screens/                 TFT screen mockups (generated)
+├── platformio.ini                PlatformIO build config
+└── AGENTS.md                     full technical reference (AI + humans)
 ```
 
 ---
 
 ## Quick Start
 
-### 1. Firmware
+### Step 1 — Firmware
 
-Install PlatformIO, then:
+**Prerequisites:** [PlatformIO Core](https://docs.platformio.org/en/latest/core/installation/index.html) or VS Code + PlatformIO extension, USB cable.
 
-```powershell
-# Copy secrets template and fill in your credentials
-cp src\secrets.h.example src\secrets.h
-# Edit src\secrets.h with your WiFi SSID/password and ingest URL
+```bash
+# 1. Clone the repo
+git clone https://github.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder
+cd HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder
 
-# Build
-pio run -e heltec_tracker_v2
-
-# Flash (device appears as COM4 on this machine)
-pio run -e heltec_tracker_v2 -t upload --upload-port COM4
-
-# Watch serial output
-python scripts\drive.py listen 30
+# 2. Create your secrets file
+cp src/secrets.h.example src/secrets.h
 ```
 
-> **IMPORTANT:** Always use `-e heltec_tracker_v2`. The `v1_2` env inverts the display,
-> producing a solid white screen on V2 hardware.
+Edit `src/secrets.h`:
 
-### 2. Ingest API
-
-```powershell
-cd api\vega-tracker-ingest
-
-# Copy and fill in credentials (see AGENTS.md for exact values)
-cp .env.example .env
-# Edit .env
-
-# Deploy to server
-.\deploy.ps1
-
-# Test
-curl http://192.168.86.48:8030/health
-curl http://192.168.86.48:8030/info
+```cpp
+namespace secrets {
+constexpr const char* WIFI_SSID             = "YourNetwork";
+constexpr const char* WIFI_PASSWORD         = "YourPassword";
+constexpr const char* INGEST_URL            = "http://YOUR_SERVER_IP:8030/ingest/csv";
+constexpr uint32_t    UPLOAD_INTERVAL_MS    = 60000;   // upload cadence (ms)
+constexpr uint32_t    WIFI_CONNECT_TIMEOUT_MS = 25000; // connect timeout
+}
 ```
 
-### 3. Web Viewer
+> Leave `INGEST_URL` empty to disable Wi-Fi upload (device still records to flash).
 
-```powershell
-cd web\vega-tracker-viewer
+```bash
+# 3. Build + flash
+pio run -e heltec_tracker_v2 -t upload
 
-# Copy and fill in credentials
-cp .env.example .env
-# Edit .env
-
-# Deploy to server
-.\deploy.ps1
-# Then open: http://192.168.86.48:8031/
+# 4. Watch serial (115200 baud)
+python scripts/drive.py listen 30
 ```
+
+> **Always use `-e heltec_tracker_v2`** — the `v1_2` environment inverts the display
+> and produces a solid white screen on V2 hardware.
 
 ---
 
-## Hardware
+### Step 2 — Self-Host the Server (optional)
 
-| Component | Part | Notes |
-|-----------|------|-------|
-| Tracker board | Heltec HTIT-Tracker V2 | ESP32-S3 + UC6580 GNSS + ST7735 TFT |
-| SD card module | HiLetgo HW-125 | VCC must be 5V, NOT 3V3 |
-| SD card | 16 GB Class 10 FAT32 | 70 B/row; years of capacity at 1 Hz |
-| Dosimeter | RadiaCode 102 | BLE MAC: 52:43:06:60:20:24 |
+You need: a Linux box or VM with Docker, Docker Compose, and MongoDB 6+.
+
+#### 2a. MongoDB
+
+Install MongoDB on the host (not in Docker — the containers reach it via `host.docker.internal`):
+
+```bash
+# Ubuntu 22.04 example
+curl -fsSL https://www.mongodb.org/static/pgp/server-6.0.asc | sudo gpg --dearmor -o /usr/share/keyrings/mongodb-server-6.0.gpg
+echo "deb [ arch=amd64 signed-by=/usr/share/keyrings/mongodb-server-6.0.gpg ] https://repo.mongodb.org/apt/ubuntu jammy/mongodb-org/6.0 multiverse" | sudo tee /etc/apt/sources.list.d/mongodb-org-6.0.list
+sudo apt-get update && sudo apt-get install -y mongodb-org
+sudo systemctl enable --now mongod
+
+# Create the database user
+mongosh admin --eval '
+  db.createUser({
+    user: "ryan",
+    pwd:  "YourPassword",
+    roles: [{ role: "readWrite", db: "radiacode" }]
+  })'
+```
+
+#### 2b. Ingest API
+
+```bash
+# On your server
+mkdir ~/vega-tracker-ingest && cd ~/vega-tracker-ingest
+# Copy api/vega-tracker-ingest/ files here (or use deploy.ps1 from dev machine)
+```
+
+Create `.env` (copy from `api/vega-tracker-ingest/.env.example`):
+
+```ini
+MONGO_URI=mongodb://ryan:YourPassword@host.docker.internal:27017/?authSource=admin
+MONGO_DB=radiacode
+MONGO_SAMPLES_COLLECTION=tracker_samples
+MONGO_SESSIONS_COLLECTION=tracker_sessions
+API_PORT=8030
+```
+
+```bash
+docker compose up -d
+curl http://localhost:8030/health   # should return {"status":"ok"}
+```
+
+#### 2c. Web Viewer
+
+```bash
+mkdir ~/vega-tracker-viewer && cd ~/vega-tracker-viewer
+# Copy web/vega-tracker-viewer/ files here (or use deploy.ps1)
+```
+
+Create `.env`:
+
+```ini
+API_BASE=http://YOUR_SERVER_IP:8030
+WEB_PORT=8031
+```
+
+```bash
+docker compose up -d
+# Open: http://YOUR_SERVER_IP:8031/
+```
+
+#### 2d. (Optional) HTTPS + DuckDNS
+
+The `infra/duckdns/` directory has a Docker Compose config for automatic DuckDNS updates.
+Pair it with an nginx reverse proxy with Let's Encrypt to expose the viewer and API over HTTPS.
+See [AGENTS.md](AGENTS.md#duckdns-dynamic-dns-infrainfraduckdns) for the full nginx config including HTTP Basic Auth and SSL setup.
 
 ---
 
-## Server
+## How Recording Works
 
-- IP: `192.168.86.48`
-- SSH: `darkmatter2222@192.168.86.48` (key auth)
-- MongoDB on host at port 27017 (auth: see AGENTS.md)
-- API: `http://192.168.86.48:8030`
-- Viewer: `http://192.168.86.48:8031`
+Recording is **fully automatic** — no buttons needed during a session.
 
----
+```
+Power on
+  └─► BLE scan ──► connect RadiaCode ──► start polling (1 Hz)
+                                               │
+                             GPS locked? ──Yes─► open /YYYY-MM-DD.csv
+                                    │           append one row per second
+                                    No          │
+                                    └──► drop   ▼
+                                         sample  Wi-Fi in range?
+                                                 └─Yes─► POST /ingest/csv
+                                                         delete uploaded file
+                                                 └─No──► queue on flash
+```
 
-## Firmware Version
-
-Current: **v0.3.3**
-
-What's in each version:
-- **v0.3.3** — heap logging per upload cycle; SdFat streaming fallback capped at 1 MB
-- **v0.3.2** — streaming HTTP upload (fixes silent truncation of large sessions)
-- **v0.3.0** — extended telemetry: `speedKph`, `bearingDeg`, `altitudeM`, `hdop` columns
-- **v0.2.0** — double long-press required to stop recording (prevents accidental stops from vibration)
+Day rollover happens transparently at midnight (local time). The active file is rotated to
+`.up.csv`, a new day file opens, and the next upload cycle picks up both.
 
 ---
 
@@ -143,12 +275,26 @@ What's in each version:
 
 | Press | Screen | Action |
 |-------|--------|--------|
-| Short | any | Cycle to next screen |
-| Long | STATS | Force BLE rescan |
-| Long | STORAGE (not recording) | Start recording |
-| Long | STORAGE (recording) | Show confirmation prompt |
-| Long again (within 5s) | STORAGE (confirming) | Stop recording |
-| Short | STORAGE (confirming) | Cancel stop, keep recording |
+| Short | any | Cycle to next screen (STATS → GPS → STORAGE → repeat) |
+| Long | STATS | Open BLE device picker |
+| Long | GPS | Advance to next screen (same as short) |
+| Long | STORAGE | Advance to next screen (same as short) |
+| Long | PICKER | Connect to highlighted device |
+
+> Recording starts and stops automatically — there is no manual start/stop button.
+
+---
+
+## TFT Screens
+
+| Screen | Key info shown |
+|--------|---------------|
+| **STATS** | Dose rate (nSv/h), CPS, GPS accuracy / HDOP |
+| **GPS** | Fix status, satellite count, HDOP, lat/lon/alt/speed, bearing |
+| **STORAGE** | Recording state, sample count (resets after each upload), disk usage, pending upload count, Wi-Fi status |
+| **PICKER** | Nearby BLE devices — scroll with short-press, connect with long-press |
+
+Header bar (always visible): RC connection state · GPS fix · battery % · recording dot
 
 ---
 
@@ -159,32 +305,40 @@ timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altit
 1746114660123,0.142,12.0,47.6062,-122.3321,5243066020F4,48.23,267.3,12.4,1.20
 ```
 
-Columns 6–9 (`speedKph`, `bearingDeg`, `altitudeM`, `hdop`) are present in firmware v0.3.0+.
-They emit empty strings when disabled or unavailable; pre-v0.3.0 files have 6 columns.
-Bearing is derived from the last N GPS positions (forward-azimuth formula), not NMEA COG.
+| Field | Type | Notes |
+|-------|------|-------|
+| `timestampMs` | integer | Unix epoch ms, GPS-derived |
+| `uSvPerHour` | float | Dose rate in μSv/h |
+| `cps` | float | Counts per second |
+| `latitude` | float | Decimal degrees, empty if no fix |
+| `longitude` | float | Decimal degrees, empty if no fix |
+| `deviceId` | string | RadiaCode BLE MAC without colons |
+| `speedKph` | float | GPS speed over ground (km/h) |
+| `bearingDeg` | float | Smoothed forward bearing [0, 360) |
+| `altitudeM` | float | Altitude above MSL (metres) |
+| `hdop` | float | Horizontal dilution of precision |
 
 ---
 
-## Secrets
+## API Reference (highlights)
 
-Two secret files are gitignored — create them from the `.example` templates:
-
-| File | Template | Contains |
-|------|----------|---------|
-| `src/secrets.h` | `src/secrets.h.example` | WiFi credentials, ingest URL |
-| `api/vega-tracker-ingest/.env` | `api/vega-tracker-ingest/.env.example` | SSH creds, MongoDB URI |
-| `web/vega-tracker-viewer/.env` | `web/vega-tracker-viewer/.env.example` | SSH creds, API base URL |
-
-See `AGENTS.md` for the exact credential values.
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Liveness + MongoDB ping |
+| GET | `/info` | Version, collection counts, sample rate |
+| GET | `/sessions` | List sessions (`?include_deleted=true` for soft-deleted) |
+| GET | `/session/{id}` | Session detail (up to 5000 samples) |
+| POST | `/ingest/csv` | Upload one session CSV |
+| DELETE | `/sessions/{id}` | Soft-delete session |
+| PATCH | `/sessions/{id}/restore` | Restore soft-deleted session |
+| POST | `/admin/purge/{id}` | Permanent hard-delete (requires prior soft-delete + `?confirm=PURGE_CONFIRMED`) |
+| POST | `/admin/backup` | Trigger mongodump snapshot |
+| GET | `/admin/backups` | List backup history |
 
 ---
 
 ## Detailed Documentation
 
-See [AGENTS.md](AGENTS.md) for:
-- Full hardware wiring tables and GPIO map
-- All subsystem internals (BLE, GPS, session store, TFT, uploader)
-- Serial console command reference
-- API endpoint reference
-- MongoDB admin commands
-- All lessons learned (SD power, GPS timestamp bugs, BT5 flags, etc.)
+[AGENTS.md](AGENTS.md) is the full technical reference — hardware pinouts, BLE protocol details,
+subsystem internals, serial console commands, lessons learned from every significant bug, and
+step-by-step deployment instructions. Start there if you're adapting this project.
