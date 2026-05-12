@@ -75,6 +75,12 @@ constexpr uint16_t BUTTON_LONG_PRESS_MS = 800;
 constexpr uint32_t RADIACODE_POLL_MS = 1000;
 constexpr uint32_t RADIACODE_SCAN_MS = 8000;
 constexpr uint32_t RADIACODE_RECONNECT_MS = 5000;
+// Link-health watchdog. If state == Ready but no notification has arrived for
+// this long, force a disconnect so the auto-scan loop can recover. Catches
+// half-closed channels where NimBLE's supervision timeout silently extends.
+// 15 s is ~15x the 1 Hz poll interval; chosen to allow normal jitter and the
+// 5-9 s DATA_BUF cold-start delay seen on RadiaCode-110 without false trips.
+constexpr uint32_t RADIACODE_LINK_STALL_MS = 15000;
 
 // ---------------- Storage -----------------------------------------------------
 constexpr const char* SESSIONS_DIR    = "/sessions";
@@ -126,7 +132,7 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "0.5.0";
+constexpr const char* FW_VERSION = "0.6.0";
 
 // ---------------- Battery / Wi-Fi safety gate (v0.4.2) -----------------------
 // Skip the Wi-Fi upload cycle entirely if VBAT is below this threshold (V).
@@ -174,5 +180,26 @@ constexpr uint8_t BEARING_HISTORY_POINTS = 4;
 // an unexpected crash or reboot.  On a user-initiated reset (hold on DOSE
 // screen) the NVS value is zeroed immediately.
 constexpr uint32_t DOSE_NVS_SAVE_INTERVAL_MS = 30000;  // 30 s
+// To reduce flash wear from a 30s-cadence NVS write (~1M writes/year), we
+// only actually save when the dose has changed by at least this many µSv
+// OR a longer "safety" interval has elapsed. Combined this drops typical
+// idle writes from ~120/hour to single-digits/hour.
+constexpr float    DOSE_NVS_DELTA_USV = 0.5f;        // µSv change threshold
+constexpr uint32_t DOSE_NVS_MAX_INTERVAL_MS = 300000; // 5 min hard ceiling
+
+// ---------------- Task watchdog (v0.6.0) ------------------------------------
+// Wraps the Arduino loop task and the Wi-Fi uploader task in esp_task_wdt.
+// A wedged subsystem (deadlocked semaphore, infinite BLE callback, etc.)
+// will trigger a clean panic + reboot rather than hanging silently.
+constexpr uint32_t TASK_WDT_TIMEOUT_S = 30;
+
+// ---------------- GPS reliability (v0.6.0) ----------------------------------
+// Default ESP32 HardwareSerial RX FIFO is 256 bytes -- at 115200 baud that
+// only buffers ~22 ms of NMEA. A blocking BLE op or long flash flush can
+// easily exceed that and corrupt sentences. Bump to 2 KB (~180 ms).
+constexpr size_t   GPS_RX_BUFFER_BYTES = 2048;
+// If the GPS has reported bytes but no NEW fix update for this long, run a
+// baud re-probe to recover from a wedged UC6580 (rare but observed in field).
+constexpr uint32_t GPS_FROZEN_FIX_RECOVERY_MS = 120000;  // 2 min
 
 } // namespace cfg

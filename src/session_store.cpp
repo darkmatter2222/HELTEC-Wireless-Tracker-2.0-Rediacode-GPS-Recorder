@@ -344,7 +344,16 @@ namespace {
 struct Lock {
     SemaphoreHandle_t s_;
     explicit Lock(SemaphoreHandle_t s) : s_(s) {
-        if (s_) xSemaphoreTake(s_, portMAX_DELAY);
+        // v0.6.0: bounded wait (5 s) instead of portMAX_DELAY. If we genuinely
+        // deadlock, the task watchdog will reboot us cleanly in <30 s --
+        // better than blocking forever. The warning log makes any real
+        // contention visible.
+        if (s_) {
+            if (xSemaphoreTake(s_, pdMS_TO_TICKS(5000)) != pdTRUE) {
+                log_w("SessionStore::Lock: timeout waiting 5s for mutex; proceeding without it");
+                s_ = nullptr;  // skip Give in dtor
+            }
+        }
     }
     ~Lock() { if (s_) xSemaphoreGive(s_); }
     Lock(const Lock&) = delete;

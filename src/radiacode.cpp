@@ -415,14 +415,13 @@ public:
         g.expectedLen = -1;
         g.respBuffer.clear();
         g.initStep = Internal::INIT_NONE;
-        // Halt auto-retry if the peer dropped us in under 90s. This is
-        // almost always a soft-bricked RadiaCode-110 -- repeated
-        // immediate reconnect attempts compound the brick. The user must
-        // power-cycle the peer then re-issue a 't' / 'c' command to
-        // resume.
+        // Reliability v0.6.0: we no longer permanently halt auto-retry on
+        // short-lived links. "As long as it has power, it's reliable" --
+        // the device must continue trying to reconnect indefinitely. The
+        // exponential backoff already in the auto-scan loop is enough to
+        // avoid hammering a stuck peer.
         if (linkAgeMs < 90000) {
-            g.autoRetryHalted = true;
-            log_w("autoRetryHalted: link dropped after %ums (likely soft-bricked peer). Power-cycle the RadiaCode then issue 't 110' or 'c <addr>' to resume.", (unsigned)linkAgeMs);
+            log_w("short-lived link (%ums); auto-reconnect will continue", (unsigned)linkAgeMs);
         }
         setState(RadiaCode::State::Disconnected);
     }
@@ -669,8 +668,9 @@ static bool finishConnect(NimBLEClient* client) {
                 log_e("  peer svc: %s", s->getUUID().toString().c_str());
             }
         }
-        g.autoRetryHalted = true;
-        log_w("autoRetryHalted: peer likely soft-bricked, power-cycle the RadiaCode then issue 't' / 'c' / 'd' to resume");
+        // Reliability v0.6.0: do not halt auto-retry. The device will
+        // disconnect, fall back to the auto-scan loop, and retry forever.
+        log_w("service not found -- disconnecting and resuming auto-scan");
         client->disconnect();
         return false;
     }
@@ -686,8 +686,9 @@ static bool finishConnect(NimBLEClient* client) {
         if (!chars || chars->empty()) {
             log_e("bulk char discovery failed (got %u)",
                   (unsigned)(chars ? chars->size() : 0));
-            g.autoRetryHalted = true;
-            log_w("autoRetryHalted: char discovery timed out (peer soft-bricked) -- power-cycle the RadiaCode");
+            // Reliability v0.6.0: do not halt auto-retry. Drop the link;
+            // the auto-scan loop will reconnect when the peer is ready.
+            log_w("char discovery failed -- disconnecting and resuming auto-scan");
             client->disconnect();
             return false;
         }
@@ -949,12 +950,14 @@ static bool connectToAddress(const std::string& addr, uint8_t addrType) {
         // Wait up to 5 minutes per cycle for a connectable adv.
         NimBLEAdvertisedDevice* capDev = waitForConnectableAdv(addr, 300000);
         if (!capDev) {
-            log_w("attempt %d: no connectable adv in 5min window. The peer may be busy with another central (e.g. your phone). Retrying.", attempt);
+            log_w("attempt %d: no connectable adv in 5min window. The peer may be busy with another central (e.g. your phone). Retrying forever.", attempt);
             teardownClient();
             delay(1000);
-            if (attempt >= 200) {
-                log_e("giving up on %s after %d attempts (~16 hours)", addr.c_str(), attempt);
-                break;
+            // Reliability v0.6.0: no attempt cap. Retry forever as long as
+            // the device has power. Log a milestone every 100 attempts so
+            // long-stuck cycles are visible in the serial log.
+            if ((attempt % 100) == 0) {
+                log_w("connectToAddress(%s): still trying (attempt %d)", addr.c_str(), attempt);
             }
             continue;
         }
@@ -974,9 +977,9 @@ static bool connectToAddress(const std::string& addr, uint8_t addrType) {
         log_w("connect attempt %d failed for %s, resuming scan", attempt, addr.c_str());
         teardownClient();
         delay(150);
-        if (attempt >= 200) {
-            log_e("giving up on %s after %d attempts", addr.c_str(), attempt);
-            break;
+        // Reliability v0.6.0: no attempt cap. Keep retrying forever.
+        if ((attempt % 100) == 0) {
+            log_w("connectToAddress(%s): %d attempts and counting", addr.c_str(), attempt);
         }
     }
     if (!ok) {
@@ -1172,19 +1175,10 @@ void RadiaCode::loop() {
     // the scan starts, leaving the device stuck in Scanning state indefinitely.
     if (g.state == State::Idle || g.state == State::Disconnected ||
         g.state == State::Scanning) {
-        if (g.autoRetryHalted) {
-            // Don't auto-retry. The previous connect attempt failed
-            // post-link (likely an SMP timeout from a soft-bricked 110).
-            // Wait for explicit user command to resume. Also stop any scan
-            // that may have been running before the halt was set.
-            NimBLEScan* haltScan = NimBLEDevice::getScan();
-            if (g.autoScanActive) {
-                if (haltScan->isScanning()) haltScan->stop();
-                g.autoScanActive = false;
-                setState(State::Disconnected);
-            }
-            return;
-        }
+        // Reliability v0.6.0: autoRetryHalted is intentionally never set
+        // anymore -- the device retries forever as long as it has power.
+        // The field is retained for ABI compatibility and may be removed in
+        // a future cleanup pass.
 
         NimBLEScan* scan = NimBLEDevice::getScan();
         static uint32_t nextAutoScan = 0;
@@ -1240,6 +1234,20 @@ void RadiaCode::loop() {
             putU32LE(args, VS_DATA_BUF);
             sendCommand(CMD_RD_VIRT_STRING, args.data(), args.size());
         }
+    }
+
+    // Reliability v0.6.0: BLE link-health watchdog. If we're Ready but have
+    // received no notification for cfg::RADIACODE_LINK_STALL_MS, force a
+    // disconnect so the auto-scan loop can recover. NimBLE's supervision
+    // timeout is in the hundreds of ms range but can be silently extended
+    // when the peer half-closes the channel without sending LL_TERMINATE;
+    // this watchdog catches that case.
+    if (g.state == State::Ready && g.lastReadingMs != 0 &&
+        (now - g.lastReadingMs) > cfg::RADIACODE_LINK_STALL_MS) {
+        log_w("link stall: no reading for %ums in Ready -- forcing disconnect",
+              (unsigned)(now - g.lastReadingMs));
+        if (g.client && g.client->isConnected()) g.client->disconnect();
+        g.lastReadingMs = 0;  // arm once per stall
     }
 }
 

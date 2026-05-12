@@ -18,6 +18,11 @@ int64_t daysFromCivil(int y, unsigned m, unsigned d) {
 } // namespace
 
 void GpsModule::begin() {
+    // v0.6.0: enlarge the UART RX FIFO BEFORE begin(). Default is 256 bytes
+    // (~22 ms at 115200 baud); long BLE callbacks or flash flushes can
+    // overflow it and corrupt sentences. setRxBufferSize() must be called
+    // before begin() or it has no effect.
+    gpsSerial.setRxBufferSize(cfg::GPS_RX_BUFFER_BYTES);
     gpsSerial.begin(cfg::GPS_BAUD, SERIAL_8N1, cfg::GPS_RX_PIN, cfg::GPS_TX_PIN);
     currentBaud_ = cfg::GPS_BAUD;
 
@@ -35,6 +40,7 @@ void GpsModule::begin() {
         log_w("GPS: silent at %u baud, trying %u...", (unsigned)currentBaud_, (unsigned)b);
         gpsSerial.end();
         delay(50);
+        gpsSerial.setRxBufferSize(cfg::GPS_RX_BUFFER_BYTES);
         gpsSerial.begin(b, SERIAL_8N1, cfg::GPS_RX_PIN, cfg::GPS_TX_PIN);
         currentBaud_ = b;
         const uint32_t until = millis() + 600;

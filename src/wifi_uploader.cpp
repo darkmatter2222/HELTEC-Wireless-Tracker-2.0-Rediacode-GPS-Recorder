@@ -3,6 +3,7 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
 #include <esp_system.h>
+#include <esp_task_wdt.h>
 #include <esp_mac.h>
 #include <algorithm>
 
@@ -92,6 +93,10 @@ void WifiUploader::taskTrampoline(void* arg) {
 }
 
 void WifiUploader::taskLoop() {
+    // v0.6.0: subscribe this task to the global task watchdog. Pet it once
+    // per outer iteration and just before each long-blocking call.
+    esp_task_wdt_add(NULL);
+    esp_task_wdt_reset();
     // 5s post-boot grace so BLE/GPS finish coming up before we light Wi-Fi.
     // Was 15s in v0.4.1; reduced in v0.4.7 because reboots happen often
     // enough that the user was waiting 75+s for the first upload attempt
@@ -101,6 +106,7 @@ void WifiUploader::taskLoop() {
     // range for hours). Without backoff we churn the radio and PA every
     // 60 s, which on a marginal power supply triggers a brown-out reset.
     for (;;) {
+        esp_task_wdt_reset();
         const uint32_t okBefore = uploadedCount_;
         const uint32_t failBefore = failedCount_;
         runOnce();
@@ -137,7 +143,16 @@ void WifiUploader::taskLoop() {
                           (unsigned)consecutiveFailures_, (unsigned)(sleepMs / 1000));
         }
         // Sleep until either the cadence elapses or requestNow() pokes us.
-        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(sleepMs));
+        // v0.6.0: chunk the sleep into <= 20 s slices so the task watchdog
+        // (30 s timeout) stays petted during long backoff intervals.
+        uint32_t remaining = sleepMs;
+        while (remaining > 0) {
+            const uint32_t chunk = (remaining > 20000u) ? 20000u : remaining;
+            const uint32_t got = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(chunk));
+            esp_task_wdt_reset();
+            if (got) break;  // poked by requestNow()
+            remaining -= chunk;
+        }
     }
 }
 

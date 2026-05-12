@@ -8,6 +8,7 @@
 
 #include <Arduino.h>
 #include <esp_system.h>
+#include <esp_task_wdt.h>
 #include <Preferences.h>
 #include "config.h"
 #include "button.h"
@@ -32,6 +33,7 @@ WifiUploader  gWifi;
 // Persisted to NVS every DOSE_NVS_SAVE_INTERVAL_MS so a crash loses at most
 // that much accumulation rather than the entire trip total.
 float    gTripDoseMicroSv   = 0.0f;
+float    gLastSavedDoseUSv  = 0.0f;  // most recent value actually written to NVS
 uint32_t gLastDoseMs        = 0;     // millis() of most recent sample intake
 uint32_t gLastDoseSaveMs    = 0;     // millis() of most recent NVS write
 
@@ -40,6 +42,7 @@ static void loadDoseFromNvs() {
     p.begin("dose", true);  // read-only
     gTripDoseMicroSv = p.getFloat("usv", 0.0f);
     p.end();
+    gLastSavedDoseUSv = gTripDoseMicroSv;
     Serial.printf("[DOSE] loaded %.4f uSv from NVS\n", gTripDoseMicroSv);
 }
 static void saveDoseToNvs() {
@@ -47,6 +50,18 @@ static void saveDoseToNvs() {
     p.begin("dose", false);
     p.putFloat("usv", gTripDoseMicroSv);
     p.end();
+    gLastSavedDoseUSv = gTripDoseMicroSv;
+}
+// Pure decision helper (also called from the unit test). Returns true if
+// the running dose should be flushed to NVS. Two conditions: change
+// exceeds delta threshold, OR safety-ceiling interval elapsed.
+bool shouldSaveDose(float current, float lastSaved, uint32_t msSinceLastSave,
+                    float deltaThresholdUSv, uint32_t maxIntervalMs) {
+    const float diff = current - lastSaved;
+    const float absDiff = diff < 0.0f ? -diff : diff;
+    if (absDiff >= deltaThresholdUSv) return true;
+    if (msSinceLastSave >= maxIntervalMs) return true;
+    return false;
 }
 static void resetDose() {
     Serial.printf("[DOSE] reset by user (was %.4f uSv)\n", gTripDoseMicroSv);
@@ -173,6 +188,16 @@ void setup() {
     while (!Serial && millis() < cdcDeadline) { delay(10); }
     Serial.println();
     Serial.printf("HTIT-Tracker firmware v%s starting...\n", cfg::FW_VERSION);
+
+    // Task watchdog (v0.6.0). Arms a 30 s timer on the Arduino loop task.
+    // Any subsystem that wedges the main loop (deadlocked mutex, infinite
+    // BLE callback, etc.) will trigger a clean ESP_RST_TASK_WDT reset
+    // rather than the device silently going unresponsive. The Wi-Fi
+    // uploader task subscribes itself in its own taskLoop().
+    esp_task_wdt_init(cfg::TASK_WDT_TIMEOUT_S, /*panic=*/true);
+    esp_task_wdt_add(NULL);
+    Serial.printf("[BOOT] task_wdt armed: %us, panic-on-timeout\n",
+                  (unsigned)cfg::TASK_WDT_TIMEOUT_S);
 
     // Log the previous reset reason so out-of-range / brown-out / watchdog
     // resets are immediately visible in the boot log instead of looking
@@ -555,6 +580,7 @@ static void pollSerialCommands() {
 }
 
 void loop() {
+    esp_task_wdt_reset();
     pollSerialCommands();
     gGps.update();
 
@@ -690,11 +716,18 @@ void loop() {
         lastBat = now;
         gUi.setBatteryPercent(readBatteryPercent());
     }
-    // Persist cumulative dose to NVS periodically so a crash doesn't lose
-    // more than DOSE_NVS_SAVE_INTERVAL_MS worth of accumulation.
+    // Persist cumulative dose to NVS only when the value has changed by at
+    // least DOSE_NVS_DELTA_USV or the safety ceiling DOSE_NVS_MAX_INTERVAL_MS
+    // has elapsed. Reduces flash wear from ~1M writes/year to a few
+    // hundred/day in typical use.
     if ((now - gLastDoseSaveMs) >= cfg::DOSE_NVS_SAVE_INTERVAL_MS) {
-        gLastDoseSaveMs = now;
-        saveDoseToNvs();
+        if (shouldSaveDose(gTripDoseMicroSv, gLastSavedDoseUSv,
+                           now - gLastDoseSaveMs,
+                           cfg::DOSE_NVS_DELTA_USV,
+                           cfg::DOSE_NVS_MAX_INTERVAL_MS)) {
+            saveDoseToNvs();
+        }
+        gLastDoseSaveMs = now;  // always advance the cadence anchor
     }
     if ((now - lastBeat) > cfg::HEARTBEAT_MS) {
         lastBeat = now;
