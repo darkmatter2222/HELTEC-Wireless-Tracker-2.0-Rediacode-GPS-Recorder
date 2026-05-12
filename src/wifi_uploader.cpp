@@ -53,7 +53,11 @@ void WifiUploader::begin(SessionStore* store) {
 
     // Park the radio so the cadenced task starts from a known state.
     WiFi.mode(WIFI_OFF);
-    WiFi.persistent(false);
+    // v0.4.8: persistent=true so the WiFi driver caches the AP info (BSSID,
+    // channel, etc.) in NVS. Subsequent connects can use that cache to skip
+    // a full scan. Was false, which forced a full active scan every cycle
+    // and contributed to the 12 s timeout being too short.
+    WiFi.persistent(true);
     WiFi.setAutoReconnect(false);
 
     // Pin the worker to core 0; the Arduino loop runs on core 1, so HTTP
@@ -141,10 +145,11 @@ void WifiUploader::taskLoop() {
 bool WifiUploader::connectWifi() {
     Serial.printf("[WIFI] connecting to '%s'...\n", secrets::WIFI_SSID);
 
-    // Hard reset radio state. After repeated connect failures (e.g. roaming
-    // out of and back into Wi-Fi range during a bike ride) the driver can
-    // get stuck unless we fully bounce the mode.
-    WiFi.disconnect(true, true);
+    // v0.4.8: disconnect(eraseAP=true, disconnect=true) was wiping the
+    // saved AP info every cycle, which is exactly what defeats the
+    // WiFi.persistent(true) cache. Pass false for eraseAP so the cached
+    // BSSID/channel survive and the next associate is fast.
+    WiFi.disconnect(false, false);
     WiFi.mode(WIFI_OFF);
     vTaskDelay(pdMS_TO_TICKS(150));
     WiFi.mode(WIFI_STA);
@@ -163,25 +168,34 @@ bool WifiUploader::connectWifi() {
     // the actual root cause of the boot loop, not brown-outs.
     WiFi.begin(secrets::WIFI_SSID, secrets::WIFI_PASSWORD);
 
-    const uint32_t deadline = millis() + secrets::WIFI_CONNECT_TIMEOUT_MS;
+    // v0.4.8: timeout now 25 s in secrets.h (was 12 s). With NimBLE running,
+    // a cold WiFi.begin can take 10-15 s for scan+assoc+DHCP, and we were
+    // missing valid associations by ~1-3 s every time. Verified in field
+    // logs: every connect that eventually succeeded did so in 2-7 s once
+    // it got past the cold start.
+    const uint32_t connectStart = millis();
+    const uint32_t deadline = connectStart + secrets::WIFI_CONNECT_TIMEOUT_MS;
     while (WiFi.status() != WL_CONNECTED && (int32_t)(deadline - millis()) > 0) {
         vTaskDelay(pdMS_TO_TICKS(200));
     }
     if (WiFi.status() != WL_CONNECTED) {
-        Serial.printf("[WIFI] connect timeout (status=%d)\n", (int)WiFi.status());
-        WiFi.disconnect(true, true);
+        Serial.printf("[WIFI] connect timeout (status=%d after %ums)\n",
+                      (int)WiFi.status(), (unsigned)(millis() - connectStart));
+        WiFi.disconnect(false, false);
         WiFi.mode(WIFI_OFF);
         return false;
     }
-    Serial.printf("[WIFI] connected ip=%s rssi=%d dBm\n",
-                  WiFi.localIP().toString().c_str(), WiFi.RSSI());
+    Serial.printf("[WIFI] connected ip=%s rssi=%d dBm in %ums ch=%d\n",
+                  WiFi.localIP().toString().c_str(), WiFi.RSSI(),
+                  (unsigned)(millis() - connectStart), WiFi.channel());
     return true;
 }
 
 
 void WifiUploader::disconnectWifi() {
     event_log::markPhase("WIFI_DISCO_IN");
-    WiFi.disconnect(true, true);
+    // v0.4.8: eraseAP=false so persistent cache survives between cycles.
+    WiFi.disconnect(false, false);
     WiFi.mode(WIFI_OFF);
     event_log::markPhase("WIFI_DISCO_OUT");
 }

@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.4.7`.
+Current: `0.4.8`.
 
 ---
 
@@ -830,6 +830,50 @@ Otherwise, iterate to completion.
 ---
 
 ## Lessons Learned — Do Not Re-Litigate
+
+### Wi-Fi Connect Timeout Too Short With BLE Coex (v0.4.8)
+
+- **Symptom**: device says it's connecting to Wi-Fi but data only reaches the
+  server after USB plug-in. STORAGE screen cycles between `Wi-Fi:
+  connecting...` and `Retry: Xm YYs` for 5+ minutes while the AP is right
+  next to the device. Then mysteriously succeeds.
+- **Diagnostic from `/system.log`** (the only trustworthy source — see USB-JTAG
+  rule above):
+  ```
+  t=188s cycle_start -> t=200s connect_fail  (12s timeout)
+  t=260s cycle_start -> t=273s connect_fail  (12s)
+  t=333s cycle_start -> t=345s connect_fail  (12s)
+  t=465s cycle_start -> t=478s connect_fail  (12s)
+  [4-minute backoff gap from v0.4.7 exponential backoff]
+  t=718s cycle_start -> t=720s cycle_done ok=1/1   <- 2.4s, instant
+  t=726s cycle_start -> t=734s cycle_done ok=1/1   <- backlog drain
+  ```
+  vbat was 3979-4008 mV throughout (no brown-out). Every connect either took
+  >12 s (timeout) or 2-7 s (success). The 12 s window was missing valid
+  associations by 1-3 s.
+- **Root cause**: NimBLE running concurrently on Core 0 starves the Wi-Fi
+  driver of CPU during scan + association + DHCP. A cold `WiFi.begin()` after
+  `WiFi.mode(WIFI_OFF)` can take 10-15 s reliably, sometimes 18-20 s, with
+  BLE active. The 12 s timeout we inherited from copy-pasted examples was
+  simply too short.
+- **Anti-fix (don't repeat)**: previous code called
+  `WiFi.disconnect(true, true)` between every cycle. The second `true`
+  (`eraseAP`) wipes the cached BSSID/channel from NVS, defeating
+  `WiFi.persistent(true)`. With `eraseAP=true`, every cycle does a full
+  active scan from scratch (~2-3 s wasted before assoc even begins).
+- **Fix (v0.4.8)**:
+  - `secrets::WIFI_CONNECT_TIMEOUT_MS` 12000 -> 25000.
+  - `WifiUploader::begin()`: `WiFi.persistent(true)` (was false).
+  - `WifiUploader::connectWifi()` + `disconnectWifi()`: change
+    `WiFi.disconnect(true, true)` -> `WiFi.disconnect(false, false)` so the
+    cached AP info survives between cycles.
+  - Serial log enhanced to include connect duration:
+    `[WIFI] connected ip=... rssi=... in 2400ms ch=11`. Use this to spot
+    regressions in connect speed during future work.
+- **Verification**: after the fix, watch `[WIFI] connected ... in Xms` in
+  serial. X should be <5000 ms for a warm reconnect (cached BSSID) and
+  <15000 ms for a cold start. If you see 25000 ms or timeouts, BLE
+  coexistence may be regressing.
 
 ### USB-JTAG Reset Mistaken for Random Reboots (v0.4.7)
 
