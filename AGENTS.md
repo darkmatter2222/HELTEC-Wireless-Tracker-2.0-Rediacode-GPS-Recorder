@@ -831,6 +831,51 @@ Otherwise, iterate to completion.
 
 ## Lessons Learned — Do Not Re-Litigate
 
+### Viewer Deploy Wiped Basic-Auth Credentials Because Local .env and docker-compose.yml Were Missing TRACKER_USER / TRACKER_PASS (viewer May 2026)
+
+- **Symptom**: after running `web\vega-tracker-viewer\deploy.ps1`, every request
+  to `http://192.168.86.48:8031/` returned `401 Unauthorized`. nginx access log
+  showed `user "darkmatter2222" was not found in "/etc/nginx/tracker_htpasswd"`.
+  The viewer was working before the deploy. Public `https://susmannet.duckdns.org/tracker/`
+  was unaffected because `susman-ingress` enforces its own basic auth in front.
+- **Root cause**: `deploy.ps1` scp's the local `.env` to
+  `~/vega-tracker-viewer/.env` on every deploy. The local copy in this repo was
+  missing `TRACKER_USER` and `TRACKER_PASS`. The local `docker-compose.yml`
+  was also missing the pass-through `environment:` lines for those vars.
+  Result: server `.env` got overwritten with no creds, compose started the
+  container without the env vars, and `docker-entrypoint.d/10-config.sh` hit
+  its `WARNING: TRACKER_USER or TRACKER_PASS not set — auth disabled` branch
+  which writes `disabled:!` to the htpasswd file. nginx then rejected every
+  request including the correct username.
+- **Why it was latent**: someone had previously edited the server-side `.env`
+  by hand to add the creds. That hand-edit silently survived several deploys
+  back when `.env` was either not in the deploy items list or had a stale
+  manual override. The next clean deploy clobbered it.
+- **Fix (viewer May 2026)**:
+  - Added `TRACKER_USER=darkmatter2222` and `TRACKER_PASS=liquimatter` to the
+    local `web/vega-tracker-viewer/.env` (gitignored, so credentials still
+    don't enter the repo).
+  - Added `TRACKER_USER: ${TRACKER_USER:-}` and `TRACKER_PASS: ${TRACKER_PASS:-}`
+    to the `environment:` block of `web/vega-tracker-viewer/docker-compose.yml`.
+  - **Also fixed a CRLF bug** discovered while debugging this: the build was
+    successfully copying `docker-entrypoint.d/10-config.sh` into the image
+    but Git/scp from Windows preserved `\r\n` line endings on the shebang
+    line, so `/bin/sh\r` was not found and the container crash-looped.
+    Added `RUN sed -i 's/\r$//' /docker-entrypoint.d/10-config.sh` to the
+    Dockerfile right before `chmod +x` — Windows checkouts now self-heal.
+- **Verification after re-deploy**:
+  ```
+  noauth=401   (correct: nginx demands credentials)
+  auth=200     (correct: credentials accepted)
+  ```
+- **Rule for future viewer edits**:
+  1. **Never remove `TRACKER_USER` / `TRACKER_PASS` from the local `.env`** —
+     `deploy.ps1` will silently break public access on the next push.
+  2. Treat the `environment:` block in `docker-compose.yml` as a contract
+     with `10-config.sh`. Any new env var the entrypoint reads must be added
+     to compose's `environment:` *and* documented in `.env.example`.
+  3. Shell scripts copied from Windows need a CRLF strip step in the Dockerfile.
+
 ### Mongo Credentials Leaked Through `/info` Response and Container Logs (API v0.5.2)
 
 - **Symptom**: `GET /info` (reachable through the viewer proxy at

@@ -1,5 +1,5 @@
 // ManagePanel — data management UI: rename, soft-delete/restore/purge, merge, export.
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useRef } from 'react';
 import { renameSession, deleteSession, restoreSession, purgeSession, mergeSessions, exportSession, exportBulk, fetchSessions } from './api.js';
 import { sessionColor, fmtTs, fmtDose } from './colors.js';
 
@@ -172,16 +172,23 @@ function DeleteRestoreTab({ sessions, onSoftDeleted, onRestored, onPurged, onErr
   const [showDeleted,    setShowDeleted]    = useState(false);
   const [deletedList,    setDeletedList]    = useState([]);
   const [loadingDeleted, setLoadingDeleted] = useState(false);
+  // Generation counter so a stale in-flight fetch can't overwrite a newer one.
+  // Toggling "show deleted" rapidly used to allow whichever response landed
+  // last to win, regardless of which call was actually the most recent.
+  const loadGenRef = useRef(0);
 
   async function loadDeleted() {
+    const gen = ++loadGenRef.current;
     setLoadingDeleted(true);
     try {
       const all = await fetchSessions({ includeDeleted: true });
+      if (gen !== loadGenRef.current) return;  // newer fetch already started
       setDeletedList(all.filter(s => s.deletedAt));
     } catch (e) {
+      if (gen !== loadGenRef.current) return;
       onError(String(e));
     } finally {
-      setLoadingDeleted(false);
+      if (gen === loadGenRef.current) setLoadingDeleted(false);
     }
   }
 

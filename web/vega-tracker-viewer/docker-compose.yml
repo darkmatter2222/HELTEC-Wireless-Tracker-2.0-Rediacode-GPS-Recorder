@@ -10,3 +10,5 @@ services:
       - "${WEB_PORT:-8031}:80"
     environment:
       API_BASE: ${API_BASE:-http://192.168.86.48:8030}
+      TRACKER_USER: ${TRACKER_USER:-}
+      TRACKER_PASS: ${TRACKER_PASS:-}

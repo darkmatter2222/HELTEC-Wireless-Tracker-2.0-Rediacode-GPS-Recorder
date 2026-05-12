@@ -568,13 +568,13 @@ export default function App() {
   // ---- aggregate stats
   const stats = useMemo(() => {
     let n = 0, sumDose = 0, maxDose = -Infinity, minDose = Infinity;
-    let sumCps = 0, maxCps = -Infinity;
+    let sumCps = 0, cpsN = 0, maxCps = -Infinity;
     let sumSpd = 0, spdN = 0, maxSpd = -Infinity;
     let maxBrg = null, lastBrg = null;
     for (const t of filteredTraces) {
       for (const p of t.filtered) {
         if (p.uSv != null) { n++; sumDose += p.uSv; if (p.uSv > maxDose) maxDose = p.uSv; if (p.uSv < minDose) minDose = p.uSv; }
-        if (p.cps != null) { sumCps += p.cps; if (p.cps > maxCps) maxCps = p.cps; }
+        if (p.cps != null) { cpsN++; sumCps += p.cps; if (p.cps > maxCps) maxCps = p.cps; }
         if (p.spd != null) { spdN++; sumSpd += p.spd; if (p.spd > maxSpd) maxSpd = p.spd; }
         if (p.brg != null) lastBrg = p.brg;
       }
@@ -584,7 +584,7 @@ export default function App() {
       avgDose: n ? sumDose / n : null,
       maxDose: n ? maxDose : null,
       minDose: n ? minDose : null,
-      avgCps: n ? sumCps / n : null,
+      avgCps: cpsN ? sumCps / cpsN : null,
       maxCps: maxCps > -Infinity ? maxCps : null,
       avgSpd: spdN ? sumSpd / spdN : null,
       maxSpd: maxSpd > -Infinity ? maxSpd : null,

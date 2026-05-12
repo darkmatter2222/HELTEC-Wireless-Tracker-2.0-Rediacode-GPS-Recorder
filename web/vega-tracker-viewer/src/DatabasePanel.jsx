@@ -1,5 +1,5 @@
 // DatabasePanel — full database management: stats, backup, restore, delete backup.
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { fetchDbStats, fetchBackups, createBackup, deleteBackup, restoreBackup } from './api.js';
 
 function fmtBytes(bytes) {
@@ -135,6 +135,13 @@ export function DatabasePanel({ onError }) {
   const [backing,  setBacking]  = useState(false);
   const [lastMsg,  setLastMsg]  = useState(null);
 
+  // Keep onError in a ref so the `load` callback identity is stable across
+  // parent re-renders (App.jsx passes an inline arrow function for onError;
+  // without this ref, every parent render would trigger a re-fetch of
+  // /admin/db-stats + /admin/backups via the useEffect dep).
+  const onErrorRef = useRef(onError);
+  useEffect(() => { onErrorRef.current = onError; }, [onError]);
+
   const load = useCallback(async () => {
     setLoading(true);
     try {
@@ -143,11 +150,11 @@ export function DatabasePanel({ onError }) {
       setBackups(b.backups || []);
       setBkMeta({ keepCount: b.keepCount, lastBackup: s.lastBackup });
     } catch (e) {
-      onError(String(e));
+      onErrorRef.current(String(e));
     } finally {
       setLoading(false);
     }
-  }, [onError]);
+  }, []);
 
   useEffect(() => { load(); }, [load]);
 
