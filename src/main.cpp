@@ -563,6 +563,16 @@ void loop() {
                       s.hasGps, s.lat, s.lng, s.deviceId,
                       s.speed, s.bearing, s.alt, s.hdop);
         event_log::markPhase("MAIN_LOOP");
+    } else {
+        // v0.4.7: keep the RTC uptime marker fresh even when there is no
+        // GPS fix (samples skipped) so that lastUptimeMs in BOOT records
+        // is a useful crash timestamp. Throttle to once per second.
+        static uint32_t lastIdleMark = 0;
+        uint32_t now = millis();
+        if (now - lastIdleMark >= 1000) {
+            event_log::markPhase("MAIN_IDLE");
+            lastIdleMark = now;
+        }
     }
 
     // If a manual scan was kicked off and just completed, hand the results

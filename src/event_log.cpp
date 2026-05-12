@@ -3,6 +3,7 @@
 #include <LittleFS.h>
 #include <esp_system.h>
 #include <esp_attr.h>
+#include <rom/rtc.h>
 
 // External: latest VBAT sample, defined in main.cpp.
 extern float trackerLastVbat();
@@ -84,6 +85,11 @@ void beginBoot() {
 
     const esp_reset_reason_t rr = esp_reset_reason();
     const char* rname = resetReasonName(rr);
+    // v0.4.7: also capture the raw hardware reset reason for each CPU.
+    // esp_reset_reason() returns ESP_RST_UNKNOWN when the IDF couldn't
+    // classify the reset; the raw register usually still gives us a clue.
+    const int rawRr0 = (int)rtc_get_reset_reason(0);
+    const int rawRr1 = (int)rtc_get_reset_reason(1);
 
     // Capture forensic state from RTC memory.
     bool magicValid = (g_rtcMagic == kMagic);
@@ -113,10 +119,11 @@ void beginBoot() {
     const float vbat = trackerLastVbat();
     int vbatMv = (vbat > 0.0f) ? (int)(vbat * 1000.0f + 0.5f) : -1;
 
-    char buf[200];
+    char buf[240];
     snprintf(buf, sizeof(buf),
-             "%u,%u,BOOT,%s,vbatMv=%d,lastUptimeMs=%u,wifiInFlight=%u,lastPhase=%s",
+             "%u,%u,BOOT,%s,raw0=%d,raw1=%d,vbatMv=%d,lastUptimeMs=%u,wifiInFlight=%u,lastPhase=%s",
              (unsigned)millis(), (unsigned)millis(), rname,
+             rawRr0, rawRr1,
              vbatMv, (unsigned)lastUptime, (unsigned)wifiInFlight,
              lastPhase[0] ? lastPhase : "NONE");
     appendLineRaw(String(buf));

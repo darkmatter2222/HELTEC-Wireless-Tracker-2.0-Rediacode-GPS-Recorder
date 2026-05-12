@@ -24,6 +24,18 @@ class SessionStore;
 
 class WifiUploader {
 public:
+    // Granular phase reporting for the UI. Replaces the previous boolean
+    // "busy" which couldn't distinguish a 12s connect attempt from an
+    // active POST.
+    enum class Phase : uint8_t {
+        Disabled = 0,    // no SSID/URL configured
+        Idle,            // waiting for next cadence tick
+        Backoff,         // waiting through exponential backoff
+        Connecting,      // associating with AP
+        Posting,         // streaming a file to the server
+        Disconnecting,   // tearing the radio back down
+    };
+
     void begin(SessionStore* store);
 
     // Backwards-compatible no-op. The actual work runs on a dedicated
@@ -42,6 +54,8 @@ public:
     // on Xtensa, so no lock is needed for diagnostics.
     bool      enabled()        const { return enabled_; }
     bool      busy()           const { return busy_; }
+    Phase     phase()          const { return (Phase)phase_; }
+    uint32_t  consecutiveFailures() const { return consecutiveFailures_; }
     uint32_t  uploadedCount()  const { return uploadedCount_; }
     uint32_t  failedCount()    const { return failedCount_; }
     uint32_t  lastAttemptMs()  const { return lastAttempt_; }
@@ -62,6 +76,8 @@ private:
     TaskHandle_t  task_           = nullptr;
     volatile bool enabled_        = false;
     volatile bool busy_           = false;
+    volatile uint8_t  phase_         = 0;   // Phase enum
+    volatile uint32_t consecutiveFailures_ = 0;
     volatile uint32_t lastAttempt_   = 0;
     volatile uint32_t lastSuccess_   = 0;
     volatile uint32_t nextAttempt_   = 0;

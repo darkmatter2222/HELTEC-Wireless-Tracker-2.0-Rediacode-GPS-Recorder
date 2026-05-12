@@ -463,30 +463,51 @@ void Ui::renderStorage() {
     snprintf(buf, sizeof(buf), "Files on disk: %d", store_->sessionCount());
     field(35, 4, 58, 156, 8, buf, COL_DIM, COL_BG, 1);
 
-    // v0.4.5: upload countdown / status line. Sits at y=70 so it fits the 80px tall panel.
+    // v0.4.7: granular Wi-Fi state. The previous "busy = uploading..." lied
+    // to the user during the 12-second connect attempts (most of which fail
+    // after a reboot), so they thought uploads were stuck when they were
+    // actually still trying to associate with the AP.
     char wifiBuf[40];
     uint16_t wifiCol = COL_DIM;
     if (!wifi_ || !wifi_->enabled()) {
         snprintf(wifiBuf, sizeof(wifiBuf), "Wi-Fi: disabled");
-    } else if (wifi_->busy()) {
-        snprintf(wifiBuf, sizeof(wifiBuf), "Wi-Fi: uploading...");
-        wifiCol = COL_AMBER;
     } else {
-        const uint32_t next = wifi_->nextAttemptMs();
-        const uint32_t now  = millis();
-        if (next > now) {
-            uint32_t remainMs = next - now;
-            uint32_t remainS  = (remainMs + 999) / 1000;
-            if (remainS >= 60) {
-                snprintf(wifiBuf, sizeof(wifiBuf), "Next sync: %um %02us",
-                         (unsigned)(remainS / 60), (unsigned)(remainS % 60));
+        const auto ph = wifi_->phase();
+        switch (ph) {
+        case WifiUploader::Phase::Connecting:
+            snprintf(wifiBuf, sizeof(wifiBuf), "Wi-Fi: connecting...");
+            wifiCol = COL_AMBER;
+            break;
+        case WifiUploader::Phase::Posting:
+            snprintf(wifiBuf, sizeof(wifiBuf), "Wi-Fi: uploading...");
+            wifiCol = COL_GREEN;
+            break;
+        case WifiUploader::Phase::Disconnecting:
+            snprintf(wifiBuf, sizeof(wifiBuf), "Wi-Fi: cleanup...");
+            wifiCol = COL_DIM;
+            break;
+        default: {
+            // Idle / Backoff -> show countdown.
+            const uint32_t next = wifi_->nextAttemptMs();
+            const uint32_t now  = millis();
+            const bool inBackoff = (ph == WifiUploader::Phase::Backoff);
+            if (next > now) {
+                uint32_t remainMs = next - now;
+                uint32_t remainS  = (remainMs + 999) / 1000;
+                const char* prefix = inBackoff ? "Retry" : "Next sync";
+                if (remainS >= 60) {
+                    snprintf(wifiBuf, sizeof(wifiBuf), "%s: %um %02us",
+                             prefix, (unsigned)(remainS / 60), (unsigned)(remainS % 60));
+                } else {
+                    snprintf(wifiBuf, sizeof(wifiBuf), "%s: %us", prefix, (unsigned)remainS);
+                }
+                wifiCol = inBackoff ? COL_AMBER : COL_GREEN;
             } else {
-                snprintf(wifiBuf, sizeof(wifiBuf), "Next sync: %us", (unsigned)remainS);
+                snprintf(wifiBuf, sizeof(wifiBuf), inBackoff ? "Retrying..." : "Next sync: soon");
+                wifiCol = COL_GREEN;
             }
-            wifiCol = COL_GREEN;
-        } else {
-            snprintf(wifiBuf, sizeof(wifiBuf), "Next sync: soon");
-            wifiCol = COL_GREEN;
+            break;
+        }
         }
     }
     field(36, 4, 70, 156, 8, wifiBuf, wifiCol, COL_BG, 1);

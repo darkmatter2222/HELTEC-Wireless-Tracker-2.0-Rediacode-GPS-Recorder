@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.4.6`.
+Current: `0.4.7`.
 
 ---
 
@@ -830,6 +830,51 @@ Otherwise, iterate to completion.
 ---
 
 ## Lessons Learned — Do Not Re-Litigate
+
+### USB-JTAG Reset Mistaken for Random Reboots (v0.4.7)
+
+- **Symptom**: device "reboots every 6-10 minutes" with `esp_reset_reason()`
+  returning `ESP_RST_UNKNOWN`. `lifetimeSamples_` counter resets to 0
+  intermittently. User reports "sample count went to zero the moment I
+  plugged in USB". Reset reasons in `/system.log` show only `UNKNOWN` so
+  the cause is opaque.
+- **Root cause**: on ESP32-S3 the USB-JTAG controller can issue a chip reset
+  whenever the USB CDC interface re-enumerates. Plugging in USB, opening a
+  serial port (DTR pulse), Windows USB power management, antivirus polling
+  — any of these triggers `USB_JTAG_CHIP_RESET` (raw reset reason `21` on
+  ESP32-S3). The IDF `esp_reset_reason()` cannot classify this and returns
+  `ESP_RST_UNKNOWN` (value 0), which we labeled "UNKNOWN" in serial logs.
+  On battery alone (USB unplugged) the device does **not** suffer these
+  resets — the apparent reboot loop was entirely USB / development-tooling
+  induced.
+- **Diagnostic (v0.4.7)** in `event_log.cpp::beginBoot()`:
+  - Include `<rom/rtc.h>` and call `rtc_get_reset_reason(0)` /
+    `rtc_get_reset_reason(1)` for the per-CPU hardware reset register.
+    Append `raw0=N,raw1=N` to every `BOOT` line in `/system.log` and the
+    serial banner. ESP32-S3 raw reset reason cheat sheet:
+    1=POWERON, 9=RTCWDT_SYS, 11=RTC_SW_CPU, 13=RTCWDT_CPU,
+    14=RTCWDT_BROWN_OUT, 15=RTCWDT_RTC, 17=SUPER_WDT, 18=GLITCH_RTC,
+    20=USB_UART_CHIP_RESET, **21=USB_JTAG_CHIP_RESET**, 24=JTAG_RESET.
+  - Anything in the 20-24 range means USB / JTAG re-enumeration, not a
+    firmware fault. Don't waste time hunting an imaginary stack overflow.
+- **UX fixes (v0.4.7)** since every USB-induced reboot wastes 75+ seconds
+  before the first real upload attempt and the first 2 attempts after a
+  fresh boot always fail with a 12 s connect timeout:
+  - Post-boot grace reduced 15 s -> 5 s in `WifiUploader::taskLoop()`.
+  - Exponential backoff no longer triggers on failures 1 and 2 — only
+    from the 3rd consecutive fail onward. Lets a freshly-booted device
+    drain its queue at 60 s cadence instead of jumping to 2 min.
+  - After a successful upload, the cadence shrinks to 5 s so a backlog
+    drains fast (was 60 s).
+  - `WifiUploader::Phase` enum + accessor replaces the boolean `busy_`.
+    The STORAGE screen now shows `Wi-Fi: connecting...`, `Wi-Fi:
+    uploading...`, `Wi-Fi: cleanup...`, `Next sync: Xs`, or `Retry: Xs`
+    instead of a single ambiguous "uploading..." that lied during the
+    12 s connect timeout.
+- **Operational rule**: when diagnosing reboot mysteries via serial, expect
+  **drive.py / capture_boot.py to cause an extra reset on every invocation**.
+  Pull the device's persistent log via `LOG` and look at `lastUptimeMs` /
+  `raw0` rather than judging stability by what you see on serial.
 
 ### Sample Counter Resetting on Upload Looks Like Data Loss (v0.4.6)
 

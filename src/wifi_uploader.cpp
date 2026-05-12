@@ -44,10 +44,12 @@ void WifiUploader::begin(SessionStore* store) {
     if (!secrets::WIFI_SSID || secrets::WIFI_SSID[0] == '\0' ||
         !secrets::INGEST_URL || secrets::INGEST_URL[0] == '\0') {
         enabled_ = false;
+        phase_ = (uint8_t)Phase::Disabled;
         Serial.println("[WIFI] disabled (no SSID/INGEST_URL in secrets.h)");
         return;
     }
     enabled_ = true;
+    phase_ = (uint8_t)Phase::Idle;
 
     // Park the radio so the cadenced task starts from a known state.
     WiFi.mode(WIFI_OFF);
@@ -86,33 +88,49 @@ void WifiUploader::taskTrampoline(void* arg) {
 }
 
 void WifiUploader::taskLoop() {
-    // 15s post-boot grace so BLE/GPS finish coming up before we light Wi-Fi.
-    vTaskDelay(pdMS_TO_TICKS(15000));
+    // 5s post-boot grace so BLE/GPS finish coming up before we light Wi-Fi.
+    // Was 15s in v0.4.1; reduced in v0.4.7 because reboots happen often
+    // enough that the user was waiting 75+s for the first upload attempt
+    // after each one.
+    vTaskDelay(pdMS_TO_TICKS(5000));
     // Backoff state for repeated connect failures (e.g. when out of Wi-Fi
     // range for hours). Without backoff we churn the radio and PA every
     // 60 s, which on a marginal power supply triggers a brown-out reset.
-    uint32_t consecutiveFailures = 0;
     for (;;) {
         const uint32_t okBefore = uploadedCount_;
         const uint32_t failBefore = failedCount_;
         runOnce();
         if (failedCount_ > failBefore && uploadedCount_ == okBefore) {
-            ++consecutiveFailures;
+            ++consecutiveFailures_;
         } else if (uploadedCount_ > okBefore) {
-            consecutiveFailures = 0;
+            consecutiveFailures_ = 0;
         }
-        // Exponential backoff: 1x, 2x, 4x, 8x, 16x cadence (cap ~16 min).
-        // Caps at 5 to avoid silly long sleeps when the AP eventually returns.
+        // v0.4.7: Faster recovery. First two failures retry at the base
+        // cadence (60s). From the 3rd consecutive failure onward, ramp
+        // exponentially (60s -> 120s -> 240s -> ... cap 16 min). Previously
+        // we ramped from the 2nd failure, which made every post-boot retry
+        // take 2 min because the first two attempts after boot always fail.
         uint32_t mult = 1u;
-        if (consecutiveFailures > 0) {
-            uint32_t shift = consecutiveFailures > 5 ? 5 : (consecutiveFailures - 1);
+        if (consecutiveFailures_ > 2) {
+            uint32_t shift = consecutiveFailures_ - 2;
+            if (shift > 4) shift = 4;   // cap at 16x
             mult = 1u << shift;
         }
-        const uint32_t sleepMs = secrets::UPLOAD_INTERVAL_MS * mult;
+        uint32_t sleepMs = secrets::UPLOAD_INTERVAL_MS * mult;
+        // v0.4.7: drain the queue. If we just succeeded and there is still
+        // more work in the active day file (i.e. samples have been written
+        // since rotateForUpload was last called), kick another cycle in 5s
+        // instead of waiting the full 60s. The store-side rotate is gated
+        // by "only when no pending files", so this is safe — it just lets
+        // a backlog drain quickly when the AP is finally in range.
+        if (uploadedCount_ > okBefore && store_) {
+            sleepMs = 5000;
+        }
         nextAttempt_ = millis() + sleepMs;
+        phase_ = (uint8_t)(mult > 1 ? Phase::Backoff : Phase::Idle);
         if (mult > 1) {
             Serial.printf("[WIFI] backoff: %u consecutive failures, next attempt in %us\n",
-                          (unsigned)consecutiveFailures, (unsigned)(sleepMs / 1000));
+                          (unsigned)consecutiveFailures_, (unsigned)(sleepMs / 1000));
         }
         // Sleep until either the cadence elapses or requestNow() pokes us.
         ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(sleepMs));
@@ -288,6 +306,7 @@ uint32_t WifiUploader::runOnce() {
     }
 
     busy_ = true;
+    phase_ = (uint8_t)Phase::Connecting;
     lastAttempt_ = millis();
     Serial.printf("[UPLOAD] cycle start; %u file(s) pending heap_free=%u\n",
                   (unsigned)pending.size(), (unsigned)ESP.getFreeHeap());
@@ -302,6 +321,7 @@ uint32_t WifiUploader::runOnce() {
     if (!connectWifi()) {
         ++failedCount_;
         busy_ = false;
+        phase_ = (uint8_t)Phase::Idle;
         event_log::markWifiInFlight(false);
         event_log::appendEvent("WIFI", "connect_fail");
         return 0;
@@ -323,6 +343,7 @@ uint32_t WifiUploader::runOnce() {
             continue;
         }
         event_log::markPhase("WIFI_POST");
+        phase_ = (uint8_t)Phase::Posting;
         if (uploadOne(p.filename, p.sessionId, p.sizeBytes)) {
             ++ok;
             ++uploadedCount_;
@@ -345,8 +366,10 @@ uint32_t WifiUploader::runOnce() {
         vTaskDelay(pdMS_TO_TICKS(50));
     }
 
+    phase_ = (uint8_t)Phase::Disconnecting;
     disconnectWifi();
     busy_ = false;
+    phase_ = (uint8_t)Phase::Idle;
     event_log::markWifiInFlight(false);
     char done[48];
     snprintf(done, sizeof(done), "cycle_done ok=%u/%u",
