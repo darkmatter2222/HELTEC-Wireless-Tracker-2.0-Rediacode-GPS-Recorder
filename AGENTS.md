@@ -831,6 +831,49 @@ Otherwise, iterate to completion.
 
 ## Lessons Learned — Do Not Re-Litigate
 
+### Verification Pass (v0.4.8) — Self-Test Results
+
+After flashing v0.4.8 and before relying on field validation, the following
+self-tests must pass. All passed on the current build:
+
+- **Native unit tests** (`pio test -e native`): **36/36 succeeded** across
+  `test_battery_native`, `test_csv_schema_native`, `test_line_count_native`.
+- **Device integration suite** (`python scripts\test_device.py --port COM4`):
+  **12 passed, 1 skipped** (`sample_count_consistency` skipped only because
+  the device had no GPS fix indoors so `samples=0`). All command latencies
+  under 700 ms; heartbeat cadence and format healthy; 30-second serial
+  loop-latency test passed with zero stalls.
+- **`/system.log` evidence of v0.4.8 fix** (from prior boot, 6 consecutive
+  cycles after AP cache warmed):
+  ```
+  718333 -> 720736   cycle_done ok=1/1   (2.4s)
+  726172 -> 734213   cycle_done ok=1/1   (8.0s — drain backlog)
+  739485 -> 740886   cycle_done ok=1/1   (1.4s)
+  746036 -> 747852   cycle_done ok=1/1   (1.8s)
+  753045 -> 754844   cycle_done ok=1/1   (1.8s)
+  760059 -> 761538   cycle_done ok=1/1   (1.5s)
+  766853 -> 768839   cycle_done ok=1/1   (2.0s)
+  ```
+  These warm reconnects in 1.4-2.4 s prove the `WiFi.persistent(true)` +
+  `disconnect(false,false)` fix preserves the cached BSSID across cycles.
+- **STORAGE-screen pixel-layout audit** (verified against `src/ui.cpp`
+  draw calls): header `HEADER_H=12`; body rows at y=14 (REC/AUTO/Samp),
+  y=26 (Day), y=38 (Disk %), y=50 (6 px bar), y=58 (Files on disk),
+  y=70 (Wi-Fi state). Last text baseline at y=70 fits within the 80 px
+  panel as required by AGENTS.md. STORAGE-INIT-FAILED fallback uses
+  y=14,26,40,54,66 — also in bounds.
+- **Limitation**: a live v0.4.8-firmware cold-connect cycle could not be
+  captured indoors because there is no GPS fix → `lifetimeSamples=0` →
+  the upload task short-circuits and `WIFISTAT` stays at `lastAttempt=0`.
+  Connect-timing validation will happen automatically the first time the
+  device is taken outdoors. The new log line
+  `[WIFI] connected ip=... rssi=... in Xms ch=N` makes this trivial to
+  spot-check in the next field session.
+- **Build hygiene**: USB-JTAG-induced resets continue to appear in
+  `/system.log` as `BOOT,UNKNOWN,raw0=21,raw1=21` every time `drive.py`
+  opens COM4. This is expected (see USB-JTAG lesson) and is not a firmware
+  fault.
+
 ### Wi-Fi Connect Timeout Too Short With BLE Coex (v0.4.8)
 
 - **Symptom**: device says it's connecting to Wi-Fi but data only reaches the
