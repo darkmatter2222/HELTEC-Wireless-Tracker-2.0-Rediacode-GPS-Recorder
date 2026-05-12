@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.4.9`.
+Current: `0.5.0`.
 
 ---
 
@@ -299,13 +299,7 @@ Empty `WIFI_SSID` or `INGEST_URL` disables the Wi-Fi uploader silently.
 ### TFT UI — `ui.{h,cpp}`
 
 - ST7735 landscape rotation=1; 160×80; colors: GREEN `#00E676`, RED, DIM_GREY
-- Screens cycled by short-press: STATS → GPS → STORAGE → PICKER (long-press)
-- **Stop-recording requires DOUBLE long-press** (added v0.2.0):
-  - First long-press on STORAGE while recording: shows red "HOLD AGAIN: STOP REC"
-  - Second long-press within 10 seconds (v0.3.4+): stops recording
-  - Single press, short press, or timeout cancels — recording continues
-  - Starting recording still requires only one long-press (no confirmation)
-- This prevents accidental stop from road vibration bumping the button
+- Screens cycled by short-press: STATS → GPS → STORAGE → DOSE → STATS; PICKER entered via long-press on STATS
 - **Header status bar** (v0.3.5): RC state badge (GREEN=OK, AMBER=scanning/init, RED=disconnected);
   GPS badge (GREEN=3D fix, RED=no fix); battery with color threshold; recording dot always visible
   (dim outline = idle, filled red = recording)
@@ -315,6 +309,17 @@ Empty `WIFI_SSID` or `INGEST_URL` disables the Wi-Fi uploader silently.
 - **GPS screen footer** (v0.3.5): Shows smoothed bearing `Hdg NNN deg` when fix is locked (same
   bearing logged to CSV via `bearingFromHistory()`); `Fix OK` if bearing not yet computed; reverts
   to `Acquiring fix outdoors` only when there is no GPS fix.
+- **DOSE screen** (v0.5.0): Dedicated cumulative dose accumulator screen.
+  - Integrates `µSv/hr × dt` every ~1 Hz sample; displays total in µSv (auto-switches to mSv ≥ 1 000 µSv).
+  - Layout: `TOTAL DOSE` + `since reset` labels (y=14); large 5-char value at size-3 (y=24, 24 px tall);
+    unit label `uSv`/`mSv` at size-1 (x=96, y=32); separator line (y=50); instantaneous `Rate: X.XXX uSv/h`
+    (y=56); `Hold: reset dose` hint (y=68).
+  - Value persisted to NVS (Preferences namespace `"dose"`, key `"usv"`) every
+    `cfg::DOSE_NVS_SAVE_INTERVAL_MS` (30 s) so accumulated total survives crashes and reboots.
+  - Long-press on DOSE screen emits `ACTION_RESET_DOSE` → `main.cpp::resetDose()` zeroes accumulator
+    and writes `0.0` to NVS immediately. Serial logs: `[DOSE] reset by user (was X.XXXX uSv)`.
+  - Heartbeat `[HB]` extended with `dose=X.XXXXuSv` field.
+  - `gUi.setTripDose(float)` called each main-loop iteration to push latest value to the UI.
 
 ### Wi-Fi Uploader — `wifi_uploader.{h,cpp}`
 

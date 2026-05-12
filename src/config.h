@@ -126,7 +126,7 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "0.4.9";
+constexpr const char* FW_VERSION = "0.5.0";
 
 // ---------------- Battery / Wi-Fi safety gate (v0.4.2) -----------------------
 // Skip the Wi-Fi upload cycle entirely if VBAT is below this threshold (V).
@@ -167,5 +167,12 @@ constexpr bool FIELD_HDOP        = true;  // Horizontal Dilution of Precision
 // Must be between 2 and 8. At 1 Hz GPS rate, 4 = ~4-second smoothing lag,
 // which reduces jitter without lagging noticeably through normal turns.
 constexpr uint8_t BEARING_HISTORY_POINTS = 4;
+
+// ---------------- Cumulative trip dose NVS persistence ----------------------
+// The running total µSv is saved to NVS (Preferences namespace "dose", key
+// "usv") every DOSE_NVS_SAVE_INTERVAL_MS so most accumulated dose survives
+// an unexpected crash or reboot.  On a user-initiated reset (hold on DOSE
+// screen) the NVS value is zeroed immediately.
+constexpr uint32_t DOSE_NVS_SAVE_INTERVAL_MS = 30000;  // 30 s
 
 } // namespace cfg

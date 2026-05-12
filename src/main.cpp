@@ -8,6 +8,7 @@
 
 #include <Arduino.h>
 #include <esp_system.h>
+#include <Preferences.h>
 #include "config.h"
 #include "button.h"
 #include "event_log.h"
@@ -24,6 +25,35 @@ RadiaCode     gRadia;
 SessionStore  gStore;
 Ui            gUi;
 WifiUploader  gWifi;
+
+// ---------------------------------------------------------------------------
+// Cumulative trip dose accumulator (v0.5.0)
+// Integrates uSv/hr * dt to produce total µSv since last user reset.
+// Persisted to NVS every DOSE_NVS_SAVE_INTERVAL_MS so a crash loses at most
+// that much accumulation rather than the entire trip total.
+float    gTripDoseMicroSv   = 0.0f;
+uint32_t gLastDoseMs        = 0;     // millis() of most recent sample intake
+uint32_t gLastDoseSaveMs    = 0;     // millis() of most recent NVS write
+
+static void loadDoseFromNvs() {
+    Preferences p;
+    p.begin("dose", true);  // read-only
+    gTripDoseMicroSv = p.getFloat("usv", 0.0f);
+    p.end();
+    Serial.printf("[DOSE] loaded %.4f uSv from NVS\n", gTripDoseMicroSv);
+}
+static void saveDoseToNvs() {
+    Preferences p;
+    p.begin("dose", false);
+    p.putFloat("usv", gTripDoseMicroSv);
+    p.end();
+}
+static void resetDose() {
+    Serial.printf("[DOSE] reset by user (was %.4f uSv)\n", gTripDoseMicroSv);
+    gTripDoseMicroSv = 0.0f;
+    gLastDoseMs      = 0;
+    saveDoseToNvs();
+}
 
 // Pending sample queue. The BLE notification callback runs on the NimBLE
 // host task (Core 0) which has a small stack; doing LittleFS open/write/close
@@ -204,6 +234,11 @@ void setup() {
     // reset reason + wifiInFlight flag) so we can diagnose battery
     // brown-outs that happen while the user isn't watching serial.
     event_log::beginBoot();
+
+    // Reload the cumulative trip dose from NVS so crashes don't wipe the
+    // user's accumulated total.  Done after gStore.begin() so LittleFS is
+    // already mounted and the NVS partition is accessible.
+    loadDoseFromNvs();
 
     gWifi.begin(&gStore);
 
@@ -562,6 +597,20 @@ void loop() {
         gStore.append(0, s.ts, s.uSv, s.cps,
                       s.hasGps, s.lat, s.lng, s.deviceId,
                       s.speed, s.bearing, s.alt, s.hdop);
+
+        // Integrate dose: µSv/hr × dt_ms / 3 600 000 = µSv accumulated.
+        // Cap dt to 10 s to avoid a phantom spike after a long BLE gap.
+        if (s.uSv > 0.0f) {
+            const uint32_t nowDose = millis();
+            if (gLastDoseMs > 0) {
+                const float dtMs = (float)(int32_t)(nowDose - gLastDoseMs);
+                if (dtMs > 0.0f && dtMs < 10000.0f) {
+                    gTripDoseMicroSv += s.uSv * dtMs / 3600000.0f;
+                }
+            }
+            gLastDoseMs = nowDose;
+        }
+
         event_log::markPhase("MAIN_LOOP");
     } else {
         // v0.4.7: keep the RTC uptime marker fresh even when there is no
@@ -613,6 +662,9 @@ void loop() {
                     gRadia.cancelManualScan();
                     gUi.exitPicker();
                     break;
+                case Ui::ACTION_RESET_DOSE:
+                    resetDose();
+                    break;
                 default: break;
             }
             break;
@@ -638,9 +690,15 @@ void loop() {
         lastBat = now;
         gUi.setBatteryPercent(readBatteryPercent());
     }
+    // Persist cumulative dose to NVS periodically so a crash doesn't lose
+    // more than DOSE_NVS_SAVE_INTERVAL_MS worth of accumulation.
+    if ((now - gLastDoseSaveMs) >= cfg::DOSE_NVS_SAVE_INTERVAL_MS) {
+        gLastDoseSaveMs = now;
+        saveDoseToNvs();
+    }
     if ((now - lastBeat) > cfg::HEARTBEAT_MS) {
         lastBeat = now;
-        Serial.printf("[HB] uptime=%lus fix=%d sats=%u hdop=%.2f gpsB=%u gpsAge=%ums baud=%u rcState=%d rec=%d samples=%u life=%u\n",
+        Serial.printf("[HB] uptime=%lus fix=%d sats=%u hdop=%.2f gpsB=%u gpsAge=%ums baud=%u rcState=%d rec=%d samples=%u life=%u dose=%.4fuSv\n",
                       (unsigned long)(now / 1000),
                       (int)gGps.hasFix(),
                       (unsigned)gGps.satellites(),
@@ -651,9 +709,11 @@ void loop() {
                       (int)gRadia.state(),
                       (int)gStore.isRecording(),
                       (unsigned)gStore.sampleCount(),
-                      (unsigned)gStore.lifetimeSamples());
+                      (unsigned)gStore.lifetimeSamples(),
+                      gTripDoseMicroSv);
     }
 
+    gUi.setTripDose(gTripDoseMicroSv);
     gUi.tick();
     delay(2);
 }

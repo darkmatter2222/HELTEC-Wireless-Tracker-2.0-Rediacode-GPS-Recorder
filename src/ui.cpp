@@ -126,6 +126,10 @@ void Ui::onLongPress() {
             screen_ = (Screen)((screen_ + 1) % SCREEN_NORMAL_COUNT);
             forceFullRedraw_ = true;
             break;
+        case SCREEN_DOSE:
+            // Long-press on DOSE screen signals main.cpp to zero the accumulator.
+            pendingAction_ = ACTION_RESET_DOSE;
+            break;
         case SCREEN_PICKER:
             if (pickerCursor_ >= (int)pickList_.size()) {
                 pendingAction_ = ACTION_CANCEL_PICKER;
@@ -227,6 +231,7 @@ void Ui::tick() {
         case SCREEN_STATS:   renderStats();   break;
         case SCREEN_GPS:     renderGps();     break;
         case SCREEN_STORAGE: renderStorage(); break;
+        case SCREEN_DOSE:    renderDose();    break;
         case SCREEN_PICKER:  renderPicker();  break;
         default: break;
     }
@@ -531,6 +536,64 @@ void Ui::renderStorage() {
         }
     }
     field(36, 4, 70, 156, 8, wifiBuf, wifiCol, COL_BG, 1);
+}
+
+// ---------------------------------------------------------------------------
+// DOSE screen (160 x 68 below header)
+//
+// Pixel layout — all measurements from top-left of the 160x80 panel.
+// Header occupies y=0..11.  Body starts at y=12.
+//
+//  y=14  "TOTAL DOSE"          DIM  size-1  x=4   w=78   (left label)
+//  y=14  "since reset"         DIM  size-1  x=94  w=62   (right context)
+//  y=24  5-char value          GREEN size-3  x=4   w=90   (24 px tall: y=24..47)
+//  y=32  unit "uSv"/"mSv"      DIM  size-1  x=96  w=30   (vertically centred)
+//  y=50  separator line        DIM  1px     x=4..155
+//  y=56  "Rate: X.XXX uSv/h"   FG   size-1  x=4   w=156
+//  y=68  "Hold: reset dose"    DIM  size-1  x=4   w=156
+//
+// Hold=long-press emits ACTION_RESET_DOSE, handled in main.cpp.
+void Ui::renderDose() {
+    // Static labels ---------------------------------------------------------
+    field(10, 4,  14, 78, 8, "TOTAL DOSE",   COL_DIM,   COL_BG, 1);
+    field(11, 94, 14, 62, 8, "since reset",  COL_DIM,   COL_BG, 1);
+
+    // Big accumulated dose value (auto-scales µSv → mSv at 1 000 µSv) -------
+    char val[10];
+    char unit[5];
+    const float dose = tripDoseMicroSv_;
+    if (dose < 1000.0f) {
+        if      (dose < 10.0f)  snprintf(val, sizeof(val), "%5.3f", dose);
+        else if (dose < 100.0f) snprintf(val, sizeof(val), "%5.2f", dose);
+        else                    snprintf(val, sizeof(val), "%5.1f", dose);
+        snprintf(unit, sizeof(unit), "uSv");
+    } else {
+        const float mSv = dose / 1000.0f;
+        if      (mSv < 10.0f)  snprintf(val, sizeof(val), "%5.3f", mSv);
+        else if (mSv < 100.0f) snprintf(val, sizeof(val), "%5.2f", mSv);
+        else                   snprintf(val, sizeof(val), "%5.1f", mSv);
+        snprintf(unit, sizeof(unit), "mSv");
+    }
+    field(12, 4,  24, 90, 24, val,  COL_GREEN, COL_BG, 3);
+    field(13, 96, 32, 30,  8, unit, COL_DIM,   COL_BG, 1);
+
+    // Separator line (draw once on full redraw) ------------------------------
+    if (forceFullRedraw_) {
+        tft.drawFastHLine(4, 50, 152, COL_DIM);
+    }
+
+    // Current instantaneous rate for context --------------------------------
+    char rateBuf[28];
+    if (lastReading_.valid) {
+        snprintf(rateBuf, sizeof(rateBuf), "Rate: %6.3f uSv/h",
+                 lastReading_.uSvPerHour);
+        field(14, 4, 56, 156, 8, rateBuf, COL_FG, COL_BG, 1);
+    } else {
+        field(14, 4, 56, 156, 8, "Rate: ---", COL_DIM, COL_BG, 1);
+    }
+
+    // Footer hint -----------------------------------------------------------
+    field(15, 4, 68, 156, 8, "Hold: reset dose", COL_DIM, COL_BG, 1);
 }
 
 // ---------------------------------------------------------------------------

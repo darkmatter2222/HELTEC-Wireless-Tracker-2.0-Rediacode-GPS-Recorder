@@ -13,8 +13,9 @@ public:
         SCREEN_STATS = 0,
         SCREEN_GPS,
         SCREEN_STORAGE,
+        SCREEN_DOSE,
         SCREEN_PICKER,
-        SCREEN_NORMAL_COUNT = SCREEN_PICKER, // STATS/GPS/STORAGE only in cycle
+        SCREEN_NORMAL_COUNT = SCREEN_PICKER, // STATS/GPS/STORAGE/DOSE cycle
     };
 
     void begin();
@@ -27,6 +28,9 @@ public:
     void setReading(const RadiaCode::Reading& r);
     void setRadiaState(RadiaCode::State s, const String& addr);
     void setBatteryPercent(int pct) { vbatPct_ = pct; }
+    // Cumulative trip dose (µSv) accumulated since last reset. Updated each
+    // main-loop iteration; read by renderDose().
+    void setTripDose(float microSv) { tripDoseMicroSv_ = microSv; }
 
     // Picker entry / exit
     void enterPicker(const std::vector<RadiaCode::ScanResult>& results);
@@ -39,6 +43,7 @@ public:
         ACTION_START_PICKER,    // Stats long-press: scan + show picker
         ACTION_PICK_DEVICE,     // Picker: connect to selected
         ACTION_CANCEL_PICKER,
+        ACTION_RESET_DOSE,      // DOSE screen long-press: zero accumulator
     };
     LongAction lastLongAction() {
         LongAction a = pendingAction_;
@@ -57,6 +62,7 @@ private:
     void renderStats();
     void renderGps();
     void renderStorage();
+    void renderDose();
     void renderPicker();
 
     Screen        screen_ = SCREEN_STATS;
@@ -71,6 +77,7 @@ private:
     int                vbatPct_ = -1;
 
     LongAction         pendingAction_ = ACTION_NONE;
+    float              tripDoseMicroSv_ = 0.0f;  // µSv accumulated since last reset
     // v0.4.0: recording is always-on whenever RadiaCode + GPS fix are present,
     // so the legacy double-long-press stop-confirmation no longer exists.
     bool               forceFullRedraw_ = true;
