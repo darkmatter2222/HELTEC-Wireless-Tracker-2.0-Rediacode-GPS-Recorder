@@ -10,7 +10,7 @@
 [![MongoDB](https://img.shields.io/badge/MongoDB-self--hosted-47A248?logo=mongodb&logoColor=white)](https://www.mongodb.com/)
 [![Docker](https://img.shields.io/badge/Docker-API%20%2B%20viewer-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
-[![Stars](https://img.shields.io/github/stars/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder?style=flat)](https://github.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/stargazers)
+[![Stars](https://img.shields.io/badge/dynamic/json?color=yellow&label=%E2%98%85%20stars&query=%24.stargazers_count&url=https%3A%2F%2Fapi.github.com%2Frepos%2Fdarkmatter2222%2FHELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder)](https://github.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/stargazers)
 [![Forks](https://img.shields.io/github/forks/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder?style=flat&logo=github&label=forks)](https://github.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/network/members)
 [![Last Commit](https://img.shields.io/github/last-commit/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder?logo=git&logoColor=white)](https://github.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/commits/main)
 [![Repo Size](https://img.shields.io/github/repo-size/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder)](https://github.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder)
