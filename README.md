@@ -1,9 +1,12 @@
-﻿# Heltec Tracker — RadiaCode GPS Field Logger
+﻿<div align="center">
+
+# Heltec Tracker — RadiaCode GPS Field Logger
 
 [![Firmware](https://img.shields.io/badge/firmware-v0.4.9-brightgreen?logo=cplusplus&logoColor=white)](src/config.h)
 [![Platform](https://img.shields.io/badge/ESP32--S3-blue?logo=espressif&logoColor=white)](https://www.espressif.com/en/products/socs/esp32-s3)
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-build-orange?logo=platformio&logoColor=white)](https://platformio.org/)
 [![RadiaCode](https://img.shields.io/badge/RadiaCode-RC--102%20%7C%20RC--110-purple?logo=bluetooth&logoColor=white)](https://radiacode.com)
+
 [![MongoDB](https://img.shields.io/badge/MongoDB-self--hosted-47A248?logo=mongodb&logoColor=white)](https://www.mongodb.com/)
 [![Docker](https://img.shields.io/badge/Docker-API%20%2B%20viewer-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)](LICENSE)
@@ -12,9 +15,12 @@
 [![Last Commit](https://img.shields.io/github/last-commit/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder?logo=git&logoColor=white)](https://github.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/commits/main)
 [![Repo Size](https://img.shields.io/github/repo-size/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder)](https://github.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder)
 
-> **No phone. No cloud. No subscription.**  
-> Clip a RadiaCode to your bag, pocket the tracker, and every GPS-tagged radiation reading
-> lands in your own MongoDB database — automatically, over Wi-Fi, the moment you walk home.
+**No phone. No cloud. No subscription.**
+
+*Clip a RadiaCode to your bag, pocket the tracker, and every GPS-tagged radiation reading  
+lands in your own MongoDB database — automatically, over Wi-Fi, the moment you walk home.*
+
+</div>
 
 ---
 
