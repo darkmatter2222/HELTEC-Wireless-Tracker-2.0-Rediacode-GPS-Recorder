@@ -71,7 +71,7 @@ MONGO_DB          = os.getenv("MONGO_DB", "radiacode")
 SAMPLES_COLL      = os.getenv("MONGO_SAMPLES_COLLECTION", "tracker_samples")
 SESSIONS_COLL     = os.getenv("MONGO_SESSIONS_COLLECTION", "tracker_sessions")
 BACKUPS_COLL      = "tracker_backups"    # telemetry: one doc per backup attempt
-API_VERSION       = "0.5.0"
+API_VERSION       = "0.5.1"
 MAX_BODY_BYTES    = int(os.getenv("MAX_BODY_BYTES", str(8 * 1024 * 1024)))   # 8 MB
 INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "1000"))
 BACKUP_DIR        = os.getenv("BACKUP_DIR", "/backups")  # host-mounted volume
@@ -716,8 +716,13 @@ def recompute_sessions():
     log.info("recompute-sessions: purged %d pre-2020 sample rows", purged)
 
     # 2. Recompute per-session stats from remaining samples.
+    # v0.5.1: explicit $sort before $group so $last is deterministic (without
+    # a sort, $last picks whichever document the storage engine yields last,
+    # which is undefined). Also write deviceId/trackerId/firmware back to
+    # session metadata -- the previous version computed them but discarded.
     pipeline = [
         {"$match": {"timestampMs": {"$gte": MIN_VALID_TS_MS}}},
+        {"$sort":  {"sessionId": 1, "timestampMs": 1}},
         {"$group": {
             "_id":       "$sessionId",
             "samples":   {"$sum": 1},
@@ -729,15 +734,26 @@ def recompute_sessions():
         }},
     ]
     updated = 0
-    for row in samples.aggregate(pipeline):
+    for row in samples.aggregate(pipeline, allowDiskUse=True):
         sid = row["_id"]
+        update_set = {
+            "samples":   row["samples"],
+            "firstTsMs": row["firstTsMs"],
+            "lastTsMs":  row["lastTsMs"],
+        }
+        # Only overwrite identity fields when aggregation produced a value;
+        # otherwise leave whatever the ingest path wrote (e.g. trackerId
+        # from the X-Tracker-Id header may be the only source for sessions
+        # with no per-row trackerId).
+        if row.get("deviceId"):
+            update_set["deviceId"]  = row["deviceId"]
+        if row.get("trackerId"):
+            update_set["trackerId"] = row["trackerId"]
+        if row.get("firmware"):
+            update_set["firmware"]  = row["firmware"]
         sessions_coll.update_one(
             {"sessionId": sid},
-            {"$set": {
-                "samples":   row["samples"],
-                "firstTsMs": row["firstTsMs"],
-                "lastTsMs":  row["lastTsMs"],
-            }},
+            {"$set": update_set},
             upsert=False,
         )
         updated += 1
@@ -844,8 +860,10 @@ def migrate_to_daily_sessions(confirm: str = ""):
     log.info("migrate: dropped %d legacy session metadata rows", legacy.deleted_count)
 
     # 7. Rebuild tracker_sessions metadata from the now-renamed samples.
+    # v0.5.1: explicit $sort so $last is deterministic.
     pipeline = [
         {"$match": {"timestampMs": {"$gte": MIN_VALID_TS_MS}}},
+        {"$sort":  {"sessionId": 1, "timestampMs": 1}},
         {"$group": {
             "_id":       "$sessionId",
             "samples":   {"$sum": 1},
@@ -1208,6 +1226,17 @@ async def ingest_csv(
     first_ts = min(d["timestampMs"] for d in docs)
     last_ts  = max(d["timestampMs"] for d in docs)
 
+    # v0.5.1: derive deviceId from CSV row data, not just the X-Device-Id header.
+    # Firmware never sends that header -- it embeds the RadiaCode MAC in row
+    # column 6 -- so the session-metadata deviceId was always null. Pick the
+    # last non-empty value (rows are in timestamp order within the upload).
+    derived_device_id = x_device_id
+    for d in reversed(docs):
+        v = d.get("deviceId")
+        if v:
+            derived_device_id = v
+            break
+
     # Upsert session metadata.  Use $min/$max only over valid timestamps.
     # NOTE: firstTsMs uses $min which means a subsequent upload with a smaller
     # but still-valid timestamp is fine (correct early boundary).  But we
@@ -1217,7 +1246,7 @@ async def ingest_csv(
         {
             "$set": {
                 "sessionId":     x_session_id,
-                "deviceId":      x_device_id,
+                "deviceId":      derived_device_id,
                 "trackerId":     x_tracker_id,
                 "firmware":      x_firmware,
                 "lastIngestMs":  now_ms,

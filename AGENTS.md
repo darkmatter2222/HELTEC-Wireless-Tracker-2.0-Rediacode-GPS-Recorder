@@ -831,6 +831,60 @@ Otherwise, iterate to completion.
 
 ## Lessons Learned — Do Not Re-Litigate
 
+### Session `deviceId` Always Null Because Firmware Never Sends X-Device-Id (API v0.5.1)
+
+- **Symptom**: `GET /sessions` showed `deviceId: null` on every newly-ingested
+  session. Older sessions (firmware 0.2.0-0.3.4 era) had populated `deviceId`
+  fields, but anything ingested by the v0.4 firmware came back null. The
+  per-row data in `tracker_samples` was correct — every row had the right MAC.
+- **Root cause #1 (ingest path)**: `tracker_ingest_api.py` upserted session
+  metadata with `deviceId: x_device_id` where `x_device_id` is the
+  `X-Device-Id` HTTP header. **The firmware has never sent that header** —
+  `wifi_uploader.cpp` only sends `X-Session-Id`, `X-Tracker-Id`, `X-Firmware`.
+  So the metadata `deviceId` was being overwritten with `None` on every
+  upload. Older sessions were lucky: at some point a manual recompute
+  populated them and no further uploads happened to overwrite. The recently-
+  active session got null every cycle.
+- **Root cause #2 (recompute path)**: `/admin/recompute-sessions` already
+  computed `deviceId: {$last: "$deviceId"}` in its aggregation pipeline but
+  the `$set` clause that wrote the result back to `tracker_sessions` **only
+  included `samples / firstTsMs / lastTsMs`** — the deviceId/trackerId/firmware
+  fields fell on the floor. So even running recompute didn't fix it.
+- **Root cause #3 ($last is undefined without sort)**: both `recompute-sessions`
+  and `migrate-to-daily-sessions` used `{$last: "$deviceId"}` without a
+  preceding `$sort`. MongoDB's `$last` accumulator returns "the last document
+  in the group" but without an explicit sort the order is determined by the
+  storage engine and is undefined. Even when this happened to work, it was
+  silently brittle.
+- **Fix (v0.5.1)** in `api/vega-tracker-ingest/tracker_ingest_api.py`:
+  - **Ingest endpoint** (`POST /ingest/csv`): derive `derived_device_id` from
+    the parsed CSV rows themselves — walk the rows in reverse and pick the
+    first non-empty `deviceId` value (rows in a single upload are in
+    timestamp order). Fall back to the X-Device-Id header only if no row
+    has one. Write `derived_device_id` to session metadata instead of the
+    raw header value.
+  - **Recompute endpoint** (`POST /admin/recompute-sessions`): prepend
+    `{$sort: {sessionId: 1, timestampMs: 1}}` to the pipeline so `$last`
+    is deterministic, and **actually $set deviceId/trackerId/firmware** when
+    the aggregation produced a non-empty value. Skip the $set when the
+    aggregation returned None so we don't clobber a good ingest-path value
+    with a stale aggregate result.
+  - **Migrate endpoint** (`POST /admin/migrate-to-daily-sessions`): same
+    `$sort` added.
+- **Verification after deploy**:
+  ```
+  python scripts\_diag_sessions.py   # (temp script, removed after use)
+  2026-05-11   dev='524306e0042d'  fw=0.4.7  samples=38521
+  2026-05-10   dev='524306602024'  fw=0.3.6  samples=19453
+  ... all 11 sessions populated correctly.
+  ```
+  Confirms two RadiaCode devices have been in use: legacy `524306602024`
+  and current `524306e0042d`.
+- **Rule for future API edits**: any aggregation that uses `$first` or
+  `$last` MUST be preceded by an explicit `$sort` stage. Never rely on
+  scan order. Also: every place that writes session metadata must include
+  the deviceId/trackerId/firmware fields, not just timing fields.
+
 ### Verification Pass (v0.4.8) — Self-Test Results
 
 After flashing v0.4.8 and before relying on field validation, the following
