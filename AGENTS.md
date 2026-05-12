@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.4.8`.
+Current: `0.4.9`.
 
 ---
 
@@ -971,6 +971,27 @@ Otherwise, iterate to completion.
   `$last` MUST be preceded by an explicit `$sort` stage. Never rely on
   scan order. Also: every place that writes session metadata must include
   the deviceId/trackerId/firmware fields, not just timing fields.
+
+### STORAGE Screen UX Polish (v0.4.9)
+
+- **Row-1 layout collision fixed**: the three `field()` calls at y=14 used overlapping X+W ranges
+  (`field(31)` started at x=36 inside `field(30)`'s x+w=54 zone, and `field(31)` stretched to x=116
+  inside `field(32)`'s x=80 territory).  `fillRect` in each `field()` erased neighboring content.
+  New layout: `field(30)` x=4 w=24 / `field(31)` x=30 w=50 / `field(32)` x=82 w=74 (2px gaps).
+- **"AUTO -gps" label (9 chars) replaced by "NO GPS" (6 chars)**: old label was 54px wide and
+  overflowed the 50px budget in the old layout; new label fits exactly in the new 50px field.
+- **`Samp` counter now resets to 0 after upload**: switched from `lifetimeSamples()` (monotonic,
+  never resets) to `sampleCount()` which is zeroed inside `rotateActiveToPending_()`.  Users now
+  see "how many samples are on-device awaiting upload" which matches their mental model.
+- **"Files on disk" replaced by "Pending: N"**: derives `pending = sessionCount() - (isRecording() ? 1 : 0)`;
+  shown in COL_GREEN when 0 (all uploaded) or COL_AMBER when > 0 (data queued).
+- **Battery indicator now green when >= 40%**: was white (`COL_FG`); changed to `COL_GREEN` so the
+  color signal is consistent (green = healthy, amber = moderate, red = low).
+- **Long-press on GPS and STORAGE screens now advances the screen**: previously a no-op, which made
+  navigation confusing (hold > 800ms = long-press fires, does nothing; release = no short-press).
+  Now GPS and STORAGE long-press behave identically to short-press — cycle to the next screen.
+- **Screen render PNG mockups**: `scripts/render_screens.py` generates 5 PNG files at 3× scale
+  (480×240) into `docs/screens/`.  Run with `python scripts/render_screens.py`.  Requires Pillow.
 
 ### Verification Pass (v0.4.8) — Self-Test Results
 

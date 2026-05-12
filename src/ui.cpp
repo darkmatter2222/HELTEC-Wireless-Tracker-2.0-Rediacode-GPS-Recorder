@@ -119,8 +119,12 @@ void Ui::onLongPress() {
         case SCREEN_STATS:
             pendingAction_ = ACTION_START_PICKER;
             break;
+        case SCREEN_GPS:
         case SCREEN_STORAGE:
-            // v0.4.0: recording is always-on. Long-press on STORAGE is a no-op.
+            // Recording is always-on so long-press here is harmless.
+            // Treat it the same as short-press so a slow finger still navigates.
+            screen_ = (Screen)((screen_ + 1) % SCREEN_NORMAL_COUNT);
+            forceFullRedraw_ = true;
             break;
         case SCREEN_PICKER:
             if (pickerCursor_ >= (int)pickList_.size()) {
@@ -253,9 +257,10 @@ void Ui::renderHeader() {
     char bbuf[12];
     if (vbatPct_ >= 0) snprintf(bbuf, sizeof(bbuf), "BAT %3d%%", vbatPct_);
     else               snprintf(bbuf, sizeof(bbuf), "BAT --%%");
+    // v0.4.9: green >= 40%, amber 20-39%, red < 20%, dim = unknown.
     uint16_t bcol = (vbatPct_ < 0) ? COL_DIM
                   : (vbatPct_ < 20 ? COL_RED
-                                   : (vbatPct_ < 40 ? COL_AMBER : COL_FG));
+                  : (vbatPct_ < 40 ? COL_AMBER : COL_GREEN));
     field(2, 84, 2, 54, 8, bbuf, bcol, COL_HEADER, 1);
 
     // Recording dot: always draw the circle so the position is always visible.
@@ -417,21 +422,27 @@ void Ui::renderStorage() {
 
     const bool rec = store_->isRecording();
     const bool fix = gps_ && gps_->hasFix();
-    field(30, 4, 14, 50, 8, "REC", COL_DIM, COL_BG, 1);
+    field(30, 4, 14, 24, 8, "REC", COL_DIM, COL_BG, 1);
     // v0.4.0: "AUTO" replaces ON/OFF since recording is no longer user-toggled.
     // GREEN  = day file open AND GPS fix (samples being written)
     // AMBER  = day file open but no GPS fix right now (samples being dropped)
     // DIM    = waiting for the first valid GPS sample to open today's file
-    const char*    autoLabel = rec ? (fix ? "AUTO ok" : "AUTO -gps") : "AUTO ...";
+    // Labels are <= 7 chars (7 * 6 = 42px) so they fit in the 50px field
+    // without overlapping the adjacent "Samp" field.
+    // "NO GPS" replaces the old "AUTO -gps" which was 9 chars and bled into
+    // the sample-count field.
+    const char*    autoLabel = rec ? (fix ? "AUTO ok" : "NO GPS") : "WAIT...";
     const uint16_t autoCol   = rec ? (fix ? COL_GREEN : COL_AMBER) : COL_DIM;
-    field(31, 36, 14, 80, 8, autoLabel, autoCol, COL_BG, 1);
+    field(31, 30, 14, 50, 8, autoLabel, autoCol, COL_BG, 1);
 
-    // v0.4.6: show lifetime samples (never resets on rotate/upload) so the count
-    // doesn't appear to "drop" the moment Wi-Fi syncs. The user freaked when they
-    // saw 326 -> 0 right after a successful upload; that was just rotateForUpload()
-    // resetting sampleCount_. lifetimeSamples() keeps climbing across boot.
-    snprintf(buf, sizeof(buf), "Samp %lu", (unsigned long)store_->lifetimeSamples());
-    field(32, 80, 14, 76, 8, buf, COL_FG, COL_BG, 1);
+    // v0.4.9: show sampleCount() not lifetimeSamples().  lifetimeSamples was
+    // chosen to avoid a user seeing 326->0 on upload; but now users *want* the
+    // counter to show "how many samples are on the device now" so they know when
+    // the last upload cycle cleared everything.  sampleCount() resets to 0 when
+    // rotateForUpload() renames the active file to .up.csv, matching the point
+    // where Disk usage also drops to near-zero.
+    snprintf(buf, sizeof(buf), "Samp %lu", (unsigned long)store_->sampleCount());
+    field(32, 82, 14, 74, 8, buf, COL_FG, COL_BG, 1);
 
     if (rec) {
         snprintf(buf, sizeof(buf), "Day %s", store_->activeId().c_str());
@@ -460,8 +471,17 @@ void Ui::renderStorage() {
         prevPct = pct;
     }
 
-    snprintf(buf, sizeof(buf), "Files on disk: %d", store_->sessionCount());
-    field(35, 4, 58, 156, 8, buf, COL_DIM, COL_BG, 1);
+
+
+    // v0.4.9: "Pending" shows files awaiting upload (total - active), colored
+    // green when clean, amber when data is queued.  Replaced the old
+    // "Files on disk: N" label which was confusing to users.
+    const int rawPending = (int)store_->sessionCount() - (store_->isRecording() ? 1 : 0);
+    const int pending    = rawPending < 0 ? 0 : rawPending;
+    snprintf(buf, sizeof(buf), "Pending: %d", pending);
+    field(35, 4, 58, 156, 8, buf,
+          pending > 0 ? COL_AMBER : COL_GREEN,
+          COL_BG, 1);
 
     // v0.4.7: granular Wi-Fi state. The previous "busy = uploading..." lied
     // to the user during the 12-second connect attempts (most of which fail
