@@ -67,11 +67,34 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("tracker-ingest")
 
 MONGO_URI         = os.getenv("MONGO_URI", "mongodb://mongo:27017")
+
+def _redact_mongo_uri(uri: str) -> str:
+    """Strip the password from a mongodb:// URI for logging / API responses.
+
+    Returns e.g. 'mongodb://ryan:***@host:27017/?authSource=admin' when input has
+    'mongodb://ryan:Welcome123%21@host:27017/?authSource=admin'. Leaves
+    credential-free URIs untouched.
+    """
+    try:
+        # Find '://user:password@' segment and replace password with '***'.
+        scheme_end = uri.find("://")
+        if scheme_end < 0:
+            return uri
+        at = uri.find("@", scheme_end + 3)
+        if at < 0:
+            return uri
+        creds = uri[scheme_end + 3:at]
+        colon = creds.find(":")
+        if colon < 0:
+            return uri  # no password
+        return uri[:scheme_end + 3] + creds[:colon] + ":***" + uri[at:]
+    except Exception:
+        return "<redacted>"
 MONGO_DB          = os.getenv("MONGO_DB", "radiacode")
 SAMPLES_COLL      = os.getenv("MONGO_SAMPLES_COLLECTION", "tracker_samples")
 SESSIONS_COLL     = os.getenv("MONGO_SESSIONS_COLLECTION", "tracker_sessions")
 BACKUPS_COLL      = "tracker_backups"    # telemetry: one doc per backup attempt
-API_VERSION       = "0.5.1"
+API_VERSION       = "0.5.2"
 MAX_BODY_BYTES    = int(os.getenv("MAX_BODY_BYTES", str(8 * 1024 * 1024)))   # 8 MB
 INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "1000"))
 BACKUP_DIR        = os.getenv("BACKUP_DIR", "/backups")  # host-mounted volume
@@ -86,7 +109,7 @@ MIN_VALID_TS_MS = 1_577_836_800_000  # 2020-01-01 00:00:00 UTC
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    log.info("connecting to mongo at %s (db=%s)", MONGO_URI, MONGO_DB)
+    log.info("connecting to mongo at %s (db=%s)", _redact_mongo_uri(MONGO_URI), MONGO_DB)
     client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
     # Force connect now so startup fails fast if mongo is unreachable.
     client.admin.command("ping")
@@ -275,7 +298,7 @@ def info():
     return {
         "version":  API_VERSION,
         "mongo": {
-            "uri":       MONGO_URI,
+            "uri":       _redact_mongo_uri(MONGO_URI),
             "db":        MONGO_DB,
             "samples":   samples.estimated_document_count(),
             "sessions":  sessions.estimated_document_count(),

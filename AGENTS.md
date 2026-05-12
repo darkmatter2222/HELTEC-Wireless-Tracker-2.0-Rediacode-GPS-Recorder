@@ -831,6 +831,48 @@ Otherwise, iterate to completion.
 
 ## Lessons Learned — Do Not Re-Litigate
 
+### Mongo Credentials Leaked Through `/info` Response and Container Logs (API v0.5.2)
+
+- **Symptom**: `GET /info` (reachable through the viewer proxy at
+  `https://susmannet.duckdns.org/api/info` once HTTP basic auth succeeds, and
+  directly on the LAN at `http://192.168.86.48:8030/info`) returned the full
+  MongoDB connection string verbatim, including the URL-encoded password:
+  ```
+  "uri": "mongodb://ryan:Welcome123%21@host.docker.internal:27017/?authSource=admin"
+  ```
+  The same string was also written to the container's stdout at startup by
+  `log.info("connecting to mongo at %s ...", MONGO_URI, ...)`, so anyone with
+  access to `docker logs vega-tracker-ingest` could see it.
+- **Why it's a problem**: defense-in-depth failure. HTTP basic auth only
+  guards the public DuckDNS path. Anyone on the LAN can hit `:8030/info`
+  unauthenticated; anyone with shell access to the server can `docker logs`;
+  any future endpoint that bypasses the proxy would also leak. Putting
+  passwords in API responses is a textbook OWASP A02 (Cryptographic Failures)
+  / A09 (Logging Failures) finding.
+- **Fix (API v0.5.2)** in `api/vega-tracker-ingest/tracker_ingest_api.py`:
+  - Added `_redact_mongo_uri(uri)` helper that splits on `://` and `@`, finds
+    the `user:password` segment, and replaces the password with `***`.
+    Implementation does not use a regex so it's safe against malformed input
+    and never raises (falls back to `"<redacted>"` on any exception).
+  - Replaced `"uri": MONGO_URI` in the `/info` response with
+    `"uri": _redact_mongo_uri(MONGO_URI)`.
+  - Replaced `MONGO_URI` in the startup `log.info(...)` call with
+    `_redact_mongo_uri(MONGO_URI)`.
+  - The `MongoClient(MONGO_URI, ...)` call and the two `--uri=...` arguments
+    passed to `mongodump` / `mongorestore` subprocesses (lines 113, 1117,
+    1187) are left as-is — those need the real credentials, and they don't
+    cross any trust boundary.
+- **Verification after deploy**:
+  ```
+  $ curl -s http://192.168.86.48:8030/info
+  {"version":"0.5.2","mongo":{"uri":"mongodb://ryan:***@host.docker.internal:27017/?authSource=admin", ...}}
+  ```
+- **Rule for future API edits**: never return `MONGO_URI` (or any other
+  credentialed connection string) in an API response, regardless of which
+  auth layer sits in front of it. Always pipe sensitive strings through a
+  redact helper before logging or serializing. Treat any new env var with
+  `password`, `secret`, `key`, or `token` in its name the same way.
+
 ### Session `deviceId` Always Null Because Firmware Never Sends X-Device-Id (API v0.5.1)
 
 - **Symptom**: `GET /sessions` showed `deviceId: null` on every newly-ingested
