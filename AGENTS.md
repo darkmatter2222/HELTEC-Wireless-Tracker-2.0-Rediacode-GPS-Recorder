@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.6.0`.
+Current: `0.7.1`.
 
 ---
 
@@ -292,7 +292,7 @@ Empty `WIFI_SSID` or `INGEST_URL` disables the Wi-Fi uploader silently.
 - Primary: SdFat on FSPI (GPIO 4-7)
 - Fallback: LittleFS (5.9 MB partition) — currently disabled
   (`cfg::SD_REQUIRED = true`), failure is a hard error on screen
-- CSV schema: `timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop`
+- CSV schema: `timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event`
 - Sessions are append-only; `removeSession()` refuses to delete active session
 - Serial log on start/stop: `[REC] START: id=...` / `[REC] STOP: id=... samples=N`
 
@@ -758,8 +758,10 @@ python scripts\capture_boot.py
 
 CSV on device (and what gets POSTed to the API):
 ```
-timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop
-1746114660123,0.142,12.0,47.6062,-122.3321,5243066020F4,48.23,267.3,12.4,1.20
+timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event
+1746114660123,0.142,12.0,47.6062,-122.3321,5243066020F4,48.23,267.3,12.4,1.20,
+1746114673500,,,,,5243066020F4,,,,,GPS_LOST
+1746114692100,,,,,5243066020F4,,,,,GPS_REGAINED
 ```
 
 - `timestampMs`: Unix epoch ms (GPS-derived via `bestEpochMs()`)
@@ -835,6 +837,114 @@ Otherwise, iterate to completion.
 ---
 
 ## Lessons Learned — Do Not Re-Litigate
+
+### Wi-Fi Connect TASK_WDT Panic Boot Loop When Out of Range (v0.7.1) — CRITICAL
+
+- **User-reported symptom**: device boot-looped continuously the entire day
+  the moment the user left their home Wi-Fi range. Once they got back into
+  range hours later, it kept rebooting. Was unusable.
+- **Smoking-gun log** pulled from `/system.log` after the user got back:
+  ```
+  10441,WIFI,vbatMv=3736,cycle_start
+  35886,WIFI,vbatMv=3740,connect_fail
+  4624,BOOT,TASK_WDT,raw0=12,raw1=12,vbatMv=-1,lastUptimeMs=35886,wifiInFlight=0,lastPhase=MAIN_IDLE
+  ```
+  Pattern repeated every ~35 s for ~hundreds of cycles. `raw0=12` is
+  ESP32-S3 reset reason `TG0WDT_SYS_RESET` (Task Watchdog Group 0 system
+  reset). vbat ~3700 mV throughout, so this was NOT a brown-out.
+- **Root cause**: this was a **regression in v0.6.0**. That release added the
+  30-second `esp_task_wdt` and subscribed the Wi-Fi uploader task to it,
+  but `WifiUploader::connectWifi()` contains a 25-second busy-wait
+  (`while WiFi.status() != WL_CONNECTED && deadline ...`) that **never
+  called `esp_task_wdt_reset()`**. As soon as the user left Wi-Fi range
+  with queued samples, every cycle hit the 25 s connect timeout. The
+  rotate + list logic before connect plus the 25 s wait pushed total
+  runtime past 30 s -> WDT panic -> reboot. Backoff did not help because
+  every fresh boot tried to upload again immediately.
+  Same hole existed in `uploadOne()` around `HTTPClient::sendRequest`,
+  which can block up to 30 s on the server response. A slow upload would
+  also WDT-panic.
+- **Fix (v0.7.1)** in [src/wifi_uploader.cpp](src/wifi_uploader.cpp):
+  - `connectWifi()` busy-wait now calls `esp_task_wdt_reset()` every
+    iteration (~125 pets per 25 s).
+  - `uploadOne()` calls `esp_task_wdt_reset()` immediately before AND
+    after `http.sendRequest`/`http.POST`. Cannot pet during the request
+    itself (HTTPClient has no callback hook), so the WDT timeout must
+    cover the full 30 s POST timeout cleanly.
+  - `runOnce()` also pets between successive file uploads in a multi-
+    file backlog and immediately after `disconnectWifi()`.
+- **Belt-and-suspenders** in [src/config.h](src/config.h): bumped
+  `TASK_WDT_TIMEOUT_S` from 30 -> **60** so a slow 30 s HTTP POST has
+  pure headroom on top of the new pet calls. A real wedge (BLE callback
+  hung, mutex deadlock, etc.) is still caught quickly enough.
+- **Verification**: flashed v0.7.1, cleared `/system.log`, watched device
+  uptime climb past 280 s indoors with no boot events. 65/65 native +
+  12/12 device tests pass.
+- **Rule for future code**: **any blocking call longer than `TASK_WDT_TIMEOUT_S / 2`
+  must call `esp_task_wdt_reset()` either inside its loop or immediately
+  before/after the call.** Wi-Fi connect, HTTP requests, large file I/O,
+  long `vTaskDelay` (>20 s in chunks), and BLE scans all qualify. When
+  adding a new long-blocking subsystem, audit it for WDT pet calls
+  *before* enabling the WDT subscription on its task.
+
+### GPS Gap Event Rows — Don't Draw Phantom Lines Across Missing Track (v0.7.0)
+
+- **User-reported symptom**: in low-signal areas the viewer drew straight
+  diagonal lines connecting two GPS fixes that were minutes apart, implying
+  paths the rider never took. Samples without GPS were silently dropped on
+  the firmware so the viewer just connected whatever fixes did arrive.
+- **End-to-end fix (firmware + API + viewer)**:
+  - **CSV schema extended from 10 -> 11 columns**: added trailing `event`
+    column. Normal samples leave it empty; transition rows have just
+    timestamp, deviceId, and tag (`GPS_LOST` or `GPS_REGAINED`), all other
+    fields empty. Header line updated in both SdFat and LittleFS code paths.
+  - **`SessionStore::appendEvent(ts, tag, deviceId)`** in
+    [src/session_store.cpp](src/session_store.cpp): writes one event row to
+    the active day file. Gated on `recording_ && activeId_ == day` -- we
+    never create an orphan day file just for an event because without any
+    real samples there is no trip to annotate.
+  - **Transition detector** in [src/main.cpp](src/main.cpp) (after
+    `gWifi.tick()`): static `prevHasGps` + `gpsInitDone` flags. On every
+    main-loop iteration, when `gGps.hasFix()` flips, we call
+    `gStore.appendEvent(gGps.bestEpochMs(), "GPS_LOST"/"GPS_REGAINED", devId)`.
+    First-boot observation is silent (no prior state). Uses `bestEpochMs()`
+    which keeps incrementing via `millis()` after a fix is lost, so the
+    GPS_LOST timestamp is meaningful even though `hasFix()` is false.
+    Firmware does **no** debouncing on purpose -- every transition emits a
+    row; the viewer is responsible for any visualisation policy.
+  - **Ingest API (v0.6.0)** in
+    [api/vega-tracker-ingest/tracker_ingest_api.py](api/vega-tracker-ingest/tracker_ingest_api.py):
+    parses column 10 (`event`) when present and stores it sparsely as
+    `doc["event"]`. Documents without an event field continue to behave
+    exactly as before. `loc` GeoJSON Point is omitted on event rows because
+    lat/lng are empty -- so they don't show up in geo queries. The unique
+    `{sessionId, timestampMs}` index handles the (theoretical) collision
+    where a normal sample shares the exact millisecond of a transition row.
+  - **Viewer** in [web/vega-tracker-viewer/src/App.jsx](web/vega-tracker-viewer/src/App.jsx):
+    `compactRows` carries the `event` field through. `traces` builder walks
+    raw rows in time order with a `pendingGap` flag -- whenever a `GPS_LOST`
+    is observed, the next geo point gets `gapBefore = true`. `GPS_REGAINED`
+    is informational only (no flag needed -- the gap is already marked).
+    Track-mode and Arrows-track-underlay polyline loops now `continue` when
+    `b.gapBefore` is true, leaving a visible break in the line. Dots / Hex /
+    Arrows-dot modes are unaffected because they render individual points.
+- **Tests**:
+  - New `test_gps_transition_native` (9 cases): pure-function transition
+    detector covering first-observation, steady-state, both transitions,
+    full lose-regain-lose sequence, cold-boot-without-fix-then-acquire,
+    and rapid flap.
+  - `test_csv_schema_native` extended (+4 cases): 11-column header, full
+    data row, event row field count, event row field extraction.
+  - Native total: 65 tests pass (was 52).
+  - On-device: `python scripts\test_device.py --port COM4` -> 12 passed,
+    1 skipped (sample_count_consistency skip is the expected "no GPS fix
+    indoors" branch -- by design `lifetimeSamples` stays at 0 until an
+    outdoor fix is acquired).
+- **Rule for future schema extensions**: always append new columns at the
+  end and write an empty value for older rows that don't have the field.
+  The API parser must guard each new column with `len(row) > N` so old
+  uploads keep working. The CSV header line must be updated in *both*
+  backend write sites (SdFat and LittleFS).
 
 ### Reliability Hardening Pass — Never-Give-Up Reconnect, WDT, Wear Reduction (v0.6.0)
 

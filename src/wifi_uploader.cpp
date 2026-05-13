@@ -191,6 +191,13 @@ bool WifiUploader::connectWifi() {
     const uint32_t connectStart = millis();
     const uint32_t deadline = connectStart + secrets::WIFI_CONNECT_TIMEOUT_MS;
     while (WiFi.status() != WL_CONNECTED && (int32_t)(deadline - millis()) > 0) {
+        // v0.7.1: pet the task watchdog every iteration. The 25 s connect
+        // wait was the longest blocking call in the whole firmware and was
+        // NOT pet-ing the WDT, so the moment the user left Wi-Fi range the
+        // 30 s WDT (v0.6.0) panicked every cycle -> hard boot loop until
+        // they came back into range. With the WDT also bumped to 60 s in
+        // config.h this gives plenty of margin.
+        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(200));
     }
     if (WiFi.status() != WL_CONNECTED) {
@@ -275,12 +282,20 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
 
     const uint32_t t0 = millis();
     int code;
+    // v0.7.1: pet the WDT immediately before AND after the HTTP request.
+    // sendRequest()/POST can block for up to http.setTimeout() (30 s) on a
+    // slow link; without these resets a slow upload would WDT-panic. We do
+    // not (and cannot) pet during the request itself because HTTPClient
+    // does not yield a callback hook. The 60 s WDT timeout in config.h is
+    // sized to cover the worst-case 30 s POST cleanly.
+    esp_task_wdt_reset();
     if (fileStream) {
         // Stream path: no heap allocation for body.
         code = http.sendRequest("POST", fileStream, fileSize);
     } else {
         code = http.POST((uint8_t*)body.c_str(), body.length());
     }
+    esp_task_wdt_reset();
     const String resp = (code > 0) ? http.getString() : String();
     http.end();
     store_->closeSessionStream();
@@ -393,10 +408,14 @@ uint32_t WifiUploader::runOnce() {
         }
         // Brief yield between files so BLE/UI tasks keep running.
         vTaskDelay(pdMS_TO_TICKS(50));
+        // v0.7.1: pet the WDT between files. A backlog of N files each
+        // taking up to 30 s would otherwise WDT-panic on the 2nd file.
+        esp_task_wdt_reset();
     }
 
     phase_ = (uint8_t)Phase::Disconnecting;
     disconnectWifi();
+    esp_task_wdt_reset();
     busy_ = false;
     phase_ = (uint8_t)Phase::Idle;
     event_log::markWifiInFlight(false);
