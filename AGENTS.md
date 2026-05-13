@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.5.0`.
+Current: `0.6.0`.
 
 ---
 
@@ -835,6 +835,57 @@ Otherwise, iterate to completion.
 ---
 
 ## Lessons Learned — Do Not Re-Litigate
+
+### Reliability Hardening Pass — Never-Give-Up Reconnect, WDT, Wear Reduction (v0.6.0)
+
+- **Design principle**: "As long as it has power, it's reliable." The firmware
+  must never permanently halt auto-reconnect, never silently hang, and never
+  burn flash by writing the same NVS value 120 times per hour.
+- **Removed `autoRetryHalted` permanent halt** in [src/radiacode.cpp](src/radiacode.cpp).
+  The flag previously set `true` on (a) short-lived links <90 s, (b) service
+  not found, (c) char discovery timeout. All three sites now just log a warning
+  and let the auto-scan loop keep trying forever. The auto-mode early-return
+  on `g.autoRetryHalted` was also deleted. The flag itself is kept for ABI
+  compatibility but is never written.
+- **Uncapped the 200-attempt limit** in `connectToAddress`. Logs a milestone
+  every 100 attempts so long-stuck cycles remain visible.
+- **BLE link-health watchdog** added at the end of `RadiaCode::loop()`. If
+  `state == Ready` but `(now - lastReadingMs) > cfg::RADIACODE_LINK_STALL_MS`
+  (15 s), force `client->disconnect()` so the auto-scan loop can recover.
+  Catches half-closed channels where NimBLE's supervision timeout extends.
+- **Task watchdog** (30 s, panic-on-timeout) added in [src/main.cpp](src/main.cpp)
+  `setup()` and subscribed in the Wi-Fi uploader's `taskLoop` in
+  [src/wifi_uploader.cpp](src/wifi_uploader.cpp). The uploader's backoff sleep
+  is now chunked into ≤20 s slices so the WDT stays petted during long
+  out-of-range stretches.
+- **GPS UART RX buffer 256 B → 2 KB** in [src/gps_module.cpp](src/gps_module.cpp).
+  `setRxBufferSize(cfg::GPS_RX_BUFFER_BYTES)` is called BEFORE `begin()` (and
+  again on every fallback-baud retry). Long BLE callbacks or flash flushes
+  no longer corrupt NMEA sentences via 22 ms FIFO overflow.
+- **NVS dose write gate** in [src/main.cpp](src/main.cpp). New helper
+  `shouldSaveDose(current, lastSaved, msSinceLastSave, deltaThreshold,
+  maxInterval)` returns true only if the dose changed by ≥ 0.5 µSv OR
+  5 min ceiling elapsed. Reduces flash writes from ~120/hour to ~6/hour
+  in typical idle use (~20x reduction; ~50k writes/year vs. 1M+).
+- **`SessionStore::Lock`** in [src/session_store.cpp](src/session_store.cpp)
+  now uses `xSemaphoreTake(s_, pdMS_TO_TICKS(5000))` instead of
+  `portMAX_DELAY`. Logs a warning on timeout and proceeds without the lock
+  rather than blocking forever. Any true deadlock is now caught by the WDT.
+- **New native unit tests** (52 total now pass on `pio test -e native`):
+  - `test_dose_persistence_native` — 9 tests on `shouldSaveDose` decision.
+  - `test_link_health_native` — 7 tests on `bleLinkStalled` decision
+    (including the `millis()` wraparound edge case).
+- **On-device verification** after flashing v0.6.0:
+  - Boot log: `[BOOT] task_wdt armed: 30s, panic-on-timeout`, FW v0.6.0.
+  - Pinned BLE peer (`52:43:06:e0:04:2d`, RadiaCode-110) auto-connected and
+    reached `state=4` (Ready) in 7.3 s after boot with no manual interaction.
+  - `python scripts\test_device.py --port COM4`: **12 passed, 1 skipped**
+    (skip is the expected "no GPS fix indoors" branch). 30 s loop-latency
+    test had zero stalls — the new WDT does NOT false-trip and the
+    link-stall watchdog does NOT disconnect healthy links.
+- **Rule**: any future change that would set a "permanent halt" flag on the
+  BLE state machine is wrong by design. Use exponential backoff inside the
+  retry loop instead.
 
 ### Viewer Deploy Wiped Basic-Auth Credentials Because Local .env and docker-compose.yml Were Missing TRACKER_USER / TRACKER_PASS (viewer May 2026)
 
