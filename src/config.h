@@ -132,7 +132,7 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "0.7.0";
+constexpr const char* FW_VERSION = "0.7.1";
 
 // ---------------- Battery / Wi-Fi safety gate (v0.4.2) -----------------------
 // Skip the Wi-Fi upload cycle entirely if VBAT is below this threshold (V).
@@ -191,7 +191,16 @@ constexpr uint32_t DOSE_NVS_MAX_INTERVAL_MS = 300000; // 5 min hard ceiling
 // Wraps the Arduino loop task and the Wi-Fi uploader task in esp_task_wdt.
 // A wedged subsystem (deadlocked semaphore, infinite BLE callback, etc.)
 // will trigger a clean panic + reboot rather than hanging silently.
-constexpr uint32_t TASK_WDT_TIMEOUT_S = 30;
+//
+// v0.7.1: bumped 30s -> 60s. The Wi-Fi connect timeout is 25s, the HTTP
+// upload timeout is 30s, and a single rotate+list+connect+upload cycle on
+// a slow connection can plausibly take ~50s in the worst case. The 30s
+// limit caused a hard boot loop the moment the user left Wi-Fi range with
+// queued samples: every cycle hit the 25s connect timeout -> WDT panic ->
+// reboot -> repeat forever. The uploader now also pets the WDT inside
+// connectWifi() and uploadOne(), so 60s is pure headroom for any path the
+// pet calls don't cover. A real wedge is still caught quickly enough.
+constexpr uint32_t TASK_WDT_TIMEOUT_S = 60;
 
 // ---------------- GPS reliability (v0.6.0) ----------------------------------
 // Default ESP32 HardwareSerial RX FIFO is 256 bytes -- at 115200 baud that

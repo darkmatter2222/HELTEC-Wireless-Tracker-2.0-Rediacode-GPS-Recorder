@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.7.0`.
+Current: `0.7.1`.
 
 ---
 
@@ -837,6 +837,55 @@ Otherwise, iterate to completion.
 ---
 
 ## Lessons Learned — Do Not Re-Litigate
+
+### Wi-Fi Connect TASK_WDT Panic Boot Loop When Out of Range (v0.7.1) — CRITICAL
+
+- **User-reported symptom**: device boot-looped continuously the entire day
+  the moment the user left their home Wi-Fi range. Once they got back into
+  range hours later, it kept rebooting. Was unusable.
+- **Smoking-gun log** pulled from `/system.log` after the user got back:
+  ```
+  10441,WIFI,vbatMv=3736,cycle_start
+  35886,WIFI,vbatMv=3740,connect_fail
+  4624,BOOT,TASK_WDT,raw0=12,raw1=12,vbatMv=-1,lastUptimeMs=35886,wifiInFlight=0,lastPhase=MAIN_IDLE
+  ```
+  Pattern repeated every ~35 s for ~hundreds of cycles. `raw0=12` is
+  ESP32-S3 reset reason `TG0WDT_SYS_RESET` (Task Watchdog Group 0 system
+  reset). vbat ~3700 mV throughout, so this was NOT a brown-out.
+- **Root cause**: this was a **regression in v0.6.0**. That release added the
+  30-second `esp_task_wdt` and subscribed the Wi-Fi uploader task to it,
+  but `WifiUploader::connectWifi()` contains a 25-second busy-wait
+  (`while WiFi.status() != WL_CONNECTED && deadline ...`) that **never
+  called `esp_task_wdt_reset()`**. As soon as the user left Wi-Fi range
+  with queued samples, every cycle hit the 25 s connect timeout. The
+  rotate + list logic before connect plus the 25 s wait pushed total
+  runtime past 30 s -> WDT panic -> reboot. Backoff did not help because
+  every fresh boot tried to upload again immediately.
+  Same hole existed in `uploadOne()` around `HTTPClient::sendRequest`,
+  which can block up to 30 s on the server response. A slow upload would
+  also WDT-panic.
+- **Fix (v0.7.1)** in [src/wifi_uploader.cpp](src/wifi_uploader.cpp):
+  - `connectWifi()` busy-wait now calls `esp_task_wdt_reset()` every
+    iteration (~125 pets per 25 s).
+  - `uploadOne()` calls `esp_task_wdt_reset()` immediately before AND
+    after `http.sendRequest`/`http.POST`. Cannot pet during the request
+    itself (HTTPClient has no callback hook), so the WDT timeout must
+    cover the full 30 s POST timeout cleanly.
+  - `runOnce()` also pets between successive file uploads in a multi-
+    file backlog and immediately after `disconnectWifi()`.
+- **Belt-and-suspenders** in [src/config.h](src/config.h): bumped
+  `TASK_WDT_TIMEOUT_S` from 30 -> **60** so a slow 30 s HTTP POST has
+  pure headroom on top of the new pet calls. A real wedge (BLE callback
+  hung, mutex deadlock, etc.) is still caught quickly enough.
+- **Verification**: flashed v0.7.1, cleared `/system.log`, watched device
+  uptime climb past 280 s indoors with no boot events. 65/65 native +
+  12/12 device tests pass.
+- **Rule for future code**: **any blocking call longer than `TASK_WDT_TIMEOUT_S / 2`
+  must call `esp_task_wdt_reset()` either inside its loop or immediately
+  before/after the call.** Wi-Fi connect, HTTP requests, large file I/O,
+  long `vTaskDelay` (>20 s in chunks), and BLE scans all qualify. When
+  adding a new long-blocking subsystem, audit it for WDT pet calls
+  *before* enabling the WDT subscription on its task.
 
 ### GPS Gap Event Rows — Don't Draw Phantom Lines Across Missing Track (v0.7.0)
 
