@@ -402,7 +402,7 @@ bool SessionStore::openDayFile_(const String& dayId) {
             return false;
         }
         if (!existed) {
-            f.println("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop");
+            f.println("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event");
         }
         f.close();
         if (existed) {
@@ -433,7 +433,7 @@ bool SessionStore::openDayFile_(const String& dayId) {
         return false;
     }
     if (!existed) {
-        f.println(F("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop"));
+        f.println(F("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event"));
     }
     f.close();
     if (existed) {
@@ -643,7 +643,7 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
     if (hdop       >= 0.f)     snprintf(hdp, sizeof(hdp), "%.2f", hdop);
 
     char line[cfg::MAX_LINE_BYTES];
-    int len = snprintf(line, sizeof(line), "%llu,%.6f,%.3f,%.7f,%.7f,%s,%s,%s,%s,%s\n",
+    int len = snprintf(line, sizeof(line), "%llu,%.6f,%.3f,%.7f,%.7f,%s,%s,%s,%s,%s,\n",
                        (unsigned long long)timestampMsFull,
                        uSvPerHour, cps, lat, lng, deviceId.c_str(),
                        spd, brg, alt, hdp);
@@ -680,6 +680,60 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
                       (unsigned)sampleCount_, activeId_.c_str(),
                       (unsigned)ESP.getFreeHeap());
     }
+}
+
+// =============================================================================
+// Public: appendEvent (v0.7.0)
+// Writes a GPS-state-transition event row. The day file must already be open
+// (i.e. at least one geo-tagged sample has been written today) -- otherwise
+// the event would not have a session to anchor to. We deliberately do NOT
+// open a day file just for an event; without any real samples there is no
+// trip to annotate.
+// =============================================================================
+void SessionStore::appendEvent(uint64_t timestampMsFull,
+                               const char* eventTag,
+                               const String& deviceId) {
+    if (!hasUsableBackend()) return;
+    if (!eventTag || !eventTag[0]) return;
+    constexpr uint64_t MIN_VALID_TS_MS = 1577836800000ULL;
+    if (timestampMsFull < MIN_VALID_TS_MS) return;
+
+    String day = dayIdFromEpochMs(timestampMsFull);
+    if (day.length() != 10) return;
+
+    Lock lk(mutex_);
+    // Only emit if a day file is already open today. If the user hasn't
+    // recorded any samples today yet, there is no trip to annotate -- the
+    // event would just create an orphan day file.
+    if (!recording_ || activeId_ != day) return;
+
+    // Schema: timestamp, uSv, cps, lat, lng, deviceId, speed, bearing, alt,
+    // hdop, event. Numerics are 0/empty; deviceId is preserved so the row
+    // can be associated with the same tracker.
+    char line[cfg::MAX_LINE_BYTES];
+    int len = snprintf(line, sizeof(line), "%llu,,,,,%s,,,,,%s\n",
+                       (unsigned long long)timestampMsFull,
+                       deviceId.c_str(), eventTag);
+    if (len <= 0) return;
+
+    String path = pathFor(activeId_);
+    if (backend_ == Backend::SdFat) {
+        FsFile f = gSdFat.open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND);
+        if (!f) { log_w("appendEvent: open failed"); return; }
+        f.write((const uint8_t*)line, (size_t)len);
+        f.close();
+    } else if (fs_) {
+        File f = fs_->open(path, "a");
+        if (!f) { log_w("appendEvent: open failed"); return; }
+        f.print(line);
+        f.close();
+    } else {
+        return;
+    }
+    ++sampleCount_;
+    ++lifetimeSamples_;
+    Serial.printf("[EVT] %s ts=%llu day=%s\n",
+                  eventTag, (unsigned long long)timestampMsFull, activeId_.c_str());
 }
 
 // =============================================================================

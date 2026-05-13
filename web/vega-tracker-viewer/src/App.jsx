@@ -283,6 +283,10 @@ function compactRows(raw) {
       brg:  r.bearingDeg ?? null,
       alt:  r.altitudeM  ?? null,
       hdop: r.hdop       ?? null,
+      // GPS_LOST / GPS_REGAINED transition marker (firmware 0.7.0+).
+      // Event rows have no lat/lng so they're filtered out of `points`,
+      // but their timestamps are used to break track polylines.
+      event: r.event ?? null,
     }));
 }
 
@@ -458,9 +462,27 @@ export default function App() {
         out.push({ id: s.sessionId, color: sessionColor(idx), points: null, loading: true });
         idx++; continue;
       }
-      const points = rows
-        .filter(r => r.lat != null && r.lng != null && !(r.lat === 0 && r.lng === 0))
-        .map(r => ({ ...r }));
+      const points = [];
+      // Build geo points in row order, marking `gapBefore` on any point that
+      // is preceded (in raw time order) by a GPS_LOST event since the prior
+      // geo point. Track-mode render skips segments where b.gapBefore is
+      // true, leaving a visible break instead of drawing a phantom straight
+      // line across the gap.
+      let pendingGap = false;
+      for (const r of rows) {
+        if (r.event === 'GPS_LOST') {
+          pendingGap = true;
+          continue;
+        }
+        if (r.event) continue;  // GPS_REGAINED or other non-sample events
+        if (r.lat == null || r.lng == null || (r.lat === 0 && r.lng === 0)) continue;
+        const p = { ...r };
+        if (pendingGap) {
+          p.gapBefore = true;
+          pendingGap = false;
+        }
+        points.push(p);
+      }
       out.push({ id: s.sessionId, color: sessionColor(idx), points, rows, meta: s, idx });
       idx++;
     }
@@ -1015,6 +1037,9 @@ export default function App() {
             const segs = [];
             for (let i = 1; i < t.filtered.length; i++) {
               const a = t.filtered[i - 1], b = t.filtered[i];
+              // GPS gap: firmware logged GPS_LOST between a and b. Don't draw
+              // a phantom straight line across the missing track segment.
+              if (b.gapBefore) continue;
               segs.push(
                 <Polyline key={`${t.id}-${i}`}
                   positions={[[a.lat, a.lng], [b.lat, b.lng]]}
@@ -1067,6 +1092,7 @@ export default function App() {
             const segs = [];
             for (let i = 1; i < t.filtered.length; i++) {
               const a = t.filtered[i - 1], b = t.filtered[i];
+              if (b.gapBefore) continue;
               segs.push(
                 <Polyline key={`${t.id}-${i}`}
                   positions={[[a.lat, a.lng], [b.lat, b.lng]]}

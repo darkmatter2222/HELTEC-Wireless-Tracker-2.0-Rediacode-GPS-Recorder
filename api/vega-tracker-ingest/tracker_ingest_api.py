@@ -94,7 +94,7 @@ MONGO_DB          = os.getenv("MONGO_DB", "radiacode")
 SAMPLES_COLL      = os.getenv("MONGO_SAMPLES_COLLECTION", "tracker_samples")
 SESSIONS_COLL     = os.getenv("MONGO_SESSIONS_COLLECTION", "tracker_sessions")
 BACKUPS_COLL      = "tracker_backups"    # telemetry: one doc per backup attempt
-API_VERSION       = "0.5.2"
+API_VERSION       = "0.6.0"
 MAX_BODY_BYTES    = int(os.getenv("MAX_BODY_BYTES", str(8 * 1024 * 1024)))   # 8 MB
 INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "1000"))
 BACKUP_DIR        = os.getenv("BACKUP_DIR", "/backups")  # host-mounted volume
@@ -214,6 +214,11 @@ def _parse_csv(body: str, session_id: str, header_device_id: str | None,
         bearing_deg = _safe_float(row[7]) if len(row) > 7 else None
         altitude_m  = _safe_float(row[8]) if len(row) > 8 else None
         hdop_val    = _safe_float(row[9]) if len(row) > 9 else None
+        # Column 10 (event) added in firmware 0.7.0 -- GPS_LOST / GPS_REGAINED
+        # transition markers. Normal samples leave this empty; event rows have
+        # no lat/lng/dose values, only a timestamp + deviceId + tag. Stored on
+        # the sample doc so the viewer can split polylines at gaps.
+        event_tag   = row[10].strip() if len(row) > 10 and row[10].strip() else None
 
         if ts is None:
             rejected += 1
@@ -244,6 +249,7 @@ def _parse_csv(body: str, session_id: str, header_device_id: str | None,
         if bearing_deg is not None: doc["bearingDeg"] = bearing_deg
         if altitude_m  is not None: doc["altitudeM"]  = altitude_m
         if hdop_val    is not None: doc["hdop"]        = hdop_val
+        if event_tag   is not None: doc["event"]       = event_tag
         if lat is not None and lng is not None and not (lat == 0.0 and lng == 0.0):
             doc["loc"] = {"type": "Point", "coordinates": [lng, lat]}
         out.append(doc)

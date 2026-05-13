@@ -90,6 +90,15 @@ public:
                 float altitudeM  = -9999.f,
                 float hdop       = -1.f);
 
+    // v0.7.0: Append a GPS-state-transition event row to the active day file.
+    // Event rows occupy the 11th CSV column (`event`); all other fields
+    // except timestamp and deviceId are empty. Bypasses the no-GPS gate in
+    // append() because the entire point of GPS_LOST is "we had no fix".
+    // Tag should be a short ASCII constant like "GPS_LOST" or "GPS_REGAINED".
+    void appendEvent(uint64_t timestampMsFull,
+                     const char* eventTag,
+                     const String& deviceId);
+
     // Storage stats
     size_t totalBytes() const;
     size_t usedBytes() const;

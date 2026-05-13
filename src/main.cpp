@@ -607,6 +607,39 @@ void loop() {
     gRadia.loop();
     gWifi.tick();
 
+    // v0.7.0: GPS fix transition tracking. When the device walks under a
+    // bridge / into a building / loses sky view, we don't want the viewer
+    // to draw a straight line from the last good fix to wherever we
+    // re-emerge. Emit an explicit GPS_LOST event row at the moment of
+    // transition (and GPS_REGAINED when the fix comes back) so the viewer
+    // can break its polyline cleanly at the gap.
+    //
+    // Both events are gated on (a) we have a usable UTC timestamp and
+    // (b) recording is already in progress today (no point creating an
+    // orphan day file just to record "we never had a fix today").
+    {
+        static bool prevHasGps = false;
+        static bool gpsInitDone = false;
+        const bool curHasGps = gGps.hasFix();
+        if (!gpsInitDone) {
+            // First observation post-boot. Don't emit -- we have no prior
+            // state to transition from. Just record the starting condition.
+            prevHasGps = curHasGps;
+            gpsInitDone = true;
+        } else if (curHasGps != prevHasGps) {
+            const uint64_t ts = gGps.bestEpochMs();
+            constexpr uint64_t MIN_VALID_TS_MS = 1577836800000ULL;
+            if (ts >= MIN_VALID_TS_MS && gStore.isRecording()) {
+                String id = gRadia.peerAddress();
+                id.replace(":", "");
+                gStore.appendEvent(ts,
+                                   curHasGps ? "GPS_REGAINED" : "GPS_LOST",
+                                   id);
+            }
+            prevHasGps = curHasGps;
+        }
+    }
+
     // Drain pending sample from BLE callback. Filesystem work runs here
     // (Core 1, main loop stack), not on the NimBLE host task.
     PendingSample s;
