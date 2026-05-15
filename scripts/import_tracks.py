@@ -24,15 +24,16 @@ This script:
      POST /ingest/csv -- the unique {sessionId, timestampMs} index makes
      re-runs idempotent so it's safe to interrupt and restart.
 
-CSV row layout we emit (10 columns -- event column 11 always empty):
+CSV row layout we emit (12 columns -- firmware v0.8.0 schema):
 
     timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,
-    speedKph,bearingDeg,altitudeM,hdop
+    speedKph,bearingDeg,altitudeM,hdop,event,accuracyM
 
 The track exports do not include speed / bearing / altitude / HDOP, so
-columns 7-10 are all empty.  Accuracy is in metres which is fundamentally
-different from HDOP (unitless), so we deliberately do NOT map it -- pretending
-otherwise would corrupt downstream stats.
+columns 7-10 are all empty. Accuracy is in metres which lives in the new
+`accuracyM` column (firmware v0.8.0+); HDOP is left empty on these rows.
+The /admin/backfill-accuracy endpoint can derive hdop = accuracyM / 5.0
+after import.
 
 Device identification: the serial number in the file header (e.g.
 "RC-110-001069") is normalised to "RC110001069" and used as both deviceId
@@ -113,7 +114,14 @@ def parse_track_file(path: Path) -> tuple[str | None, list[dict]]:
                 # cols[1] is the human-readable UTC string; we trust ticks.
                 lat = float(cols[2])
                 lng = float(cols[3])
-                # cols[4] = accuracy in metres, not mappable to HDOP -- skipped.
+                # cols[4] = accuracy in metres. Stored directly as `accuracyM`
+                # in the v0.8.0 schema. The firmware-side `hdop` is left empty
+                # for these rows; the /admin/backfill-accuracy endpoint can
+                # derive a synthetic hdop = accuracyM / 5.0 if needed.
+                try:
+                    acc_m = float(cols[4])
+                except ValueError:
+                    acc_m = None
                 dose = float(cols[5])
                 cps = float(cols[6])
             except ValueError:
@@ -127,6 +135,7 @@ def parse_track_file(path: Path) -> tuple[str | None, list[dict]]:
                 "lng": lng,
                 "dose": dose,
                 "cps": cps,
+                "acc_m": acc_m,
             })
     return device_id, rows
 
@@ -142,9 +151,12 @@ def bucket_by_local_day(rows: list[dict], tz: ZoneInfo) -> dict[str, list[dict]]
 
 
 def rows_to_csv(rows: list[dict], device_id: str) -> bytes:
-    """Build a 10-column CSV body (matches firmware v0.7.0 schema minus event).
+    """Build a 12-column CSV body (firmware v0.8.0 schema).
 
-    The Ingest API tolerates 10-column rows (event column is optional).
+    The track exports give us accuracy in metres (col 4), which we now map
+    directly to the schema's `accuracyM` column. We leave `hdop` empty on
+    these rows; downstream consumers that need HDOP can call
+    /admin/backfill-accuracy to compute hdop = accuracyM / 5.0.
     Output is sorted by timestamp ascending.
     """
     buf = io.StringIO()
@@ -152,25 +164,30 @@ def rows_to_csv(rows: list[dict], device_id: str) -> bytes:
     w.writerow([
         "timestampMs", "uSvPerHour", "cps", "latitude", "longitude",
         "deviceId", "speedKph", "bearingDeg", "altitudeM", "hdop",
+        "event", "accuracyM",
     ])
     for r in sorted(rows, key=lambda x: x["ts"]):
+        acc_m = r.get("acc_m")
+        acc_str = f"{acc_m:.2f}" if acc_m is not None else ""
         w.writerow([
             r["ts"], f"{r['dose']:.4f}", f"{r['cps']:.2f}",
             f"{r['lat']:.7f}", f"{r['lng']:.7f}",
             device_id, "", "", "", "",
+            "", acc_str,
         ])
     return buf.getvalue().encode("utf-8")
 
 
 def post_csv(api_base: str, session_id: str, device_id: str, body: bytes,
-             timeout: float = 60.0) -> dict:
-    """POST one CSV chunk to /ingest/csv. Returns parsed JSON response.
+             timeout: float = 60.0, merge: bool = False) -> dict:
+    """POST one CSV chunk to /ingest/csv (or /ingest/csv-merge when merge=True).
 
-    Raises urllib.error.HTTPError on non-2xx (the unique-index dedup is reported
-    in the JSON body as "duplicates", NOT as an HTTP error).
+    Raises urllib.error.HTTPError on non-2xx. Insert-mode dedup is reported in
+    the JSON body as "duplicates"; merge-mode reports "modified" + "unchanged".
     """
+    path = "/ingest/csv-merge" if merge else "/ingest/csv"
     req = urllib.request.Request(
-        url=f"{api_base.rstrip('/')}/ingest/csv",
+        url=f"{api_base.rstrip('/')}{path}",
         data=body,
         method="POST",
         headers={
@@ -199,6 +216,11 @@ def main() -> int:
                     help="Process at most N files (0 = all). Useful for trial runs.")
     ap.add_argument("--dry-run", action="store_true",
                     help="Parse and bucket files, but do not POST to the API.")
+    ap.add_argument("--merge", action="store_true",
+                    help="Use /ingest/csv-merge: upsert by (sessionId,timestampMs) "
+                         "and $set new fields on existing rows. Use this when "
+                         "re-importing tracks after a schema extension (e.g. "
+                         "to backfill accuracyM onto already-ingested rows).")
     args = ap.parse_args()
 
     tracks_dir: Path = args.tracks_dir
@@ -267,7 +289,7 @@ def main() -> int:
             rs = buckets[day]
             body = rows_to_csv(rs, device_id)
             try:
-                resp = post_csv(args.api, day, device_id, body)
+                resp = post_csv(args.api, day, device_id, body, merge=args.merge)
             except urllib.error.HTTPError as e:
                 total_failed_files += 1
                 err_body = e.read().decode("utf-8", errors="replace")[:300]
@@ -282,11 +304,17 @@ def main() -> int:
             ok = int(resp.get("inserted", 0))
             dup = int(resp.get("duplicates", 0))
             rej = int(resp.get("rejected", 0))
+            mod = int(resp.get("modified", 0))
+            unch = int(resp.get("unchanged", 0))
             total_ok += ok
             total_dup += dup
             total_rej += rej
-            print(f"  [{fi}/{len(per_file)}] {path.name} day={day}  "
-                  f"sent={len(rs):,}  inserted={ok:,}  dup={dup:,}  rej={rej:,}")
+            if args.merge:
+                print(f"  [{fi}/{len(per_file)}] {path.name} day={day}  "
+                      f"sent={len(rs):,}  inserted={ok:,}  modified={mod:,}  unchanged={unch:,}")
+            else:
+                print(f"  [{fi}/{len(per_file)}] {path.name} day={day}  "
+                      f"sent={len(rs):,}  inserted={ok:,}  dup={dup:,}  rej={rej:,}")
     post_dt = time.time() - post_t0
     print(f"\nDone in {post_dt:.1f}s.  "
           f"inserted={total_ok:,}  duplicates={total_dup:,}  "

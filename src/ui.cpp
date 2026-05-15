@@ -327,7 +327,7 @@ void Ui::renderStats() {
         snprintf(foot, sizeof(foot), "Hold: pick RC");
     } else if (gps_ && gps_->hasFix()) {
         const float hdopF = (float)gps_->hdop();
-        const float acc   = hdopF * 3.0f;
+        const float acc   = (float)gps_->accuracyMeters();
         snprintf(foot, sizeof(foot), "+/-%4.1fm  hdop %.1f", acc, hdopF);
         footCol = (acc > 15.0f) ? COL_RED : (acc > 6.0f ? COL_AMBER : COL_GREEN);
     } else {

@@ -83,7 +83,7 @@ struct PendingSample {
     bool      hasGps = false;
     double    lat = 0.0, lng = 0.0;
     String    deviceId;
-    float     speed = -1.f, bearing = -1.f, alt = -9999.f, hdop = -1.f;
+    float     speed = -1.f, bearing = -1.f, alt = -9999.f, hdop = -1.f, acc = -1.f;
 };
 portMUX_TYPE  gSampleMux = portMUX_INITIALIZER_UNLOCKED;
 PendingSample gPendingSample;
@@ -300,6 +300,7 @@ void setup() {
             snap.bearing  = cfg::FIELD_BEARING_DEG ? (float)gGps.bearingFromHistory() : -1.f;
             snap.alt      = cfg::FIELD_ALTITUDE_M  ? (float)gGps.altitudeMeters()     : -9999.f;
             snap.hdop     = cfg::FIELD_HDOP        ? (float)gGps.hdop()               : -1.f;
+            snap.acc      = cfg::FIELD_ACCURACY_M  ? (float)gGps.accuracyMeters()     : -1.f;
             portENTER_CRITICAL(&gSampleMux);
             gPendingSample = snap;
             portEXIT_CRITICAL(&gSampleMux);
@@ -655,7 +656,7 @@ void loop() {
         event_log::markPhase("MAIN_APPEND");
         gStore.append(0, s.ts, s.uSv, s.cps,
                       s.hasGps, s.lat, s.lng, s.deviceId,
-                      s.speed, s.bearing, s.alt, s.hdop);
+                      s.speed, s.bearing, s.alt, s.hdop, s.acc);
 
         // Integrate dose: µSv/hr × dt_ms / 3 600 000 = µSv accumulated.
         // Cap dt to 10 s to avoid a phantom spike after a long BLE gap.
@@ -764,11 +765,12 @@ void loop() {
     }
     if ((now - lastBeat) > cfg::HEARTBEAT_MS) {
         lastBeat = now;
-        Serial.printf("[HB] uptime=%lus fix=%d sats=%u hdop=%.2f gpsB=%u gpsAge=%ums baud=%u rcState=%d rec=%d samples=%u life=%u dose=%.4fuSv\n",
+        Serial.printf("[HB] uptime=%lus fix=%d sats=%u hdop=%.2f acc=%.1fm gpsB=%u gpsAge=%ums baud=%u rcState=%d rec=%d samples=%u life=%u dose=%.4fuSv\n",
                       (unsigned long)(now / 1000),
                       (int)gGps.hasFix(),
                       (unsigned)gGps.satellites(),
                       gGps.hdop(),
+                      gGps.accuracyMeters(),
                       (unsigned)gGps.bytesIn(),
                       (unsigned)(gGps.lastByteMs() ? (now - gGps.lastByteMs()) : 0),
                       (unsigned)gGps.baud(),

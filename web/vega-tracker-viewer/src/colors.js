@@ -83,6 +83,18 @@ export function hdopColor(hdop, lo, hi) {
   ]);
 }
 
+// ---- Accuracy (m): same gradient as HDOP but in metres -----------------
+//  <3m excellent, 3-10m good, 10-25m moderate, >25m bad
+export function accColor(accM, lo, hi) {
+  const t = norm(accM, lo, hi);
+  if (t === null) return '#555';
+  return gradientHsl(t, [
+    [0.00, 130, 80, 48],
+    [0.50,  55, 85, 52],
+    [1.00,   0, 85, 48],
+  ]);
+}
+
 // ---- session: rotating hue wheel ---------------------------------------
 export function sessionColor(idx) {
   const hue = (idx * 47) % 360;

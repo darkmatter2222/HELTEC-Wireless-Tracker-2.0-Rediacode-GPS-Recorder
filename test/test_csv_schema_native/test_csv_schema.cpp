@@ -4,12 +4,15 @@
 //   - Firmware v0.3.0 extended the CSV from 6 to 10 columns.
 //   - Firmware v0.7.0 added an 11th column `event` for GPS_LOST / GPS_REGAINED
 //     transition markers. Normal samples leave the column empty.
+//   - Firmware v0.8.0 added a 12th column `accuracyM` -- estimated horizontal
+//     accuracy in metres. Stored alongside `hdop` so downstream consumers
+//     can read either uniformly. Empty when no GPS fix.
 //   - The MIN_VALID_TS_MS (2020-01-01 UTC) gate prevents millis()-since-boot
 //     timestamps from being stored, keeping session firstTsMs accurate.
 //   - Disabled optional fields emit an *empty string* (not a missing column),
-//     so the column count stays fixed at 11 for all v0.7.0+ rows.
-//   - The ingest API must accept 6-column (pre-v0.3.0), 10-column (v0.3.0–
-//     v0.6.x), and 11-column (v0.7.0+) rows.
+//     so the column count stays fixed at 12 for all v0.8.0+ rows.
+//   - The ingest API must accept 6-column (pre-v0.3.0), 10-column (v0.3.0-
+//     v0.6.x), 11-column (v0.7.0-v0.7.x), and 12-column (v0.8.0+) rows.
 //
 // Run:  pio test -e native
 #include <unity.h>
@@ -104,6 +107,37 @@ void test_far_future_accepted(void) {
 // ---------------------------------------------------------------------------
 // CSV schema / field count tests
 // ---------------------------------------------------------------------------
+
+void test_v080_header_has_12_fields(void) {
+    const char* hdr =
+        "timestampMs,uSvPerHour,cps,latitude,longitude,"
+        "deviceId,speedKph,bearingDeg,altitudeM,hdop,event,accuracyM\n";
+    TEST_ASSERT_EQUAL_INT(12, count_fields(hdr));
+}
+
+void test_v080_full_data_row_has_12_fields(void) {
+    // Normal samples have empty `event` (col 11); accuracyM populated (col 12).
+    const char* row =
+        "1746114660123,0.142,12.000,47.6062,-122.3321,"
+        "5243066020F4,48.23,267.3,12.4,1.20,,6.00\n";
+    TEST_ASSERT_EQUAL_INT(12, count_fields(row));
+}
+
+void test_v080_event_row_has_12_fields(void) {
+    // Event rows: timestamp + deviceId + tag + empty trailing accuracyM.
+    const char* row =
+        "1746114660123,,,,,5243066020F4,,,,,GPS_LOST,\n";
+    TEST_ASSERT_EQUAL_INT(12, count_fields(row));
+}
+
+void test_v080_accuracy_field_extraction(void) {
+    const char* row =
+        "1746114660123,0.142,12.000,47.6062,-122.3321,"
+        "5243066020F4,48.23,267.3,12.4,1.20,,6.00\n";
+    char val[32];
+    TEST_ASSERT_TRUE(get_field(row, 11, val, sizeof(val)));
+    TEST_ASSERT_EQUAL_STRING("6.00", val);
+}
 
 void test_v070_header_has_11_fields(void) {
     const char* hdr =
@@ -231,6 +265,10 @@ int main(void) {
     RUN_TEST(test_year_2020_start_accepted);
     RUN_TEST(test_far_future_accepted);
     // Schema field counts
+    RUN_TEST(test_v080_header_has_12_fields);
+    RUN_TEST(test_v080_full_data_row_has_12_fields);
+    RUN_TEST(test_v080_event_row_has_12_fields);
+    RUN_TEST(test_v080_accuracy_field_extraction);
     RUN_TEST(test_v070_header_has_11_fields);
     RUN_TEST(test_v070_full_data_row_has_11_fields);
     RUN_TEST(test_v070_event_row_has_11_fields);

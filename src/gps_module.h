@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <TinyGPSPlus.h>
+#include "config.h"
 
 class GpsModule {
 public:
@@ -16,6 +17,15 @@ public:
     double  altitudeMeters() { return gps_.altitude.isValid() ? gps_.altitude.meters() : 0.0; }
     double  speedKph()       { return gps_.speed.isValid() ? gps_.speed.kmph() : 0.0; }
     double  courseDeg()      { return gps_.course.isValid() ? gps_.course.deg() : -1.0; }
+
+    // Estimated horizontal accuracy in metres, derived from HDOP via the
+    // standard `accuracy_m = hdop * UERE` rule of thumb. Returns -1.0 when
+    // HDOP is not yet valid so callers can emit an empty CSV field rather
+    // than a misleading "99.99 * 5.0" value. v0.8.0+.
+    double  accuracyMeters() {
+        if (!gps_.hdop.isValid()) return -1.0;
+        return gps_.hdop.hdop() * (double)cfg::GPS_UERE_M;
+    }
 
     // Smoothed bearing in degrees [0, 360) calculated from the last
     // cfg::BEARING_HISTORY_POINTS GPS positions. Uses the forward azimuth

@@ -6,7 +6,7 @@ import {
 import L from 'leaflet';
 import { fetchSessions, fetchSessionRows } from './api.js';
 import {
-  doseColor, cpsColor, speedColor, altColor, hdopColor,
+  doseColor, cpsColor, speedColor, altColor, hdopColor, accColor,
   sessionColor, fmtTs, fmtDose,
 } from './colors.js';
 import { SparkChart } from './SparkChart.jsx';
@@ -29,6 +29,7 @@ const COLOR_CHANNELS = [
   { key: 'speed', label: 'Speed' },
   { key: 'alt',   label: 'Altitude' },
   { key: 'hdop',  label: 'HDOP' },
+  { key: 'accM',  label: 'Accuracy (m)' },
   { key: 'session', label: 'Session' },
 ];
 
@@ -265,6 +266,7 @@ function getPointColor(p, channel, idx, ranges) {
     case 'speed':   return speedColor(p.spd, ranges.spdMin,  ranges.spdMax);
     case 'alt':     return altColor(p.alt,   ranges.altMin,  ranges.altMax);
     case 'hdop':    return hdopColor(p.hdop, ranges.hdopMin, ranges.hdopMax);
+    case 'accM':    return accColor(p.accM, ranges.accMin, ranges.accMax);
     case 'session': return sessionColor(idx);
     default:        return doseColor(p.uSv,  ranges.doseMin, ranges.doseMax);
   }
@@ -283,6 +285,10 @@ function compactRows(raw) {
       brg:  r.bearingDeg ?? null,
       alt:  r.altitudeM  ?? null,
       hdop: r.hdop       ?? null,
+      // accuracyM (firmware 0.8.0+) is metres-based GPS accuracy. May be
+      // measured (RadiaCode track imports) or derived from hdop via
+      // /admin/backfill-accuracy (UERE=5.0). Both fields can coexist.
+      accM: r.accuracyM  ?? null,
       // GPS_LOST / GPS_REGAINED transition marker (firmware 0.7.0+).
       // Event rows have no lat/lng so they're filtered out of `points`,
       // but their timestamps are used to break track polylines.
@@ -330,6 +336,7 @@ export default function App() {
   const [spdMin,  setSpdMin]    = useState(0);    const [spdMax,  setSpdMax]    = useState(80);    const [spdManual,  setSpdManual]    = useState(false);
   const [altMin,  setAltMin]    = useState(0);    const [altMax,  setAltMax]    = useState(500);   const [altManual,  setAltManual]    = useState(false);
   const [hdopMin, setHdopMin]   = useState(0);    const [hdopMax, setHdopMax]   = useState(5);     const [hdopManual, setHdopManual]   = useState(false);
+  const [accMin,  setAccMin]    = useState(0);    const [accMax,  setAccMax]    = useState(25);    const [accManual,  setAccManual]    = useState(false);
   // stable track bounds for sliders — derived from raw data, never from the scale handles
   const [doseDataMax, setDoseDataMax] = useState(2.0);
   const [cpsDataMax,  setCpsDataMax]  = useState(100);
@@ -545,6 +552,7 @@ export default function App() {
     if (!spdManual)  autoScaleChannel('spd',  false, setSpdMin,  setSpdMax,  1);
     if (!altManual)  autoScaleChannel('alt',  false, setAltMin,  setAltMax,  0);
     if (!hdopManual) autoScaleChannel('hdop', false, setHdopMin, setHdopMax, 2);
+    if (!accManual)  autoScaleChannel('accM', false, setAccMin,  setAccMax,  0);
     // always update stable track bounds from raw data max
     const rawMax = (field, fallback) => {
       let m = fallback;
@@ -562,7 +570,7 @@ export default function App() {
     setCpsDataMax (Math.max(rawMax('cps',  0) * 1.2, 10));
     setSpdDataMax (Math.max(rawMax('spd',  0) * 1.2, 20));
     setAltDataMax (Math.max(rawMax('alt',  0) * 1.2, 100));
-  }, [rowsBySession, selected, doseManual, cpsManual, spdManual, altManual, hdopManual]); // eslint-disable-line
+  }, [rowsBySession, selected, doseManual, cpsManual, spdManual, altManual, hdopManual, accManual]); // eslint-disable-line
 
   // ---- play
   useEffect(() => {
@@ -654,7 +662,7 @@ export default function App() {
   const tile = TILES[tileIdx];
 
   // ---- color fn shortcut
-  const ranges = { doseMin, doseMax, cpsMin, cpsMax, spdMin, spdMax, altMin, altMax, hdopMin, hdopMax };
+  const ranges = { doseMin, doseMax, cpsMin, cpsMax, spdMin, spdMax, altMin, altMax, hdopMin, hdopMax, accMin, accMax };
   function getColor(p, traceIdx) {
     return getPointColor(p, colorChannel, traceIdx, ranges);
   }
@@ -847,6 +855,18 @@ export default function App() {
                 label="HDOP scale"
                 fmtVal={v => v.toFixed(1)}
                 onAuto={() => setHdopManual(false)}
+              />
+            )}
+            {colorChannel === 'accM' && (
+              <DualRangeSlider
+                lo={0} hi={50}
+                low={accMin} high={accMax}
+                onLowChange={v  => { setAccManual(true); setAccMin(parseFloat(v.toFixed(0))); }}
+                onHighChange={v => { setAccManual(true); setAccMax(parseFloat(v.toFixed(0))); }}
+                colorFn={t => accColor(t, 0, 1)}
+                label="Accuracy scale (m)"
+                fmtVal={v => v.toFixed(0) + ' m'}
+                onAuto={() => setAccManual(false)}
               />
             )}
 
