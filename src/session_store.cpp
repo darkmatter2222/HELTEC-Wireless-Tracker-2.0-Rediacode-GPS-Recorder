@@ -402,7 +402,7 @@ bool SessionStore::openDayFile_(const String& dayId) {
             return false;
         }
         if (!existed) {
-            f.println("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event");
+            f.println("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event,accuracyM");
         }
         f.close();
         if (existed) {
@@ -433,7 +433,7 @@ bool SessionStore::openDayFile_(const String& dayId) {
         return false;
     }
     if (!existed) {
-        f.println(F("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event"));
+        f.println(F("timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event,accuracyM"));
     }
     f.close();
     if (existed) {
@@ -596,7 +596,7 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
                           bool hasGps, double lat, double lng,
                           const String& deviceId,
                           float speedKph, float bearingDeg,
-                          float altitudeM, float hdop) {
+                          float altitudeM, float hdop, float accuracyM) {
     if (!hasUsableBackend()) return;
 
     // ---- Always-on contract gates ----------------------------------------
@@ -636,17 +636,20 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
     }
 
     // ---- Format the CSV row ---------------------------------------------
-    char spd[12] = "", brg[12] = "", alt[12] = "", hdp[12] = "";
+    char spd[12] = "", brg[12] = "", alt[12] = "", hdp[12] = "", acc[12] = "";
     if (speedKph   >= 0.f)     snprintf(spd, sizeof(spd), "%.2f", speedKph);
     if (bearingDeg >= 0.f)     snprintf(brg, sizeof(brg), "%.1f", bearingDeg);
     if (altitudeM  > -9000.f)  snprintf(alt, sizeof(alt), "%.1f", altitudeM);
     if (hdop       >= 0.f)     snprintf(hdp, sizeof(hdp), "%.2f", hdop);
+    if (accuracyM  >= 0.f)     snprintf(acc, sizeof(acc), "%.2f", accuracyM);
 
     char line[cfg::MAX_LINE_BYTES];
-    int len = snprintf(line, sizeof(line), "%llu,%.6f,%.3f,%.7f,%.7f,%s,%s,%s,%s,%s,\n",
+    // v0.8.0: 12-column schema. Column 11 (`event`) is empty on normal samples;
+    // column 12 (`accuracyM`) carries the estimated horizontal accuracy.
+    int len = snprintf(line, sizeof(line), "%llu,%.6f,%.3f,%.7f,%.7f,%s,%s,%s,%s,%s,,%s\n",
                        (unsigned long long)timestampMsFull,
                        uSvPerHour, cps, lat, lng, deviceId.c_str(),
-                       spd, brg, alt, hdp);
+                       spd, brg, alt, hdp, acc);
     if (len <= 0) return;
 
     String path = pathFor(activeId_);
@@ -708,10 +711,11 @@ void SessionStore::appendEvent(uint64_t timestampMsFull,
     if (!recording_ || activeId_ != day) return;
 
     // Schema: timestamp, uSv, cps, lat, lng, deviceId, speed, bearing, alt,
-    // hdop, event. Numerics are 0/empty; deviceId is preserved so the row
-    // can be associated with the same tracker.
+    // hdop, event, accuracyM. Numerics are 0/empty; deviceId is preserved so
+    // the row can be associated with the same tracker. accuracyM trailing
+    // field is empty on event rows (no GPS fix at the time of transition).
     char line[cfg::MAX_LINE_BYTES];
-    int len = snprintf(line, sizeof(line), "%llu,,,,,%s,,,,,%s\n",
+    int len = snprintf(line, sizeof(line), "%llu,,,,,%s,,,,,%s,\n",
                        (unsigned long long)timestampMsFull,
                        deviceId.c_str(), eventTag);
     if (len <= 0) return;

@@ -132,7 +132,7 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "0.7.1";
+constexpr const char* FW_VERSION = "0.8.0";
 
 // ---------------- Battery / Wi-Fi safety gate (v0.4.2) -----------------------
 // Skip the Wi-Fi upload cycle entirely if VBAT is below this threshold (V).
@@ -168,6 +168,15 @@ constexpr bool FIELD_SPEED_KPH   = true;  // GPS speed over ground, km/h
 constexpr bool FIELD_BEARING_DEG = true;  // smoothed bearing, degrees [0, 360)
 constexpr bool FIELD_ALTITUDE_M  = true;  // GPS altitude above MSL, metres
 constexpr bool FIELD_HDOP        = true;  // Horizontal Dilution of Precision
+constexpr bool FIELD_ACCURACY_M  = true;  // Estimated horizontal accuracy, metres (CSV col 12, v0.8.0+)
+
+// User Equivalent Range Error multiplier used to convert HDOP -> estimated
+// horizontal accuracy in metres. The firmware cannot independently measure
+// accuracy in metres (the UC6580 doesn't emit GST sentences by default), so
+// we use the standard rule-of-thumb `accuracy_m = hdop * UERE`. 5.0 is the
+// typical value for a clear-sky consumer GPS receiver and matches the
+// constant used in the ingest API for back-filling historical data.
+constexpr float GPS_UERE_M = 5.0f;
 
 // Number of GPS history positions used to compute the smoothed bearing.
 // Must be between 2 and 8. At 1 Hz GPS rate, 4 = ~4-second smoothing lag,

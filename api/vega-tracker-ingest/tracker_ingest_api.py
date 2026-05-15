@@ -33,6 +33,7 @@ POST   /admin/merge-sessions            merge N source sessions into one target
 GET    /sessions/{id}/export            download session as CSV (format=internal|radiacode)
 POST   /sessions/export-bulk            download multiple sessions merged as one CSV
 POST   /admin/recompute-sessions        recompute session metadata from sample data
+POST   /admin/backfill-accuracy         fill missing accuracyM<->hdop pairs (UERE=5.0)
 POST   /admin/migrate-to-daily-sessions  one-shot migration (v0.5.0): rekey samples by local-eastern YYYY-MM-DD
 GET    /admin/db-stats                  database size/storage metrics
 GET    /admin/backups                   list available mongodump backups
@@ -94,7 +95,7 @@ MONGO_DB          = os.getenv("MONGO_DB", "radiacode")
 SAMPLES_COLL      = os.getenv("MONGO_SAMPLES_COLLECTION", "tracker_samples")
 SESSIONS_COLL     = os.getenv("MONGO_SESSIONS_COLLECTION", "tracker_sessions")
 BACKUPS_COLL      = "tracker_backups"    # telemetry: one doc per backup attempt
-API_VERSION       = "0.6.0"
+API_VERSION       = "0.7.0"
 MAX_BODY_BYTES    = int(os.getenv("MAX_BODY_BYTES", str(8 * 1024 * 1024)))   # 8 MB
 INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "1000"))
 BACKUP_DIR        = os.getenv("BACKUP_DIR", "/backups")  # host-mounted volume
@@ -219,6 +220,12 @@ def _parse_csv(body: str, session_id: str, header_device_id: str | None,
         # no lat/lng/dose values, only a timestamp + deviceId + tag. Stored on
         # the sample doc so the viewer can split polylines at gaps.
         event_tag   = row[10].strip() if len(row) > 10 and row[10].strip() else None
+        # Column 11 (accuracyM) added in firmware 0.8.0 -- estimated horizontal
+        # accuracy in metres. The firmware computes this from HDOP via the
+        # `accuracyM = hdop * 5.0` UERE rule of thumb; the RadiaCode app track
+        # importer carries the measured value directly. Stored alongside hdop
+        # so consumers can pick whichever they prefer.
+        accuracy_m  = _safe_float(row[11]) if len(row) > 11 else None
 
         if ts is None:
             rejected += 1
@@ -250,6 +257,7 @@ def _parse_csv(body: str, session_id: str, header_device_id: str | None,
         if altitude_m  is not None: doc["altitudeM"]  = altitude_m
         if hdop_val    is not None: doc["hdop"]        = hdop_val
         if event_tag   is not None: doc["event"]       = event_tag
+        if accuracy_m  is not None: doc["accuracyM"]   = accuracy_m
         if lat is not None and lng is not None and not (lat == 0.0 and lng == 0.0):
             doc["loc"] = {"type": "Point", "coordinates": [lng, lat]}
         out.append(doc)
@@ -278,6 +286,39 @@ def _bulk_insert(coll, docs: list[dict[str, Any]]) -> tuple[int, int]:
                     log.warning("bulk-write error code=%s: %s", e.get("code"), e.get("errmsg"))
             inserted += bwe.details.get("nInserted", len(batch) - len(wr_err))
     return inserted, duplicates
+
+
+def _bulk_upsert_merge(coll, docs: list[dict[str, Any]]) -> tuple[int, int, int]:
+    """Upsert by {sessionId, timestampMs}, merging any new fields into existing
+    docs via $set / $setOnInsert. Used by /ingest/csv-merge so that re-imports
+    of historical data (e.g. the RadiaCode track files) can add new columns
+    like `accuracyM` to rows that were ingested before the schema knew about
+    them. Returns (inserted, modified, matched_unchanged)."""
+    from pymongo import UpdateOne
+    inserted  = 0
+    modified  = 0
+    unchanged = 0
+    # Fields that should only be written once (immutable identity / source-of-truth):
+    immutable_keys = {"sessionId", "timestampMs", "deviceId", "trackerId",
+                       "firmware", "loc"}
+    for i in range(0, len(docs), INGEST_BATCH_SIZE):
+        batch = docs[i:i + INGEST_BATCH_SIZE]
+        ops = []
+        for d in batch:
+            filt = {"sessionId": d["sessionId"], "timestampMs": d["timestampMs"]}
+            set_doc = {k: v for k, v in d.items() if k not in immutable_keys}
+            set_on_insert = {k: v for k, v in d.items() if k in immutable_keys}
+            update = {}
+            if set_doc:        update["$set"]         = set_doc
+            if set_on_insert:  update["$setOnInsert"] = set_on_insert
+            ops.append(UpdateOne(filt, update, upsert=True))
+        if not ops:
+            continue
+        res = coll.bulk_write(ops, ordered=False)
+        inserted  += res.upserted_count
+        modified  += res.modified_count
+        unchanged += res.matched_count - res.modified_count
+    return inserted, modified, unchanged
 
 
 # ---------- routes ----------------------------------------------------------
@@ -403,7 +444,9 @@ def _session_to_radiacode_csv(rows: list[dict]) -> str:
         CountRate    cps
         Latitude     decimal degrees (empty if no GPS)
         Longitude    decimal degrees (empty if no GPS)
-        Accuracy     GPS accuracy m — estimated as hdop×5 when hdop available, else empty
+        Accuracy     GPS accuracy m — prefers the measured `accuracyM` field;
+                     falls back to `hdop * 5.0` (UERE rule) if only HDOP is
+                     stored on the sample.
         Comment      empty
     """
     out = io.StringIO()
@@ -419,6 +462,7 @@ def _session_to_radiacode_csv(rows: list[dict]) -> str:
         lat   = row.get("latitude")
         lng   = row.get("longitude")
         hdop  = row.get("hdop")
+        acc_m = row.get("accuracyM")
 
         if ts_ms is None:
             continue
@@ -432,7 +476,14 @@ def _session_to_radiacode_csv(rows: list[dict]) -> str:
 
         err  = round(usv * 0.10, 6) if usv is not None else ""
         dose = round(running_dose, 6)
-        acc  = round(hdop * 5.0, 2) if hdop is not None else ""
+        # Prefer the measured/imported accuracy value; fall back to UERE
+        # estimate from HDOP only if accuracyM is absent on this row.
+        if acc_m is not None:
+            acc = round(acc_m, 2)
+        elif hdop is not None:
+            acc = round(hdop * 5.0, 2)
+        else:
+            acc = ""
 
         lat_s = f"{lat:.6f}" if lat is not None and not (lat == 0 and lng == 0) else ""
         lng_s = f"{lng:.6f}" if lng is not None and not (lat == 0 and lng == 0) else ""
@@ -454,11 +505,12 @@ def _session_to_radiacode_csv(rows: list[dict]) -> str:
 
 
 def _session_to_internal_csv(rows: list[dict]) -> str:
-    """Reproduce the original firmware/tracker CSV format."""
+    """Reproduce the firmware/tracker CSV format (v0.8.0+ 12-column schema)."""
     out = io.StringIO()
     w = csv.writer(out, lineterminator="\n")
     w.writerow(["timestampMs", "uSvPerHour", "cps", "latitude", "longitude",
-                "deviceId", "speedKph", "bearingDeg", "altitudeM", "hdop"])
+                "deviceId", "speedKph", "bearingDeg", "altitudeM", "hdop",
+                "event", "accuracyM"])
     for row in sorted(rows, key=lambda r: r.get("timestampMs", 0)):
         w.writerow([
             row.get("timestampMs", ""),
@@ -471,6 +523,8 @@ def _session_to_internal_csv(rows: list[dict]) -> str:
             row.get("bearingDeg",  ""),
             row.get("altitudeM",   ""),
             row.get("hdop",        ""),
+            row.get("event",       ""),
+            row.get("accuracyM",   ""),
         ])
     return out.getvalue()
 
@@ -793,6 +847,62 @@ def recompute_sessions():
         "purgedSampleRows": purged,
         "sessionsUpdated":  updated,
         "minValidTsMs":     MIN_VALID_TS_MS,
+    }
+
+
+@app.post("/admin/backfill-accuracy")
+def backfill_accuracy():
+    """Fill missing accuracyM <-> hdop pairs on every sample row.
+
+    Uses the canonical UERE rule of thumb: accuracyM = hdop * 5.0.
+
+    Two passes:
+      1. Rows that have `hdop` but no `accuracyM` -> compute accuracyM = hdop*5.0,
+         tag with accEstimated=true.
+      2. Rows that have `accuracyM` but no `hdop` -> compute hdop = accuracyM/5.0,
+         tag with hdopEstimated=true.
+
+    Rows that already have both fields are left untouched. Rows that have
+    neither (e.g. event marker rows, indoors-no-GPS rows) are also untouched.
+
+    The *Estimated booleans let the viewer / downstream consumers tell
+    measured from derived values.
+    """
+    samples_coll = app.state.samples
+
+    UERE = 5.0  # cfg::GPS_UERE_M in firmware; canonical across the stack.
+
+    # Pass 1: derive accuracyM from hdop.
+    res_acc = samples_coll.update_many(
+        {
+            "hdop":      {"$exists": True, "$ne": None},
+            "accuracyM": {"$exists": False},
+        },
+        [{"$set": {
+            "accuracyM":    {"$multiply": ["$hdop", UERE]},
+            "accEstimated": True,
+        }}],
+    )
+
+    # Pass 2: derive hdop from accuracyM.
+    res_hdop = samples_coll.update_many(
+        {
+            "accuracyM": {"$exists": True, "$ne": None},
+            "hdop":      {"$exists": False},
+        },
+        [{"$set": {
+            "hdop":          {"$divide": ["$accuracyM", UERE]},
+            "hdopEstimated": True,
+        }}],
+    )
+
+    log.info("backfill-accuracy: accuracyM filled on %d rows, hdop filled on %d rows (UERE=%.1f)",
+             res_acc.modified_count, res_hdop.modified_count, UERE)
+
+    return {
+        "accuracyMFilled": res_acc.modified_count,
+        "hdopFilled":      res_hdop.modified_count,
+        "uereMeters":      UERE,
     }
 
 
@@ -1303,4 +1413,53 @@ async def ingest_csv(
         "duplicates":  duplicates,
         "firstTsMs":   first_ts,
         "lastTsMs":    last_ts,
+    })
+
+
+@app.post("/ingest/csv-merge")
+async def ingest_csv_merge(
+    request: Request,
+    x_session_id: str = Header(..., alias="X-Session-Id"),
+    x_device_id:  str | None = Header(None, alias="X-Device-Id"),
+    x_tracker_id: str | None = Header(None, alias="X-Tracker-Id"),
+    x_firmware:   str | None = Header(None, alias="X-Firmware"),
+):
+    """Like /ingest/csv, but performs an UPSERT-MERGE on the
+    (sessionId, timestampMs) key instead of insert-or-skip. New columns
+    in the CSV are $set onto matching existing docs, so re-ingesting an
+    expanded version of historical data (e.g. RadiaCode track files now
+    including accuracyM) backfills the new field rather than dropping it.
+
+    Identity fields (sessionId, timestampMs, deviceId, trackerId, firmware,
+    loc) are only written on insert -- they are never overwritten on an
+    existing doc.
+
+    The firmware uploader should NOT use this endpoint -- it's an admin
+    path for one-shot enrichment runs.
+    """
+    body = await request.body()
+    if not body:
+        raise HTTPException(status_code=400, detail="empty body")
+    if len(body) > MAX_BODY_BYTES:
+        raise HTTPException(status_code=413, detail=f"body > {MAX_BODY_BYTES} bytes")
+
+    log.info("ingest-merge sessionId=%s tracker=%s firmware=%s bodyBytes=%d",
+             x_session_id, x_tracker_id, x_firmware, len(body))
+
+    text = body.decode("utf-8", errors="replace")
+    docs, rejected = _parse_csv(text, x_session_id, x_device_id, x_tracker_id, x_firmware)
+    if not docs:
+        raise HTTPException(status_code=400, detail="no parseable rows")
+
+    inserted, modified, unchanged = _bulk_upsert_merge(app.state.samples, docs)
+
+    log.info("ingest-merge OK sessionId=%s valid=%d inserted=%d modified=%d unchanged=%d rejected=%d",
+             x_session_id, len(docs), inserted, modified, unchanged, rejected)
+    return JSONResponse({
+        "sessionId":  x_session_id,
+        "valid":      len(docs),
+        "rejected":   rejected,
+        "inserted":   inserted,
+        "modified":   modified,
+        "unchanged":  unchanged,
     })

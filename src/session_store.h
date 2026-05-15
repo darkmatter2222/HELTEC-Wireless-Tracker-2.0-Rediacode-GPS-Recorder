@@ -27,9 +27,16 @@
 // deletes the rotated file. On failure the .up.csv is retried next cycle.
 // At no point are duplicate sample rows kept on the device.
 //
-// Schema (10 columns, identical to firmware v0.3.x):
+// Schema (12 columns, firmware v0.8.0+):
 //   timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,
-//   speedKph,bearingDeg,altitudeM,hdop
+//   speedKph,bearingDeg,altitudeM,hdop,event,accuracyM
+//
+// Column 11 `event` (added v0.7.0) holds GPS_LOST / GPS_REGAINED transition
+// tags on dedicated event rows -- empty on normal samples.
+// Column 12 `accuracyM` (added v0.8.0) holds estimated horizontal accuracy in
+// metres, computed as `hdop * cfg::GPS_UERE_M`. Stored alongside the raw
+// HDOP so downstream consumers (viewer, exports, historical RadiaCode track
+// data that only has metres) can use either value uniformly.
 // =============================================================================
 
 class SessionStore {
@@ -88,7 +95,8 @@ public:
                 float speedKph   = -1.f,
                 float bearingDeg = -1.f,
                 float altitudeM  = -9999.f,
-                float hdop       = -1.f);
+                float hdop       = -1.f,
+                float accuracyM  = -1.f);
 
     // v0.7.0: Append a GPS-state-transition event row to the active day file.
     // Event rows occupy the 11th CSV column (`event`); all other fields

@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.7.1`.
+Current: `0.8.0`.
 
 ---
 
@@ -756,12 +756,12 @@ python scripts\capture_boot.py
 
 ## Data Schema
 
-CSV on device (and what gets POSTed to the API):
+CSV on device (and what gets POSTed to the API) — firmware v0.8.0 12-column schema:
 ```
-timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event
-1746114660123,0.142,12.0,47.6062,-122.3321,5243066020F4,48.23,267.3,12.4,1.20,
-1746114673500,,,,,5243066020F4,,,,,GPS_LOST
-1746114692100,,,,,5243066020F4,,,,,GPS_REGAINED
+timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event,accuracyM
+1746114660123,0.142,12.0,47.6062,-122.3321,5243066020F4,48.23,267.3,12.4,1.20,,6.00
+1746114673500,,,,,5243066020F4,,,,,GPS_LOST,
+1746114692100,,,,,5243066020F4,,,,,GPS_REGAINED,
 ```
 
 - `timestampMs`: Unix epoch ms (GPS-derived via `bestEpochMs()`)
@@ -776,10 +776,15 @@ timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altit
 - `altitudeM`: GPS altitude above MSL in metres (empty if `FIELD_ALTITUDE_M = false`)
 - `hdop`: Horizontal Dilution of Precision — positional accuracy indicator;
   lower is better (empty if `FIELD_HDOP = false`)
+- `event`: GPS transition tag (`GPS_LOST` / `GPS_REGAINED`), empty on normal rows (v0.7.0+)
+- `accuracyM`: estimated horizontal GPS accuracy in metres (v0.8.0+). On firmware
+  rows this is `hdop * cfg::GPS_UERE_M` (UERE=5.0). On RadiaCode track imports
+  this is the measured value from the app export; hdop on those rows is derived
+  by `/admin/backfill-accuracy` (`hdopEstimated:true`).
 
-Columns 6–9 are always present in the header (firmware 0.3.0+) but may be
-empty strings if the corresponding config flag is false or data is unavailable.
-Pre-0.3.0 uploads have 6 columns; the ingest API handles both formats.
+Pre-0.3.0 uploads have 6 columns; pre-0.7.0 have 10; pre-0.8.0 have 11. The
+ingest API handles all four formats. New columns are always appended at the
+end so older row counts are positionally compatible.
 
 MongoDB stores the same fields plus:
 - `sessionId`: from `X-Session-Id` header
@@ -886,6 +891,43 @@ Otherwise, iterate to completion.
   long `vTaskDelay` (>20 s in chunks), and BLE scans all qualify. When
   adding a new long-blocking subsystem, audit it for WDT pet calls
   *before* enabling the WDT subscription on its task.
+
+### GPS Accuracy In Metres — accuracyM Column (v0.8.0)
+
+- **Schema bump 11 -> 12 cols**: appended `accuracyM` after `event`. Header
+  in both SdFat and LittleFS code paths in [src/session_store.cpp](src/session_store.cpp)
+  updated; event rows trail an empty `accuracyM` (the `appendEvent` format
+  string ends in `",\n"`).
+- **Why both hdop AND accuracyM on every row?** The firmware can only
+  measure HDOP (TinyGPS++ does not expose GST sentences from UC6580 by
+  default). `cfg::GPS_UERE_M = 5.0f` -- the canonical UERE rule of thumb --
+  is used by `GpsModule::accuracyMeters()` to derive a metres-based value
+  the viewer can colour directly without per-row recomputation. RadiaCode
+  app track exports (`scripts/import_tracks.py`) carry the measured accuracy
+  in metres directly; HDOP is left empty on those rows and the
+  `/admin/backfill-accuracy` endpoint computes `hdop = accuracyM / 5.0`
+  after import.
+- **Estimation flags**: backfill writes `accEstimated: true` when accuracyM
+  was derived from hdop, and `hdopEstimated: true` when hdop was derived
+  from accuracyM. Downstream consumers that care about provenance can
+  filter these out. Direct firmware uploads after v0.8.0 store both fields
+  natively with no estimation flag (hdop is source-of-truth on those rows).
+- **Re-import path**: `/ingest/csv` is INSERT-OR-SKIP and will silently drop
+  new accuracyM data when the (sessionId, timestampMs) key already exists.
+  Use `/ingest/csv-merge` for re-imports of expanded historical data -- it
+  does bulk `UpdateOne(filt, {"$set": ...non-immutables, "$setOnInsert":
+  ...identity fields}, upsert=True)` so new columns land on existing docs
+  but identity fields (sessionId, timestampMs, deviceId, trackerId,
+  firmware, loc) are never overwritten. `scripts/import_tracks.py --merge`
+  selects this path.
+- **Viewer**: new `accM` color channel maps to `accColor(accM, lo, hi)` in
+  `colors.js`. Default scale 0-25m; auto-fits per visible data. Lives next
+  to `hdop` in `COLOR_CHANNELS`.
+- **One-shot backfill executed on 2026-05-15**: re-import of 121 track files
+  via `--merge` modified 2,434,163 rows to add `accuracyM`; then
+  `/admin/backfill-accuracy` filled 197,884 accuracyM-from-hdop and
+  2,434,163 hdop-from-accuracyM. UERE constant is 5.0 across the stack
+  (firmware accessor, viewer, API backfill, API legacy radiacode CSV export).
 
 ### GPS Gap Event Rows — Don't Draw Phantom Lines Across Missing Track (v0.7.0)
 
