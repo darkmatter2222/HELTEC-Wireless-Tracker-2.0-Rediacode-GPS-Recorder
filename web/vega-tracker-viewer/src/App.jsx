@@ -1265,6 +1265,7 @@ function SampleTooltip({ p, sessionId, nanoMode }) {
         {p.brg  != null && <div className="tt-row"><span>Bearing</span><b>{fmtBearing(p.brg)}</b></div>}
         {p.alt  != null && <div className="tt-row"><span>Alt</span><b>{p.alt.toFixed(0)} m</b></div>}
         {p.hdop != null && <div className="tt-row"><span>HDOP</span><b>{p.hdop.toFixed(2)}</b></div>}
+        {p.accM != null && <div className="tt-row"><span>Accuracy</span><b>+/- {p.accM.toFixed(1)} m</b></div>}
       </div>
     </Tooltip>
   );
