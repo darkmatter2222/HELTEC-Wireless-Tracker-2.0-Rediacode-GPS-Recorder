@@ -48,10 +48,16 @@ const ASPECT_RATIOS = [
   { key: '2:1',   label: '2:1',      ratio: 2 },
 ];
 
-// Practical browser canvas memory ceiling. 16384x16384 = ~268 MP, 1 GB at
-// RGBA. Chrome/Edge cope; older Firefox may refuse. Past this Chrome's
-// canvas backing store silently downscales which corrupts the projection.
-const MAX_PIXELS = 16384 * 16384;
+// Soft advisory thresholds. The render is NEVER blocked by size --
+// the user explicitly asked for "no such thing as too big". The browser
+// itself enforces hard limits (Chrome canvas dimension cap is ~32767 per
+// side, total area ~268 MP; if exceeded createElement('canvas') silently
+// downscales and we catch the resulting mismatch). Past PREVIEW_MAX_PIXELS
+// we skip building an <img> preview (which would crash the tab) and
+// auto-download the PNG straight away.
+const HUGE_WARN_PIXELS    = 8192 * 8192;     // 268 MP
+const MASSIVE_WARN_PIXELS = 16384 * 16384;   // 1 GP
+const PREVIEW_MAX_PIXELS  = 64_000_000;      // ~64 MP -- safe for <img>
 
 // Great-circle distance in metres between two WGS84 points (haversine).
 // Used by the Render-mode "split far apart points" toggle to break track
@@ -877,13 +883,16 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
 
   const pixelCount = width * height;
   const memMb = (pixelCount * 4 / 1024 / 1024).toFixed(0);
-  const sizeWarn = pixelCount > MAX_PIXELS
-    ? `WARNING: ${memMb} MB exceeds 16K x 16K cap. Browser will refuse to allocate.`
-    : pixelCount > 8192 * 8192
-      ? `${memMb} MB target - very large; render may take minutes and use significant RAM.`
-      : pixelCount > 4096 * 4096
-        ? `${memMb} MB target - large renders may take a minute.`
-        : `${memMb} MB target`;
+  const tooBigToPreview = pixelCount > PREVIEW_MAX_PIXELS;
+  const sizeWarn = pixelCount > MASSIVE_WARN_PIXELS
+    ? `${memMb} MB - extreme size. The browser may refuse to allocate the canvas; if rendering fails, drop to <=16K. PNG will auto-download (preview disabled).`
+    : pixelCount > HUGE_WARN_PIXELS
+      ? `${memMb} MB - very large. Render may take minutes and consume significant RAM. PNG will auto-download (preview disabled).`
+      : tooBigToPreview
+        ? `${memMb} MB - PNG will auto-download because it's too large to show inline (>${(PREVIEW_MAX_PIXELS/1e6).toFixed(0)} MP).`
+        : pixelCount > 4096 * 4096
+          ? `${memMb} MB - large render, may take a minute.`
+          : `${memMb} MB target`;
 
   // ---- the big render ----
 
@@ -895,7 +904,9 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
 
     try {
       if (chosen.size === 0) throw new Error('No tracks selected');
-      if (pixelCount > MAX_PIXELS) throw new Error('Output size exceeds safe canvas memory; reduce dimensions');
+      if (pixelCount > MASSIVE_WARN_PIXELS) {
+        console.warn(`[render] EXTREME size requested: ${width}x${height} (${memMb} MB). Browser may refuse.`);
+      }
 
       // 1. Ensure all chosen sessions have rows loaded.
       const ids = [...chosen];
@@ -987,7 +998,17 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
       // 3. Build canvas + projection.
       const canvas = document.createElement('canvas');
       canvas.width = width; canvas.height = height;
+      // Verify the browser actually honoured the requested dimensions.
+      // Chrome silently caps individual canvas dimensions at 32767 and
+      // total area at ~268 MP, downscaling without telling you. If we
+      // detect that, abort with an actionable message so the projection
+      // doesn't go off the rails.
+      if (canvas.width !== width || canvas.height !== height) {
+        throw new Error(`Browser refused ${width}x${height} canvas (clamped to ${canvas.width}x${canvas.height}). ` +
+          `Reduce dimensions -- Chrome caps individual sides at 32767 and area at ~268 MP.`);
+      }
       const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Failed to acquire 2D context -- canvas too large for this browser.');
       const bg = BG_OPTIONS.find(b => b.key === bgKey);
       if (bg && bg.color) { ctx.fillStyle = bg.color; ctx.fillRect(0, 0, width, height); }
       const proj = buildProjection({ minLat, maxLat, minLng, maxLng, width, height, padding: paddingPct });
@@ -1031,18 +1052,40 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
         drawTitleOverlay(ctx, width, height, title, sub, palette, lo, hi, channel);
       }
 
-      // 7. Done — convert to blob URL for preview + download.
+      // 7. Done -- convert to blob URL for preview + download.
       setStatusMsg('Finalising PNG...');
       setProgress(0.98);
       await yieldToBrowser();
       const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+      if (!blob) throw new Error('canvas.toBlob returned null -- image is too large for the browser to encode.');
       if (renderBlobUrl) URL.revokeObjectURL(renderBlobUrl);
       const url = URL.createObjectURL(blob);
-      setRenderBlobUrl(url);
+      // For renders too large to safely show in an <img> (browsers cap
+      // image element backing-store memory), skip the inline preview
+      // and just trigger an immediate download. The user explicitly
+      // wanted "no such thing as too big" so we never block, we just
+      // change the delivery mechanism.
+      const autoDownload = pixelCount > PREVIEW_MAX_PIXELS;
+      if (autoDownload) {
+        setRenderBlobUrl(null);
+        const a = document.createElement('a');
+        a.href = url;
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        a.download = `radmap_${width}x${height}_${mode}_${palette}_${ts}.png`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        // Hold the url for a bit so the download stream completes, then revoke.
+        setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      } else {
+        setRenderBlobUrl(url);
+      }
       renderCanvasRef.current = canvas;
       setProgress(1);
       setRenderState('done');
-      setStatusMsg(`Rendered ${width}×${height}, ${(blob.size / 1048576).toFixed(1)} MB`);
+      setStatusMsg(autoDownload
+        ? `Rendered ${width}x${height} (${(blob.size / 1048576).toFixed(1)} MB) - auto-downloaded (too large to preview).`
+        : `Rendered ${width}x${height}, ${(blob.size / 1048576).toFixed(1)} MB`);
     } catch (e) {
       console.error(e);
       setError(String(e.message || e));
@@ -1206,7 +1249,7 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
         </div>
         <Slider label="Bbox padding" value={paddingPct} min={0} max={25} step={1}
           onChange={setPaddingPct} fmt={v => `${v}%`} />
-        <div className={`rp-warn${pixelCount > MAX_PIXELS ? ' bad' : ''}`}>{sizeWarn}</div>
+        <div className={`rp-warn${pixelCount > MASSIVE_WARN_PIXELS ? ' bad' : ''}`}>{sizeWarn}</div>
 
         <SectionHead>Track Gaps</SectionHead>
         <label className="rp-check">
