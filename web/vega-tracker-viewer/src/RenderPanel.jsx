@@ -194,6 +194,50 @@ function makeTileProj(proj, tx, ty) {
   };
 }
 
+// Clip a traces array to only include points that can possibly affect a given
+// tile rectangle [tx..tx+tw, ty..ty+th] in full-image pixel space. The margin
+// parameter accounts for brush radius, glow size, line width, etc. Track mode
+// keeps whole segments because clipping mid-segment breaks polylines; the
+// segment loop below preserves the last point that was in-range to maintain
+// continuity. For non-track modes each point is independent.
+function clipTracesToTile(traces, proj, tx, ty, tw, th, margin, isTrack) {
+  const x0 = tx - margin, x1 = tx + tw + margin;
+  const y0 = ty - margin, y1 = ty + th + margin;
+
+  return traces.map(t => {
+    if (!isTrack) {
+      const pts = t.points.filter(p => {
+        if (p.lat == null) return false;
+        const [px, py] = proj.project(p.lat, p.lng);
+        return px >= x0 && px <= x1 && py >= y0 && py <= y1;
+      });
+      return pts.length ? { ...t, points: pts } : null;
+    }
+    // Track mode: walk segments; include a point if it or its neighbour
+    // is in range (so lines that cross the tile boundary are drawn).
+    const pts = [];
+    let prevIn = false;
+    const src = t.points;
+    for (let i = 0; i < src.length; i++) {
+      const p = src[i];
+      if (p.lat == null) { pts.push(p); prevIn = false; continue; }
+      const [px, py] = proj.project(p.lat, p.lng);
+      const inRange = px >= x0 && px <= x1 && py >= y0 && py <= y1;
+      // Include if in range, OR if predecessor was in range (exit straddle)
+      // OR if next point is in range (entry straddle).
+      const nextP = src[i + 1];
+      let nextIn = false;
+      if (nextP && nextP.lat != null) {
+        const [nx, ny] = proj.project(nextP.lat, nextP.lng);
+        nextIn = nx >= x0 && nx <= x1 && ny >= y0 && ny <= y1;
+      }
+      if (inRange || prevIn || nextIn) pts.push(p);
+      prevIn = inRange;
+    }
+    return pts.length ? { ...t, points: pts } : null;
+  }).filter(Boolean);
+}
+
 function buildProjection({ minLat, maxLat, minLng, maxLng, width, height, padding }) {
   // Pad bbox so tracks aren't flush against the edge.
   const padFrac = padding / 100;
@@ -1174,12 +1218,18 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
             }
 
             // Data rendering with tile-adjusted projection.
+            // Clip traces to only points that can affect this tile before
+            // passing them to the render functions -- this is the key
+            // optimisation: without it every tile iterates all N million
+            // points, causing OOM on large track selections.
+            const margin = Math.max(lineWidth, dotRadius, splatRadius, kernelRadius, hexSize, glowSize * lineWidth, 64);
+            const tileTraces = clipTracesToTile(traces, proj, tx, ty, tw, th, margin, mode === 'track');
             const tileProj = makeTileProj(proj, tx, ty);
-            if (mode === 'track')        await renderTracks  (tCtx, traces, renderOpts, tileProj, () => {});
-            else if (mode === 'dots')    await renderDots    (tCtx, traces, renderOpts, tileProj, () => {});
-            else if (mode === 'hex')     await renderHex     (tCtx, traces, renderOpts, tileProj, tw, th, () => {});
-            else if (mode === 'heatmap') await renderHeatmap (tCtx, traces, renderOpts, tileProj, tw, th, () => {});
-            else if (mode === 'splat')   await renderSplat   (tCtx, traces, renderOpts, tileProj, () => {});
+            if (mode === 'track')        await renderTracks  (tCtx, tileTraces, renderOpts, tileProj, () => {});
+            else if (mode === 'dots')    await renderDots    (tCtx, tileTraces, renderOpts, tileProj, () => {});
+            else if (mode === 'hex')     await renderHex     (tCtx, tileTraces, renderOpts, tileProj, tw, th, () => {});
+            else if (mode === 'heatmap') await renderHeatmap (tCtx, tileTraces, renderOpts, tileProj, tw, th, () => {});
+            else if (mode === 'splat')   await renderSplat   (tCtx, tileTraces, renderOpts, tileProj, () => {});
 
             // Vignette / grain / title are whole-image effects; skip per-tile.
 
