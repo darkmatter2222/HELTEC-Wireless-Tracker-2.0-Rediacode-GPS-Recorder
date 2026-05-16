@@ -182,6 +182,18 @@ function mercY(lat) {
 }
 
 // Build a projection function: latlng → [px, py] inside output canvas.
+// Build a tile-adjusted projection identical to proj but with all pixel
+// coordinates shifted by (-tx, -ty). Used by the tiled renderer so each
+// independent tile canvas receives correctly-clipped, tile-local coordinates
+// without any modification to the underlying render functions.
+function makeTileProj(proj, tx, ty) {
+  return {
+    ...proj,
+    project:   (lat, lng) => { const [px, py] = proj.project(lat, lng); return [px - tx, py - ty]; },
+    unproject: (px, py)   => proj.unproject(px + tx, py + ty),
+  };
+}
+
 function buildProjection({ minLat, maxLat, minLng, maxLng, width, height, padding }) {
   // Pad bbox so tracks aren't flush against the edge.
   const padFrac = padding / 100;
@@ -1000,88 +1012,92 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
         }
       }
 
-      // 3. Build canvas + projection.
-      const canvas = document.createElement('canvas');
-      canvas.width = width; canvas.height = height;
-      // Verify the browser actually honoured the requested dimensions.
-      // Chrome silently caps individual canvas dimensions at 32767 and
-      // total area at ~268 MP, downscaling without telling you. If we
-      // detect that, abort with an actionable message so the projection
-      // doesn't go off the rails.
-      if (canvas.width !== width || canvas.height !== height) {
-        throw new Error(`Browser refused ${width}x${height} canvas (clamped to ${canvas.width}x${canvas.height}). ` +
-          `Reduce dimensions -- Chrome caps individual sides at 32767 and area at ~268 MP.`);
-      }
-      const ctx = canvas.getContext('2d');
-      if (!ctx) throw new Error('Failed to acquire 2D context -- canvas too large for this browser.');
-      const bg = BG_OPTIONS.find(b => b.key === bgKey);
-      if (bg && bg.color) { ctx.fillStyle = bg.color; ctx.fillRect(0, 0, width, height); }
+      // 3. Build projection + shared rendering state (used by both paths).
       const proj = buildProjection({ minLat, maxLat, minLng, maxLng, width, height, padding: paddingPct });
-
-      // 4. Tile basemap (optional).
+      const bg = BG_OPTIONS.find(b => b.key === bgKey);
       const tileOpt = TILE_OPTIONS.find(t => t.key === tileKey);
-      if (tileOpt && tileOpt.key !== 'none') {
-        setStatusMsg('Fetching basemap tiles...');
-        setRenderState('rendering');
-        await drawTileBasemap(ctx, proj, width, height, tileOpt, tileOpacity,
-          (p) => setProgress(0.1 + p * 0.2));
-      }
-
-      // 5. Render points.
-      setStatusMsg(`Rendering ${traces.length} tracks (${estPointCount.toLocaleString()} pts)...`);
-      setRenderState('rendering');
       const lut = buildLUT(palette);
-      const opts = {
+      const renderOpts = {
         lineWidth, opacity, composite, lut,
         scaleLo: lo, scaleHi: hi, scaleMode, channel,
         dotRadius, hexSize, hexBorder, hexLabels,
         kernelRadius, intensity, splatRadius, glow, glowSize,
       };
-      const baseProgress = (tileOpt && tileOpt.key !== 'none') ? 0.3 : 0.1;
-      const setSub = (p) => setProgress(baseProgress + p * (0.9 - baseProgress));
 
-      if (mode === 'track')        await renderTracks(ctx, traces, opts, proj, setSub);
-      else if (mode === 'dots')    await renderDots(ctx, traces, opts, proj, setSub);
-      else if (mode === 'hex')     await renderHex(ctx, traces, opts, proj, width, height, setSub);
-      else if (mode === 'heatmap') await renderHeatmap(ctx, traces, opts, proj, width, height, setSub);
-      else if (mode === 'splat')   await renderSplat(ctx, traces, opts, proj, setSub);
+      // Chrome/Firefox silently cap canvas area at ~268 MP and refuse to
+      // GPU-render to oversized canvases — the canvas allocates but stays
+      // blank because draw calls are discarded at the GPU level. Slicing
+      // that blank canvas into tiles produces blank tiles. Instead we detect
+      // the oversize UP FRONT and render each tile independently using a
+      // coordinate-offset projection (makeTileProj), so no single canvas
+      // ever exceeds TILE_MAX × TILE_MAX and the GPU never refuses.
+      const TILE_MAX = 8192;
+      const SAFE_CANVAS_SIDE = 16384; // safe per-side limit for a single canvas
+      const needsTiling = width > SAFE_CANVAS_SIDE || height > SAFE_CANVAS_SIDE;
 
-      // 6. Post-processing.
-      setStatusMsg('Applying post-processing...');
-      setProgress(0.92);
-      await yieldToBrowser();
-      if (vignette > 0) applyVignette(ctx, width, height, vignette);
-      if (grain > 0)    applyGrain(ctx, width, height, grain);
-      if (showTitle) {
-        const sub = subtitle || buildAutoSubtitle(traces);
-        drawTitleOverlay(ctx, width, height, title, sub, palette, lo, hi, channel);
-      }
+      if (!needsTiling) {
+        // ---- SINGLE CANVAS PATH ----
+        const canvas = document.createElement('canvas');
+        canvas.width = width; canvas.height = height;
+        if (canvas.width !== width || canvas.height !== height) {
+          throw new Error(
+            `Browser refused ${width}×${height} canvas ` +
+            `(clamped to ${canvas.width}×${canvas.height}). ` +
+            `Chrome caps individual sides at ~32767 and area at ~268 MP.`
+          );
+        }
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('Failed to acquire 2D context — canvas too large for this browser.');
+        if (bg && bg.color) { ctx.fillStyle = bg.color; ctx.fillRect(0, 0, width, height); }
 
-      // 7. Done -- convert to blob URL for preview + download.
-      setStatusMsg('Finalising PNG...');
-      setProgress(0.98);
-      await yieldToBrowser();
+        // 4. Tile basemap (optional).
+        if (tileOpt && tileOpt.key !== 'none') {
+          setStatusMsg('Fetching basemap tiles...');
+          setRenderState('rendering');
+          await drawTileBasemap(ctx, proj, width, height, tileOpt, tileOpacity,
+            (p) => setProgress(0.1 + p * 0.2));
+        }
 
-      // Clean up any previous tile download URLs.
-      if (renderTiles) {
-        for (const t of renderTiles) URL.revokeObjectURL(t.url);
-        setRenderTiles(null);
-      }
+        // 5. Render points.
+        setStatusMsg(`Rendering ${traces.length} tracks (${estPointCount.toLocaleString()} pts)...`);
+        setRenderState('rendering');
+        const baseProgress = (tileOpt && tileOpt.key !== 'none') ? 0.3 : 0.1;
+        const setSub = (p) => setProgress(baseProgress + p * (0.9 - baseProgress));
+        if (mode === 'track')        await renderTracks(ctx, traces, renderOpts, proj, setSub);
+        else if (mode === 'dots')    await renderDots(ctx, traces, renderOpts, proj, setSub);
+        else if (mode === 'hex')     await renderHex(ctx, traces, renderOpts, proj, width, height, setSub);
+        else if (mode === 'heatmap') await renderHeatmap(ctx, traces, renderOpts, proj, width, height, setSub);
+        else if (mode === 'splat')   await renderSplat(ctx, traces, renderOpts, proj, setSub);
 
-      // Try a single-shot encode first. Browsers silently return null
-      // from toBlob when the image is too large to encode (Chrome's
-      // PNG codec roughly caps at ~268 MP/1 GB total).
-      let blob = null;
-      try {
-        blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
-      } catch (_) { blob = null; }
+        // 6. Post-processing.
+        setStatusMsg('Applying post-processing...');
+        setProgress(0.92);
+        await yieldToBrowser();
+        if (vignette > 0) applyVignette(ctx, width, height, vignette);
+        if (grain > 0)    applyGrain(ctx, width, height, grain);
+        if (showTitle) {
+          const sub = subtitle || buildAutoSubtitle(traces);
+          drawTitleOverlay(ctx, width, height, title, sub, palette, lo, hi, channel);
+        }
 
-      if (blob) {
+        // 7. Encode to blob and deliver.
+        setStatusMsg('Finalising PNG...');
+        setProgress(0.98);
+        await yieldToBrowser();
+        if (renderTiles) {
+          for (const t of renderTiles) URL.revokeObjectURL(t.url);
+          setRenderTiles(null);
+        }
+        const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+        if (!blob) {
+          throw new Error(
+            `PNG encoding failed at ${width}×${height} (${(pixelCount/1e6).toFixed(0)} MP). ` +
+            `This size exceeds the browser's codec limit (~268 MP). ` +
+            `Use 16K square or smaller for a single-file output.`
+          );
+        }
         if (renderBlobUrl) URL.revokeObjectURL(renderBlobUrl);
         const url = URL.createObjectURL(blob);
-        // For renders too large to safely show in an <img> (browsers cap
-        // image element backing-store memory), skip the inline preview
-        // and just trigger an immediate download.
         const autoDownload = pixelCount > PREVIEW_MAX_PIXELS;
         if (autoDownload) {
           setRenderBlobUrl(null);
@@ -1089,9 +1105,7 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
           a.href = url;
           const ts = new Date().toISOString().replace(/[:.]/g, '-');
           a.download = `radmap_${width}x${height}_${mode}_${palette}_${ts}.png`;
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
+          document.body.appendChild(a); a.click(); a.remove();
           setTimeout(() => URL.revokeObjectURL(url), 30_000);
         } else {
           setRenderBlobUrl(url);
@@ -1100,69 +1114,102 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
         setProgress(1);
         setRenderState('done');
         setStatusMsg(autoDownload
-          ? `Rendered ${width}x${height} (${(blob.size / 1048576).toFixed(1)} MB) - auto-downloaded.`
-          : `Rendered ${width}x${height}, ${(blob.size / 1048576).toFixed(1)} MB`);
+          ? `Rendered ${width}×${height} (${(blob.size/1048576).toFixed(1)} MB) — auto-downloaded.`
+          : `Rendered ${width}×${height}, ${(blob.size/1048576).toFixed(1)} MB`);
+
       } else {
-        // ----- TILE FALLBACK -----
-        // PNG codec refused. Carve the image up into <= 8192x8192 tiles,
-        // encode each, and expose them as a grid of download buttons.
-        // The user can stitch them later with ImageMagick / Photoshop /
-        // any image editor that supports a contact-sheet workflow.
-        setStatusMsg('Image too large to encode in one PNG -- splitting into tiles...');
-        const TILE_MAX = 8192;
-        const cols = Math.ceil(width  / TILE_MAX);
-        const rows = Math.ceil(height / TILE_MAX);
-        const tileW = Math.ceil(width  / cols);
-        const tileH = Math.ceil(height / rows);
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        // ---- TILED RENDER PATH ----
+        // Each tile gets its own ≤TILE_MAX×TILE_MAX canvas. makeTileProj
+        // shifts project() output by (-tx, -ty) so every render function
+        // draws into tile-local coordinates without modification. Points
+        // outside the tile produce off-canvas draw calls which are silently
+        // discarded by the browser. The basemap uses ctx.translate with the
+        // original proj so zoom level computation (based on full width) stays
+        // correct while draw positions land in tile space.
+        const tileCols = Math.ceil(width  / TILE_MAX);
+        const tileRows = Math.ceil(height / TILE_MAX);
+        const tileW    = Math.ceil(width  / tileCols);
+        const tileH    = Math.ceil(height / tileRows);
+        const ts       = new Date().toISOString().replace(/[:.]/g, '-');
         const baseName = `radmap_${width}x${height}_${mode}_${palette}_${ts}`;
+
+        if (renderTiles) {
+          for (const t of renderTiles) URL.revokeObjectURL(t.url);
+          setRenderTiles(null);
+        }
+        if (renderBlobUrl) { URL.revokeObjectURL(renderBlobUrl); setRenderBlobUrl(null); }
+
         const tiles = [];
-        let n = 0;
-        const total = rows * cols;
-        const tileCanvas = document.createElement('canvas');
-        for (let r = 0; r < rows; r++) {
-          for (let c = 0; c < cols; c++) {
-            const sx = c * tileW;
-            const sy = r * tileH;
-            const sw = Math.min(tileW, width  - sx);
-            const sh = Math.min(tileH, height - sy);
-            tileCanvas.width = sw;
-            tileCanvas.height = sh;
-            if (tileCanvas.width !== sw || tileCanvas.height !== sh) {
-              console.warn('[render] tile canvas was also clamped', sw, sh, '->', tileCanvas.width, tileCanvas.height);
-            }
-            const tctx = tileCanvas.getContext('2d');
-            tctx.clearRect(0, 0, sw, sh);
-            tctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
-            const tBlob = await new Promise(rs => tileCanvas.toBlob(rs, 'image/png'));
-            if (!tBlob) {
-              console.warn(`[render] tile r${r}c${c} also failed to encode`);
-              n++;
-              setProgress(0.98 + (n / total) * 0.02);
-              continue;
-            }
-            const url = URL.createObjectURL(tBlob);
-            tiles.push({
-              url, size: tBlob.size,
-              name: `${baseName}_tile_r${r+1}c${c+1}_of_r${rows}c${cols}.png`,
-              row: r + 1, col: c + 1, w: sw, h: sh,
-            });
-            n++;
-            setStatusMsg(`Encoding tile ${n}/${total}...`);
-            setProgress(0.98 + (n / total) * 0.02);
+        const totalTiles = tileCols * tileRows;
+        let tileNum = 0;
+        setRenderState('rendering');
+
+        for (let tr = 0; tr < tileRows; tr++) {
+          for (let tc = 0; tc < tileCols; tc++) {
+            const tx = tc * tileW;
+            const ty = tr * tileH;
+            const tw = Math.min(tileW, width  - tx);
+            const th = Math.min(tileH, height - ty);
+            tileNum++;
+
+            setStatusMsg(`Tile ${tileNum}/${totalTiles} — row ${tr+1}/${tileRows}, col ${tc+1}/${tileCols}`);
+            setProgress(0.1 + (tileNum - 1) / totalTiles * 0.87);
             await yieldToBrowser();
+
+            const tCanvas = document.createElement('canvas');
+            tCanvas.width = tw; tCanvas.height = th;
+            const tCtx = tCanvas.getContext('2d');
+
+            // Background in tile-local coordinates (no translate needed).
+            if (bg && bg.color) { tCtx.fillStyle = bg.color; tCtx.fillRect(0, 0, tw, th); }
+
+            // Basemap: drawTileBasemap needs the original proj + full width/height
+            // for correct zoom calculation. The ctx translate shifts full-image
+            // pixel coordinates into tile space so each map tile lands correctly.
+            if (tileOpt && tileOpt.key !== 'none') {
+              tCtx.save();
+              tCtx.translate(-tx, -ty);
+              await drawTileBasemap(tCtx, proj, width, height, tileOpt, tileOpacity, () => {});
+              tCtx.restore();
+            }
+
+            // Data rendering with tile-adjusted projection.
+            const tileProj = makeTileProj(proj, tx, ty);
+            if (mode === 'track')        await renderTracks  (tCtx, traces, renderOpts, tileProj, () => {});
+            else if (mode === 'dots')    await renderDots    (tCtx, traces, renderOpts, tileProj, () => {});
+            else if (mode === 'hex')     await renderHex     (tCtx, traces, renderOpts, tileProj, tw, th, () => {});
+            else if (mode === 'heatmap') await renderHeatmap (tCtx, traces, renderOpts, tileProj, tw, th, () => {});
+            else if (mode === 'splat')   await renderSplat   (tCtx, traces, renderOpts, tileProj, () => {});
+
+            // Vignette / grain / title are whole-image effects; skip per-tile.
+
+            const tBlob = await new Promise(r => tCanvas.toBlob(r, 'image/png'));
+            if (tBlob) {
+              tiles.push({
+                url: URL.createObjectURL(tBlob),
+                size: tBlob.size, w: tw, h: th,
+                row: tr + 1, col: tc + 1,
+                name: `${baseName}_r${tr+1}c${tc+1}_of_r${tileRows}c${tileCols}.png`,
+              });
+            } else {
+              console.warn(`[render] tile r${tr+1}c${tc+1} refused to encode`);
+            }
+            setProgress(0.1 + tileNum / totalTiles * 0.87);
           }
         }
+
         if (!tiles.length) {
-          throw new Error('Image too large -- even split into 8K tiles, the browser refused to encode. Try a smaller size.');
+          throw new Error('All tiles failed to encode — browser refused PNG even at 8K×8K. Try a smaller output size.');
         }
-        setRenderBlobUrl(null);
         setRenderTiles(tiles);
-        renderCanvasRef.current = canvas;
         setProgress(1);
         setRenderState('done');
         const totalMb = tiles.reduce((a, t) => a + t.size, 0) / 1048576;
-        setStatusMsg(`Rendered ${width}x${height} as ${rows}x${cols} tiles (${totalMb.toFixed(1)} MB total). Use the tile buttons to download.`);
+        setStatusMsg(
+          `Rendered ${width}×${height} as ${tileRows}×${tileCols} tiles ` +
+          `(${totalMb.toFixed(1)} MB total, ${tiles.length} file${tiles.length > 1 ? 's' : ''}). ` +
+          `Click "Download all tiles" below.`
+        );
       }
     } catch (e) {
       console.error(e);
@@ -1550,33 +1597,29 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
           {!renderBlobUrl && renderTiles && (
             <div className="rp-tiles-panel">
               <div className="rp-tiles-head">
-                <div className="rp-tiles-title">Render too large to preview</div>
+                <div className="rp-tiles-title">Output too large for one PNG</div>
                 <div className="rp-tiles-sub">
-                  Image was split into <b>{renderTiles.length}</b> tiles
-                  ({width}×{height} total). Download each tile below, or grab
-                  them all at once. Stitch with ImageMagick:
-                  <code> magick montage -tile {Math.max(...renderTiles.map(t => t.col))}x
-                  -geometry +0+0 *_tile_*.png stitched.png</code>
+                  {width}×{height} exceeds browser limits (~16K per side). Rendered as{' '}
+                  <b>{Math.max(...renderTiles.map(t => t.row))}×{Math.max(...renderTiles.map(t => t.col))}</b> tiles
+                  ({renderTiles.length} files). Download all tiles below, then stitch:
+                  <code> magick montage -tile {Math.max(...renderTiles.map(t => t.col))}x -geometry +0+0 *.png stitched.png</code>
                 </div>
-                <button className="rp-save-btn" onClick={() => {
+                <button className="rp-save-btn" style={{ marginTop: 12 }} onClick={() => {
                   for (const t of renderTiles) {
                     const a = document.createElement('a');
                     a.href = t.url; a.download = t.name;
                     document.body.appendChild(a); a.click(); a.remove();
                   }
                 }}>
-                  Download all {renderTiles.length} tiles
+                  ⬇ Download all {renderTiles.length} tiles
                 </button>
-              </div>
-              <div className="rp-tiles-grid"
-                style={{ gridTemplateColumns: `repeat(${Math.max(...renderTiles.map(t => t.col))}, 1fr)` }}>
-                {renderTiles.map(t => (
-                  <a key={t.name} href={t.url} download={t.name} className="rp-tile-btn">
-                    <div className="rp-tile-rc">r{t.row} · c{t.col}</div>
-                    <div className="rp-tile-dim">{t.w}×{t.h}</div>
-                    <div className="rp-tile-size">{(t.size / 1048576).toFixed(1)} MB</div>
-                  </a>
-                ))}
+                <div className="rp-tiles-info">
+                  {renderTiles.map(t => (
+                    <span key={t.name} className="rp-tile-badge">
+                      r{t.row}·c{t.col} {t.w}×{t.h} ({(t.size/1048576).toFixed(1)} MB)
+                    </span>
+                  ))}
+                </div>
               </div>
             </div>
           )}
