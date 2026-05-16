@@ -781,6 +781,11 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
   const [statusMsg, setStatusMsg]     = useState('');
   const [error, setError]             = useState(null);
   const [renderBlobUrl, setRenderBlobUrl] = useState(null);
+  // When the source canvas is too large for canvas.toBlob to encode in
+  // one go (typically > ~268 MP), we slice it into NxM smaller tiles
+  // (each <= TILE_MAX_PIXELS) and encode each separately. The tiles are
+  // exposed via dedicated download buttons rather than a single PNG.
+  const [renderTiles, setRenderTiles] = useState(null); // [{url, name, size, row, col, w, h}]
   const renderCanvasRef = useRef(null); // off-screen, holds the latest render
   const previewWrapRef  = useRef(null);
   const previewCanvasRef = useRef(null);
@@ -1056,36 +1061,109 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
       setStatusMsg('Finalising PNG...');
       setProgress(0.98);
       await yieldToBrowser();
-      const blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
-      if (!blob) throw new Error('canvas.toBlob returned null -- image is too large for the browser to encode.');
-      if (renderBlobUrl) URL.revokeObjectURL(renderBlobUrl);
-      const url = URL.createObjectURL(blob);
-      // For renders too large to safely show in an <img> (browsers cap
-      // image element backing-store memory), skip the inline preview
-      // and just trigger an immediate download. The user explicitly
-      // wanted "no such thing as too big" so we never block, we just
-      // change the delivery mechanism.
-      const autoDownload = pixelCount > PREVIEW_MAX_PIXELS;
-      if (autoDownload) {
-        setRenderBlobUrl(null);
-        const a = document.createElement('a');
-        a.href = url;
-        const ts = new Date().toISOString().replace(/[:.]/g, '-');
-        a.download = `radmap_${width}x${height}_${mode}_${palette}_${ts}.png`;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        // Hold the url for a bit so the download stream completes, then revoke.
-        setTimeout(() => URL.revokeObjectURL(url), 30_000);
-      } else {
-        setRenderBlobUrl(url);
+
+      // Clean up any previous tile download URLs.
+      if (renderTiles) {
+        for (const t of renderTiles) URL.revokeObjectURL(t.url);
+        setRenderTiles(null);
       }
-      renderCanvasRef.current = canvas;
-      setProgress(1);
-      setRenderState('done');
-      setStatusMsg(autoDownload
-        ? `Rendered ${width}x${height} (${(blob.size / 1048576).toFixed(1)} MB) - auto-downloaded (too large to preview).`
-        : `Rendered ${width}x${height}, ${(blob.size / 1048576).toFixed(1)} MB`);
+
+      // Try a single-shot encode first. Browsers silently return null
+      // from toBlob when the image is too large to encode (Chrome's
+      // PNG codec roughly caps at ~268 MP/1 GB total).
+      let blob = null;
+      try {
+        blob = await new Promise(r => canvas.toBlob(r, 'image/png'));
+      } catch (_) { blob = null; }
+
+      if (blob) {
+        if (renderBlobUrl) URL.revokeObjectURL(renderBlobUrl);
+        const url = URL.createObjectURL(blob);
+        // For renders too large to safely show in an <img> (browsers cap
+        // image element backing-store memory), skip the inline preview
+        // and just trigger an immediate download.
+        const autoDownload = pixelCount > PREVIEW_MAX_PIXELS;
+        if (autoDownload) {
+          setRenderBlobUrl(null);
+          const a = document.createElement('a');
+          a.href = url;
+          const ts = new Date().toISOString().replace(/[:.]/g, '-');
+          a.download = `radmap_${width}x${height}_${mode}_${palette}_${ts}.png`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 30_000);
+        } else {
+          setRenderBlobUrl(url);
+        }
+        renderCanvasRef.current = canvas;
+        setProgress(1);
+        setRenderState('done');
+        setStatusMsg(autoDownload
+          ? `Rendered ${width}x${height} (${(blob.size / 1048576).toFixed(1)} MB) - auto-downloaded.`
+          : `Rendered ${width}x${height}, ${(blob.size / 1048576).toFixed(1)} MB`);
+      } else {
+        // ----- TILE FALLBACK -----
+        // PNG codec refused. Carve the image up into <= 8192x8192 tiles,
+        // encode each, and expose them as a grid of download buttons.
+        // The user can stitch them later with ImageMagick / Photoshop /
+        // any image editor that supports a contact-sheet workflow.
+        setStatusMsg('Image too large to encode in one PNG -- splitting into tiles...');
+        const TILE_MAX = 8192;
+        const cols = Math.ceil(width  / TILE_MAX);
+        const rows = Math.ceil(height / TILE_MAX);
+        const tileW = Math.ceil(width  / cols);
+        const tileH = Math.ceil(height / rows);
+        const ts = new Date().toISOString().replace(/[:.]/g, '-');
+        const baseName = `radmap_${width}x${height}_${mode}_${palette}_${ts}`;
+        const tiles = [];
+        let n = 0;
+        const total = rows * cols;
+        const tileCanvas = document.createElement('canvas');
+        for (let r = 0; r < rows; r++) {
+          for (let c = 0; c < cols; c++) {
+            const sx = c * tileW;
+            const sy = r * tileH;
+            const sw = Math.min(tileW, width  - sx);
+            const sh = Math.min(tileH, height - sy);
+            tileCanvas.width = sw;
+            tileCanvas.height = sh;
+            if (tileCanvas.width !== sw || tileCanvas.height !== sh) {
+              console.warn('[render] tile canvas was also clamped', sw, sh, '->', tileCanvas.width, tileCanvas.height);
+            }
+            const tctx = tileCanvas.getContext('2d');
+            tctx.clearRect(0, 0, sw, sh);
+            tctx.drawImage(canvas, sx, sy, sw, sh, 0, 0, sw, sh);
+            const tBlob = await new Promise(rs => tileCanvas.toBlob(rs, 'image/png'));
+            if (!tBlob) {
+              console.warn(`[render] tile r${r}c${c} also failed to encode`);
+              n++;
+              setProgress(0.98 + (n / total) * 0.02);
+              continue;
+            }
+            const url = URL.createObjectURL(tBlob);
+            tiles.push({
+              url, size: tBlob.size,
+              name: `${baseName}_tile_r${r+1}c${c+1}_of_r${rows}c${cols}.png`,
+              row: r + 1, col: c + 1, w: sw, h: sh,
+            });
+            n++;
+            setStatusMsg(`Encoding tile ${n}/${total}...`);
+            setProgress(0.98 + (n / total) * 0.02);
+            await yieldToBrowser();
+          }
+        }
+        if (!tiles.length) {
+          throw new Error('Image too large -- even split into 8K tiles, the browser refused to encode. Try a smaller size.');
+        }
+        setRenderBlobUrl(null);
+        setRenderTiles(tiles);
+        renderCanvasRef.current = canvas;
+        setProgress(1);
+        setRenderState('done');
+        const totalMb = tiles.reduce((a, t) => a + t.size, 0) / 1048576;
+        setStatusMsg(`Rendered ${width}x${height} as ${rows}x${cols} tiles (${totalMb.toFixed(1)} MB total). Use the tile buttons to download.`);
+      }
     } catch (e) {
       console.error(e);
       setError(String(e.message || e));
@@ -1469,7 +1547,40 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
               }}
             />
           )}
-          {!renderBlobUrl && renderState !== 'rendering' && renderState !== 'preparing' && (
+          {!renderBlobUrl && renderTiles && (
+            <div className="rp-tiles-panel">
+              <div className="rp-tiles-head">
+                <div className="rp-tiles-title">Render too large to preview</div>
+                <div className="rp-tiles-sub">
+                  Image was split into <b>{renderTiles.length}</b> tiles
+                  ({width}×{height} total). Download each tile below, or grab
+                  them all at once. Stitch with ImageMagick:
+                  <code> magick montage -tile {Math.max(...renderTiles.map(t => t.col))}x
+                  -geometry +0+0 *_tile_*.png stitched.png</code>
+                </div>
+                <button className="rp-save-btn" onClick={() => {
+                  for (const t of renderTiles) {
+                    const a = document.createElement('a');
+                    a.href = t.url; a.download = t.name;
+                    document.body.appendChild(a); a.click(); a.remove();
+                  }
+                }}>
+                  Download all {renderTiles.length} tiles
+                </button>
+              </div>
+              <div className="rp-tiles-grid"
+                style={{ gridTemplateColumns: `repeat(${Math.max(...renderTiles.map(t => t.col))}, 1fr)` }}>
+                {renderTiles.map(t => (
+                  <a key={t.name} href={t.url} download={t.name} className="rp-tile-btn">
+                    <div className="rp-tile-rc">r{t.row} · c{t.col}</div>
+                    <div className="rp-tile-dim">{t.w}×{t.h}</div>
+                    <div className="rp-tile-size">{(t.size / 1048576).toFixed(1)} MB</div>
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+          {!renderBlobUrl && !renderTiles && renderState !== 'rendering' && renderState !== 'preparing' && (
             <div className="rp-empty">
               <div className="rp-empty-icon">🖼</div>
               <div>Select tracks &amp; press <b>Render</b> to generate a PNG</div>
