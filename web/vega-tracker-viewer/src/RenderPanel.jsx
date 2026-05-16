@@ -256,7 +256,7 @@ async function drawTileBasemap(ctx, proj, width, height, tileOpt, opacity, onPro
 
   // Concurrency-limited fetch.
   const CONCURRENT = 6;
-  let idx = 0, done = 0;
+  let idx = 0, done = 0, failed = 0;
   ctx.globalAlpha = opacity;
   async function worker() {
     while (idx < tiles.length) {
@@ -276,7 +276,10 @@ async function drawTileBasemap(ctx, proj, width, height, tileOpt, opacity, onPro
         const [px1, py1] = proj.project(lat1, lng1);
         ctx.drawImage(img, Math.floor(px0), Math.floor(py0),
                       Math.ceil(px1 - px0), Math.ceil(py1 - py0));
-      } catch { /* tile failed; skip */ }
+      } catch (err) {
+        failed++;
+        if (failed <= 3) console.warn('[render] tile failed:', url, err && err.message);
+      }
       done++;
       if (done % 4 === 0) onProgress(done / tiles.length);
     }
@@ -285,6 +288,10 @@ async function drawTileBasemap(ctx, proj, width, height, tileOpt, opacity, onPro
   for (let i = 0; i < CONCURRENT; i++) workers.push(worker());
   await Promise.all(workers);
   ctx.globalAlpha = 1;
+  console.log(`[render] tiles: ${tiles.length - failed}/${tiles.length} loaded @ z=${zoom} (${tileOpt.label})`);
+  if (failed === tiles.length && tiles.length > 0) {
+    throw new Error(`All ${tiles.length} basemap tiles failed to load. Check browser console / CORS / network.`);
+  }
 }
 
 function loadImage(url) {
@@ -710,7 +717,7 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
 
   // -- background / effects --
   const [bgKey, setBgKey]             = useState('dark');
-  const [tileKey, setTileKey]         = useState('none');
+  const [tileKey, setTileKey]         = useState('dark');
   const [tileOpacity, setTileOpacity] = useState(0.75);
   const [vignette, setVignette]       = useState(0);
   const [grain, setGrain]             = useState(0);
