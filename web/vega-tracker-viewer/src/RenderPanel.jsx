@@ -26,12 +26,49 @@ const SIZE_PRESETS = [
   { label: '6K wide',   w: 6144,  h: 3456  },
   { label: '8K UHD',    w: 7680,  h: 4320  },
   { label: '8K square', w: 8192,  h: 8192  },
-  { label: 'Poster 24×36 @300dpi', w: 7200, h: 10800 },
+  { label: '12K wide',  w: 11520, h: 6480  },
+  { label: '16K UHD',   w: 15360, h: 8640  },
+  { label: '16K square',w: 16384, h: 16384 },
+  { label: 'Poster 24x36 @300dpi', w: 7200, h: 10800 },
+  { label: 'Poster 36x24 @300dpi', w: 10800, h: 7200 },
 ];
 
-// Practical browser canvas memory ceiling. 8192×8192 = 256 MB at RGBA;
-// most browsers refuse to allocate much beyond this and tank silently.
-const MAX_PIXELS = 8192 * 10800;
+// Common aspect ratios for big custom renders. 'free' means width and
+// height move independently. Any other key locks one to the other.
+const ASPECT_RATIOS = [
+  { key: 'free',  label: 'Free',     ratio: null },
+  { key: '16:9',  label: '16:9',     ratio: 16/9 },
+  { key: '9:16',  label: '9:16',     ratio: 9/16 },
+  { key: '21:9',  label: '21:9',     ratio: 21/9 },
+  { key: '4:3',   label: '4:3',      ratio: 4/3 },
+  { key: '3:4',   label: '3:4',      ratio: 3/4 },
+  { key: '3:2',   label: '3:2',      ratio: 3/2 },
+  { key: '2:3',   label: '2:3',      ratio: 2/3 },
+  { key: '1:1',   label: '1:1',      ratio: 1 },
+  { key: '2:1',   label: '2:1',      ratio: 2 },
+];
+
+// Practical browser canvas memory ceiling. 16384x16384 = ~268 MP, 1 GB at
+// RGBA. Chrome/Edge cope; older Firefox may refuse. Past this Chrome's
+// canvas backing store silently downscales which corrupts the projection.
+const MAX_PIXELS = 16384 * 16384;
+
+// Great-circle distance in metres between two WGS84 points (haversine).
+// Used by the Render-mode "split far apart points" toggle to break track
+// lines across stretches where the GPS clearly went out (older firmware
+// before v0.7.0 didn't emit GPS_LOST / GPS_REGAINED event rows, so the
+// only signal of an outage is two consecutive fixes hundreds of metres
+// apart in time).
+function haversineMeters(aLat, aLng, bLat, bLng) {
+  const R = 6371000;
+  const toRad = Math.PI / 180;
+  const dLat = (bLat - aLat) * toRad;
+  const dLng = (bLng - aLng) * toRad;
+  const s1 = Math.sin(dLat / 2);
+  const s2 = Math.sin(dLng / 2);
+  const a = s1 * s1 + Math.cos(aLat * toRad) * Math.cos(bLat * toRad) * s2 * s2;
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+}
 
 // ---- map modes -------------------------------------------------------------
 
@@ -691,6 +728,11 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
   const [width, setWidth]   = useState(3840);
   const [height, setHeight] = useState(2160);
   const [paddingPct, setPaddingPct] = useState(4);
+  const [aspectKey, setAspectKey]   = useState('16:9');
+
+  // -- track gap splitting (for old files without GPS_LOST event rows) --
+  const [splitFarPoints, setSplitFarPoints] = useState(true);
+  const [maxGapMeters, setMaxGapMeters]     = useState(500);
 
   // -- mode & colour --
   const [mode, setMode]               = useState('track');
@@ -793,15 +835,55 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
     if (idx == null) return;
     const p = SIZE_PRESETS[idx];
     setWidth(p.w); setHeight(p.h);
+    // Snap aspect dropdown to the closest matching ratio so the lock
+    // doesn't immediately rewrite the height the user just chose.
+    const r = p.w / p.h;
+    let best = 'free', diff = Infinity;
+    for (const a of ASPECT_RATIOS) {
+      if (a.ratio == null) continue;
+      const d = Math.abs(a.ratio - r);
+      if (d < diff) { diff = d; best = a.key; }
+    }
+    setAspectKey(diff < 0.01 ? best : 'free');
+  }
+
+  // ---- aspect-locked width/height handlers ----
+  // When an aspect ratio is selected (anything but 'free') the dimensions
+  // are locked: typing in one box rewrites the other. Lets the user crank
+  // width up to 16384 without doing the divide-by-aspect mental math.
+  const aspectRatio = useMemo(() => {
+    const a = ASPECT_RATIOS.find(x => x.key === aspectKey);
+    return a ? a.ratio : null;
+  }, [aspectKey]);
+
+  function updateWidth(w) {
+    const n = Math.max(128, Math.min(32768, parseInt(w) || 1024));
+    setWidth(n);
+    if (aspectRatio) setHeight(Math.max(128, Math.round(n / aspectRatio)));
+  }
+  function updateHeight(h) {
+    const n = Math.max(128, Math.min(32768, parseInt(h) || 1024));
+    setHeight(n);
+    if (aspectRatio) setWidth(Math.max(128, Math.round(n * aspectRatio)));
+  }
+  function updateAspect(key) {
+    setAspectKey(key);
+    const a = ASPECT_RATIOS.find(x => x.key === key);
+    if (a && a.ratio) {
+      // Keep width; recompute height to match new ratio.
+      setHeight(Math.max(128, Math.round(width / a.ratio)));
+    }
   }
 
   const pixelCount = width * height;
   const memMb = (pixelCount * 4 / 1024 / 1024).toFixed(0);
   const sizeWarn = pixelCount > MAX_PIXELS
-    ? `WARNING: ${memMb} MB — browser may refuse to allocate. Reduce to ≤ 8K.`
-    : pixelCount > 4096 * 4096
-      ? `${memMb} MB target — large renders may take a minute.`
-      : `${memMb} MB target`;
+    ? `WARNING: ${memMb} MB exceeds 16K x 16K cap. Browser will refuse to allocate.`
+    : pixelCount > 8192 * 8192
+      ? `${memMb} MB target - very large; render may take minutes and use significant RAM.`
+      : pixelCount > 4096 * 4096
+        ? `${memMb} MB target - large renders may take a minute.`
+        : `${memMb} MB target`;
 
   // ---- the big render ----
 
@@ -852,14 +934,23 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
         const points = [];
         let tStart = Infinity, tEnd = -Infinity;
         let pendingGap = false;
+        let prevLat = null, prevLng = null;
         for (const r of rows) {
           if (r.event === 'GPS_LOST')     { pendingGap = true; continue; }
           if (r.event)                    { continue; }
           if (r.lat == null || r.lng == null) continue;
           if (r.lat === 0 && r.lng === 0) continue;
           const p = { ...r };
+          // Distance-based gap: break the polyline when two consecutive
+          // fixes are absurdly far apart (typical of a GPS outage on
+          // pre-v0.7.0 firmware without explicit GPS_LOST event rows).
+          if (splitFarPoints && prevLat != null) {
+            const dM = haversineMeters(prevLat, prevLng, r.lat, r.lng);
+            if (dM > maxGapMeters) pendingGap = true;
+          }
           if (pendingGap) { p.gapBefore = true; pendingGap = false; }
           points.push(p);
+          prevLat = r.lat; prevLng = r.lng;
           if (r.lat < minLat) minLat = r.lat;
           if (r.lat > maxLat) maxLat = r.lat;
           if (r.lng < minLng) minLng = r.lng;
@@ -963,7 +1054,8 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
       scaleLo, scaleHi, composite, lineWidth, opacity, dotRadius, hexSize,
       hexBorder, hexLabels, kernelRadius, intensity, splatRadius, glow,
       glowSize, bgKey, tileKey, tileOpacity, vignette, grain, showTitle,
-      title, subtitle, width, height, paddingPct, pixelCount, estPointCount]);
+      title, subtitle, width, height, paddingPct, pixelCount, estPointCount,
+      splitFarPoints, maxGapMeters]);
 
   function buildAutoSubtitle(traces) {
     if (!traces.length) return '';
@@ -1097,17 +1189,43 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
         </div>
         <div className="rp-row">
           <label className="rp-mini-label">Width
-            <input type="number" className="rp-input" value={width} min={128} max={16384}
-              onChange={e => setWidth(parseInt(e.target.value) || 1024)} />
+            <input type="number" className="rp-input" value={width} min={128} max={32768}
+              onChange={e => updateWidth(e.target.value)} />
           </label>
           <label className="rp-mini-label">Height
-            <input type="number" className="rp-input" value={height} min={128} max={16384}
-              onChange={e => setHeight(parseInt(e.target.value) || 1024)} />
+            <input type="number" className="rp-input" value={height} min={128} max={32768}
+              onChange={e => updateHeight(e.target.value)} />
+          </label>
+        </div>
+        <div className="rp-row">
+          <label className="rp-mini-label" style={{ flex: 1 }}>Aspect lock
+            <select className="rp-input" value={aspectKey} onChange={e => updateAspect(e.target.value)}>
+              {ASPECT_RATIOS.map(a => <option key={a.key} value={a.key}>{a.label}</option>)}
+            </select>
           </label>
         </div>
         <Slider label="Bbox padding" value={paddingPct} min={0} max={25} step={1}
           onChange={setPaddingPct} fmt={v => `${v}%`} />
         <div className={`rp-warn${pixelCount > MAX_PIXELS ? ' bad' : ''}`}>{sizeWarn}</div>
+
+        <SectionHead>Track Gaps</SectionHead>
+        <label className="rp-check">
+          <input type="checkbox" checked={splitFarPoints}
+            onChange={e => setSplitFarPoints(e.target.checked)} />
+          <span>Break lines across long jumps</span>
+        </label>
+        {splitFarPoints && (
+          <Slider label="Max gap distance" value={maxGapMeters}
+            min={50} max={5000} step={50}
+            onChange={setMaxGapMeters}
+            fmt={v => v >= 1000 ? `${(v/1000).toFixed(1)} km` : `${v} m`} />
+        )}
+        <div className="rp-mini-label" style={{ opacity: 0.7, fontSize: 11 }}>
+          Old files (pre-v0.7.0 firmware) drew straight lines across GPS
+          outages. Enable this to break the polyline when two consecutive
+          fixes are absurdly far apart. Newer files use GPS_LOST event
+          rows automatically.
+        </div>
 
         <SectionHead>Render Mode</SectionHead>
         <div className="rp-grid2">
