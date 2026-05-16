@@ -1762,3 +1762,11 @@ canvas {
   font-size: 11px; color: #c5f1d2;
   white-space: nowrap;
 }
+.rp-stitch-msg {
+  font-size: 12px; color: var(--accent); margin-top: 6px;
+}
+@keyframes rp-indeterminate {
+  0%   { transform: translateX(-100%) scaleX(0.3); }
+  50%  { transform: translateX(25%)   scaleX(0.6); }
+  100% { transform: translateX(100%)  scaleX(0.3); }
+}

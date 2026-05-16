@@ -842,9 +842,207 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
   // (each <= TILE_MAX_PIXELS) and encode each separately. The tiles are
   // exposed via dedicated download buttons rather than a single PNG.
   const [renderTiles, setRenderTiles] = useState(null); // [{url, name, size, row, col, w, h}]
+  const [stitchBusy, setStitchBusy]   = useState(false);
+  const [stitchMsg,  setStitchMsg]    = useState('');
   const renderCanvasRef = useRef(null); // off-screen, holds the latest render
   const previewWrapRef  = useRef(null);
   const previewCanvasRef = useRef(null);
+
+  // ---- PNG stitcher (tiles → single file without a full-size canvas) --------
+  // Uses a streaming zlib compressor (CompressionStream) so we never need to
+  // hold more than one tile-row-worth of ImageData in memory at once (instead
+  // of the entire uncompressed image).  Each tile blob is decoded into a
+  // temporary off-screen canvas just long enough to extract scan-lines, then
+  // dropped so the GC can reclaim the memory before the next tile loads.
+  const stitchAndDownload = useCallback(async () => {
+    if (!renderTiles || stitchBusy) return;
+    setStitchBusy(true);
+    setStitchMsg('Preparing stitch…');
+    try {
+      const tRows = Math.max(...renderTiles.map(t => t.row));
+      const tCols = Math.max(...renderTiles.map(t => t.col));
+      const grid  = {};
+      for (const t of renderTiles) grid[`${t.row}_${t.col}`] = t;
+
+      // ---- minimal helpers ----
+      const crcTable = (() => {
+        const tbl = new Uint32Array(256);
+        for (let n = 0; n < 256; n++) {
+          let c = n;
+          for (let k = 0; k < 8; k++) c = (c & 1) ? 0xEDB88320 ^ (c >>> 1) : c >>> 1;
+          tbl[n] = c;
+        }
+        return tbl;
+      })();
+      function crc32(buf, start = 0, end = buf.length) {
+        let c = 0xFFFFFFFF;
+        for (let i = start; i < end; i++) c = (c >>> 8) ^ crcTable[(c ^ buf[i]) & 0xFF];
+        return (c ^ 0xFFFFFFFF) >>> 0;
+      }
+      function u32be(v) {
+        const b = new Uint8Array(4);
+        new DataView(b.buffer).setUint32(0, v, false);
+        return b;
+      }
+      function pngChunk(typeStr, data) {
+        // returns an array of Uint8Arrays that form one PNG chunk
+        const type = new TextEncoder().encode(typeStr);
+        const len  = u32be(data.length);
+        // CRC covers type + data
+        const crcInput = new Uint8Array(type.length + data.length);
+        crcInput.set(type, 0); crcInput.set(data, type.length);
+        const crcBytes = u32be(crc32(crcInput));
+        return [len, type, data, crcBytes];
+      }
+
+      // IHDR
+      const ihdr = new Uint8Array(13);
+      const dv   = new DataView(ihdr.buffer);
+      dv.setUint32(0, width,  false);
+      dv.setUint32(4, height, false);
+      ihdr[8]  = 8; // bit depth
+      ihdr[9]  = 6; // RGBA
+      // bytes 10-12 are already 0 (compression/filter/interlace)
+
+      // PNG signature
+      const sig = new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]);
+
+      // ---- stream zlib via CompressionStream ----------------------------
+      // PNG IDAT payload = zlib-wrapped filtered scanlines.
+      // We push scanlines in batches (BATCH rows at a time) to amortise
+      // the async overhead of the writer interface.
+      const BATCH = 64; // rows per write call
+      const ds     = new CompressionStream('deflate'); // produces zlib
+      const writer = ds.writable.getWriter();
+      const reader = ds.readable.getReader();
+
+      const idatChunks = []; // each element = one IDAT chunk's flat bytes
+      const collecting = (async () => {
+        // Collect compressed chunks as they emerge.
+        // We emit one IDAT per compressed chunk (PNG allows multiple IDATs).
+        let buf = new Uint8Array(0);
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          // Accumulate until we have a reasonably-sized chunk (~256 KB)
+          const merged = new Uint8Array(buf.length + value.length);
+          merged.set(buf); merged.set(value, buf.length);
+          buf = merged;
+          if (buf.length >= 256 * 1024) {
+            idatChunks.push(...pngChunk('IDAT', buf));
+            buf = new Uint8Array(0);
+          }
+        }
+        if (buf.length) idatChunks.push(...pngChunk('IDAT', buf));
+      })();
+
+      // Helper: load one tile blob URL → ImageData
+      async function loadTileData(tile) {
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        await new Promise((res, rej) => {
+          img.onload  = res;
+          img.onerror = rej;
+          img.src     = tile.url;
+        });
+        const c   = document.createElement('canvas');
+        c.width   = tile.w;
+        c.height  = tile.h;
+        c.getContext('2d').drawImage(img, 0, 0);
+        return c.getContext('2d').getImageData(0, 0, tile.w, tile.h);
+      }
+
+      let rowsDone = 0;
+      let pending  = new Uint8Array(0); // accumulated unflushed scanline data
+
+      async function flushPending(force = false) {
+        if (!force && pending.length < BATCH * (1 + width * 4)) return;
+        if (!pending.length) return;
+        await writer.write(pending);
+        pending = new Uint8Array(0);
+      }
+
+      // Process one tile row at a time (load all columns for that row, scan)
+      for (let tr = 1; tr <= tRows; tr++) {
+        setStitchMsg(`Stitching row ${tr}/${tRows}…`);
+
+        // Load all tiles in this tile-row
+        const rowDatas = [];
+        for (let tc = 1; tc <= tCols; tc++) {
+          const tile = grid[`${tr}_${tc}`];
+          rowDatas.push(tile ? await loadTileData(tile) : null);
+        }
+
+        const stripH = rowDatas.find(Boolean)?.height ?? 0;
+        for (let ly = 0; ly < stripH && (tr - 1) * stripH + ly < height; ly++) {
+          // One scanline: filter byte=0 (None) + RGBA pixels
+          const scanline = new Uint8Array(1 + width * 4); // filter=0 by default
+          let dx = 0;
+          for (let tc = 0; tc < tCols; tc++) {
+            const idata = rowDatas[tc];
+            if (!idata) { dx += grid[`${tr}_${tc + 1}`]?.w ?? 0; continue; }
+            const tw  = idata.width;
+            const src = idata.data;
+            // Guard against the last tile column being narrower than tileW
+            const colW = Math.min(tw, width - dx);
+            for (let lx = 0; lx < colW; lx++) {
+              const si = (ly * tw + lx) * 4;
+              const di = 1 + dx * 4;
+              scanline[di]   = src[si];
+              scanline[di+1] = src[si+1];
+              scanline[di+2] = src[si+2];
+              scanline[di+3] = src[si+3];
+              dx++;
+            }
+          }
+          // Accumulate and flush in batches
+          const next = new Uint8Array(pending.length + scanline.length);
+          next.set(pending); next.set(scanline, pending.length);
+          pending = next;
+          if (pending.length >= BATCH * (1 + width * 4)) {
+            await writer.write(pending);
+            pending = new Uint8Array(0);
+          }
+          rowsDone++;
+        }
+
+        // Release tile data before loading the next row
+        rowDatas.length = 0;
+        setStitchMsg(`Stitching row ${tr}/${tRows}… (${Math.round(rowsDone/height*100)}%)`);
+      }
+
+      if (pending.length) await writer.write(pending);
+      await writer.close();
+      await collecting;
+
+      setStitchMsg('Encoding PNG…');
+
+      // Assemble final PNG
+      const iend    = pngChunk('IEND', new Uint8Array(0));
+      const ihdrChk = pngChunk('IHDR', ihdr);
+      const parts   = [sig, ...ihdrChk, ...idatChunks, ...iend];
+      const blob    = new Blob(parts, { type: 'image/png' });
+
+      setStitchMsg(`Done — ${(blob.size / 1048576).toFixed(1)} MB. Downloading…`);
+
+      const url = URL.createObjectURL(blob);
+      const a   = document.createElement('a');
+      a.href     = url;
+      a.download = `radmap_${width}x${height}_stitched.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+
+      setStitchMsg(`Done — ${(blob.size / 1048576).toFixed(1)} MB downloaded.`);
+    } catch (err) {
+      console.error('[stitch]', err);
+      setStitchMsg(`Error: ${err.message || String(err)}`);
+    } finally {
+      setStitchBusy(false);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [renderTiles, stitchBusy, width, height]);
 
   // ---- session filtering ----
 
@@ -1647,22 +1845,38 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
           {!renderBlobUrl && renderTiles && (
             <div className="rp-tiles-panel">
               <div className="rp-tiles-head">
-                <div className="rp-tiles-title">Output too large for one PNG</div>
+                <div className="rp-tiles-title">Output too large for one canvas</div>
                 <div className="rp-tiles-sub">
-                  {width}×{height} exceeds browser limits (~16K per side). Rendered as{' '}
-                  <b>{Math.max(...renderTiles.map(t => t.row))}×{Math.max(...renderTiles.map(t => t.col))}</b> tiles
-                  ({renderTiles.length} files). Download all tiles below, then stitch:
-                  <code> magick montage -tile {Math.max(...renderTiles.map(t => t.col))}x -geometry +0+0 *.png stitched.png</code>
+                  {width}×{height} exceeds the browser's single-canvas limit (~16K per side).
+                  Rendered internally as{' '}
+                  <b>{Math.max(...renderTiles.map(t => t.row))}×{Math.max(...renderTiles.map(t => t.col))}</b> tiles.
+                  Press <b>Download single PNG</b> to stitch them into one file in-browser.
                 </div>
-                <button className="rp-save-btn" style={{ marginTop: 12 }} onClick={() => {
-                  for (const t of renderTiles) {
-                    const a = document.createElement('a');
-                    a.href = t.url; a.download = t.name;
-                    document.body.appendChild(a); a.click(); a.remove();
-                  }
-                }}>
-                  ⬇ Download all {renderTiles.length} tiles
-                </button>
+                <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
+                  <button
+                    className="rp-save-btn"
+                    disabled={stitchBusy}
+                    onClick={stitchAndDownload}>
+                    {stitchBusy ? '⏳ Stitching…' : `⬇ Download single PNG (${width}×${height})`}
+                  </button>
+                  <button className="rp-save-btn" style={{ background: '#555' }} onClick={() => {
+                    for (const t of renderTiles) {
+                      const a = document.createElement('a');
+                      a.href = t.url; a.download = t.name;
+                      document.body.appendChild(a); a.click(); a.remove();
+                    }
+                  }}>
+                    ⬇ Download {renderTiles.length} tiles separately
+                  </button>
+                </div>
+                {stitchMsg && (
+                  <div className="rp-stitch-msg">{stitchMsg}</div>
+                )}
+                {stitchBusy && (
+                  <div className="rp-progress" style={{ marginTop: 8 }}>
+                    <div style={{ width: '100%', animation: 'rp-indeterminate 1.4s ease infinite' }} />
+                  </div>
+                )}
                 <div className="rp-tiles-info">
                   {renderTiles.map(t => (
                     <span key={t.name} className="rp-tile-badge">
