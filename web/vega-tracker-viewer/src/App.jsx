@@ -14,6 +14,7 @@ import { ManagePanel } from './ManagePanel.jsx';
 import { TimelineView } from './TimelineView.jsx';
 import { DatabasePanel } from './DatabasePanel.jsx';
 import { DualRangeSlider } from './DualRangeSlider.jsx';
+import RenderPanel from './RenderPanel.jsx';
 
 // ---- constants -------------------------------------------------------------
 
@@ -687,6 +688,11 @@ export default function App() {
             onClick={() => setAppMode('manage')}>
             Data Management
           </button>
+          <button
+            className={`nav-mode-btn ${appMode === 'render' ? 'active' : ''}`}
+            onClick={() => setAppMode('render')}>
+            Render
+          </button>
         </div>
         <div className="nav-meta">
           <span>{sessions.length} session{sessions.length !== 1 ? 's' : ''}</span>
@@ -1231,6 +1237,15 @@ export default function App() {
         <div style={{ position: 'fixed', bottom: 16, right: 16, zIndex: 9999 }}>
           <div className="error-banner" style={{ maxWidth: 400 }}>{error}</div>
         </div>
+      )}
+
+      {/* === RENDER MODE === */}
+      {appMode === 'render' && (
+        <RenderPanel
+          sessions={sessions}
+          rowsBySession={rowsBySession}
+          onRowsLoaded={(newRows) => setRows(prev => ({ ...prev, ...newRows }))}
+        />
       )}
 
       </div>{/* app-body */}

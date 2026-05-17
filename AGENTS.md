@@ -652,9 +652,9 @@ patching `public/config.js` so the compiled JS references the right API URL.
 Viewer URL (LAN direct): `http://192.168.86.48:8031/`
 Viewer URL (public): `https://susmannet.duckdns.org/tracker/`
 
-### Viewer Layout — Two Top-Level Modes
+### Viewer Layout — Three Top-Level Modes
 
-The viewer has a persistent top navigation bar with **Explore** and **Data Management** mode buttons.
+The viewer has a persistent top navigation bar with **Explore**, **Data Management**, and **Render** mode buttons.
 
 **Explore mode** (default) — left sidebar + full map:
 - Sidebar tabs: Sessions | Display | Stats
@@ -672,6 +672,38 @@ The viewer has a persistent top navigation bar with **Explore** and **Data Manag
 **Data Management mode** — full-width two-column layout, no map:
 - **Left panel — Session Management** (`ManagePanel`): Rename, Delete/Restore, Merge, Export sub-tabs; active + soft-deleted sessions; triple-confirm Purge
 - **Right panel — Database** (`DatabasePanel`): backup history with source/status badges; manual backup trigger; restore; DB stats
+
+**Render mode** — full-screen offline PNG renderer (`RenderPanel.jsx`). Designed
+for producing wall-poster-grade images from hundreds of tracks / millions of
+points that would crash the live Leaflet map.
+- **Left setup column**: track picker (filter by name + date range, select all
+  visible / clear), output size presets (1080p / 2K / 4K / 6K / 8K UHD / 8K
+  square / 24×36 @300dpi poster — capped at ~88 megapixels for browser canvas
+  safety), bbox padding %, render mode (Track lines / Dots / Hex bins /
+  Heatmap / Gaussian splat), color channel (dose / cps / speed / alt / hdop /
+  accM / **time** / session), palette presets (default / inferno / viridis /
+  plasma / magma / turbo / grayscale / cyberpunk / aurora / fire / ice /
+  rainbow), scale mode (linear / log / sqrt) + auto-fit, compositing mode
+  (normal / additive / screen), per-mode style sliders (line width, dot
+  radius, hex size + border + labels, heatmap kernel + intensity, splat
+  radius + glow + glow size), background (transparent / dark / black /
+  white / off-white) + optional tile basemap (OSM / CartoDB Dark / Light /
+  OpenTopo / Esri Sat) with opacity, post-effects (vignette + film grain),
+  and a title overlay + color bar legend.
+- **Right preview column**: pan/zoom canvas explorer (mouse drag + wheel),
+  Fit / 1:1 / +/- / Save PNG buttons, progress bar during render, status
+  line, error display. The render runs on the main thread in chunked
+  rAF-yielded loops so the UI stays responsive even for million-point
+  datasets; Mercator projection is identical to Leaflet so a rendered PNG
+  geographically matches the Explore map exactly. Output is held as an
+  ObjectURL blob; pressing **Save PNG** downloads it as
+  `radmap_<W>x<H>_<mode>_<palette>_<timestamp>.png`.
+- **Concurrency / safety**: tile basemap downloader caps at 6 parallel
+  requests with `crossOrigin='anonymous'`; canvas memory is hard-capped at
+  ~88 MP (8K square) before the render button is allowed to fire.
+- **Auto subtitle**: when the subtitle field is left blank, the renderer
+  embeds `<N tracks> · <pts> pts · <start-date> → <end-date>` in the
+  overlay box automatically.
 
 ---
 
