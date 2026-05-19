@@ -15,6 +15,7 @@ import { TimelineView } from './TimelineView.jsx';
 import { DatabasePanel } from './DatabasePanel.jsx';
 import { DualRangeSlider } from './DualRangeSlider.jsx';
 import RenderPanel from './RenderPanel.jsx';
+import { ExportPanel } from './ExportPanel.jsx';
 
 // ---- constants -------------------------------------------------------------
 
@@ -372,7 +373,7 @@ export default function App() {
   const playRef = useRef();
 
   // App mode and explore sidebar panel
-  const [appMode, setAppMode] = useState('explore'); // explore | manage
+  const [appMode, setAppMode] = useState('explore'); // explore | manage | render | export
   const [explorePanel, setExplorePanel] = useState('sessions'); // sessions | display | stats
   const [searchFilter, setSearchFilter] = useState('');
 
@@ -692,6 +693,11 @@ export default function App() {
             className={`nav-mode-btn ${appMode === 'render' ? 'active' : ''}`}
             onClick={() => setAppMode('render')}>
             Render
+          </button>
+          <button
+            className={`nav-mode-btn ${appMode === 'export' ? 'active' : ''}`}
+            onClick={() => setAppMode('export')}>
+            Export
           </button>
         </div>
         <div className="nav-meta">
@@ -1246,6 +1252,11 @@ export default function App() {
           rowsBySession={rowsBySession}
           onRowsLoaded={(newRows) => setRows(prev => ({ ...prev, ...newRows }))}
         />
+      )}
+
+      {/* === EXPORT MODE === */}
+      {appMode === 'export' && (
+        <ExportPanel />
       )}
 
       </div>{/* app-body */}

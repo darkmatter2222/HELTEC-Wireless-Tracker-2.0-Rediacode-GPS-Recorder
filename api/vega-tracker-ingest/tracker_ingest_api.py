@@ -51,6 +51,7 @@ import os
 import shutil
 import subprocess
 import time
+import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
@@ -95,7 +96,7 @@ MONGO_DB          = os.getenv("MONGO_DB", "radiacode")
 SAMPLES_COLL      = os.getenv("MONGO_SAMPLES_COLLECTION", "tracker_samples")
 SESSIONS_COLL     = os.getenv("MONGO_SESSIONS_COLLECTION", "tracker_sessions")
 BACKUPS_COLL      = "tracker_backups"    # telemetry: one doc per backup attempt
-API_VERSION       = "0.7.0"
+API_VERSION       = "0.8.0"
 MAX_BODY_BYTES    = int(os.getenv("MAX_BODY_BYTES", str(8 * 1024 * 1024)))   # 8 MB
 INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "1000"))
 BACKUP_DIR        = os.getenv("BACKUP_DIR", "/backups")  # host-mounted volume
@@ -527,6 +528,124 @@ def _session_to_internal_csv(rows: list[dict]) -> str:
             row.get("accuracyM",   ""),
         ])
     return out.getvalue()
+
+
+# Windows FILETIME epoch offset: 100-nanosecond ticks between 1601-01-01 and 1970-01-01.
+# Used to produce Timestamp values matching the RadiaCode app's native .txt export.
+_FILETIME_EPOCH_DIFF = 116_444_736_000_000_000
+
+
+def _ms_to_filetime(ms: int) -> int:
+    """Convert Unix epoch milliseconds to Windows FILETIME (100-ns ticks since 1601-01-01 UTC)."""
+    return ms * 10_000 + _FILETIME_EPOCH_DIFF
+
+
+def _session_to_radiacode_txt(rows: list[dict]) -> str:
+    """Produce a RadiaCode native .txt format (tab-separated with FILETIME timestamps).
+
+    This exactly matches the format exported by the RadiaCode Android app:
+
+      Track: YYYY-MM-DD HH-MM-SS<TAB><device><TAB> <TAB>EC
+      Timestamp<TAB>Time<TAB>Latitude<TAB>Longitude<TAB>Accuracy<TAB>DoseRate<TAB>CountRate<TAB>Comment
+      <FILETIME><TAB>YYYY-MM-DD HH:MM:SS<TAB>lat<TAB>lng<TAB>acc<TAB>dose<TAB>cps<TAB> 
+
+    Timestamp: Windows FILETIME (100-nanosecond ticks since 1601-01-01 UTC).
+    Time:      UTC datetime string YYYY-MM-DD HH:MM:SS.
+    Accuracy:  metres (prefers measured accuracyM; falls back to hdop*5.0).
+    Event-only rows (no dose/GPS data) are skipped — they have no meaning in this format.
+    """
+    sorted_rows = sorted(rows, key=lambda r: r.get("timestampMs", 0))
+
+    # Track header: use first row timestamp for the track date.
+    if sorted_rows:
+        first_ms = sorted_rows[0].get("timestampMs", 0)
+        track_dt = datetime.fromtimestamp(first_ms / 1000, tz=timezone.utc)
+        track_date_str = track_dt.strftime("%Y-%m-%d %H-%M-%S")
+    else:
+        track_date_str = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d %H-%M-%S")
+
+    # Device name: derive from the deviceId field on the first row that has one.
+    device_name = "Radmap"
+    for r in sorted_rows:
+        dev = r.get("deviceId")
+        if dev and len(dev) >= 6:
+            device_name = f"RC-{dev[-6:]}"
+            break
+        elif dev:
+            device_name = dev
+            break
+
+    out = io.StringIO()
+    out.write(f"Track: {track_date_str}\t{device_name}\t \tEC\n")
+    out.write("Timestamp\tTime\tLatitude\tLongitude\tAccuracy\tDoseRate\tCountRate\tComment\n")
+
+    for row in sorted_rows:
+        ts_ms = row.get("timestampMs")
+        usv   = row.get("uSvPerHour")
+        cps   = row.get("cps")
+        lat   = row.get("latitude")
+        lng   = row.get("longitude")
+        hdop  = row.get("hdop")
+        acc_m = row.get("accuracyM")
+
+        if ts_ms is None:
+            continue
+        # Skip event-only rows (GPS_LOST / GPS_REGAINED markers with no dose data).
+        if usv is None and cps is None:
+            continue
+
+        filetime = _ms_to_filetime(ts_ms)
+        time_str = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+
+        if acc_m is not None:
+            acc = f"{acc_m:.2f}"
+        elif hdop is not None:
+            acc = f"{hdop * 5.0:.2f}"
+        else:
+            acc = ""
+
+        lat_s = f"{lat:.7f}" if lat is not None and not (lat == 0 and (lng or 0) == 0) else ""
+        lng_s = f"{lng:.7f}" if lng is not None and not (lat == 0 and (lng or 0) == 0) else ""
+
+        dose_s = f"{usv}" if usv is not None else ""
+        cps_s  = f"{cps}" if cps is not None else ""
+
+        out.write(f"{filetime}\t{time_str}\t{lat_s}\t{lng_s}\t{acc}\t{dose_s}\t{cps_s}\t \n")
+
+    return out.getvalue()
+
+
+def _split_to_parts(content: str, max_bytes: int, header_line_count: int) -> list[str]:
+    """Split newline-delimited content into chunks where each chunk (including
+    its header re-attached) fits within max_bytes.  The first header_line_count
+    lines are treated as header and prepended to every chunk.
+
+    Returns a list of chunk strings (each already includes the header).
+    """
+    lines = content.split("\n")
+    header_lines = lines[:header_line_count]
+    data_lines   = [l for l in lines[header_line_count:] if l]  # skip blank trailing lines
+    header_text  = "\n".join(header_lines) + "\n"
+    header_bytes = len(header_text.encode("utf-8"))
+
+    parts: list[str] = []
+    current: list[str] = []
+    current_bytes = header_bytes
+
+    for line in data_lines:
+        line_bytes = len((line + "\n").encode("utf-8"))
+        if current_bytes + line_bytes > max_bytes and current:
+            parts.append(header_text + "\n".join(current) + "\n")
+            current = [line]
+            current_bytes = header_bytes + line_bytes
+        else:
+            current.append(line)
+            current_bytes += line_bytes
+
+    if current:
+        parts.append(header_text + "\n".join(current) + "\n")
+
+    return parts if parts else [content]
 
 
 def _fetch_all_rows(samples_coll, session_id: str) -> list[dict]:
@@ -1463,3 +1582,131 @@ async def ingest_csv_merge(
         "modified":   modified,
         "unchanged":  unchanged,
     })
+
+
+# ---- time-range export endpoints ------------------------------------------
+
+@app.get("/export/time-range/preview")
+def export_time_range_preview(startMs: int, endMs: int):
+    """Return row count and size estimate for a time-range export without fetching data.
+
+    Useful for the frontend to show the user what they'll get before committing
+    to the download.  Uses count_documents (fast index scan) rather than fetching rows.
+    """
+    if startMs >= endMs:
+        raise HTTPException(status_code=400, detail="startMs must be < endMs")
+
+    count = app.state.samples.count_documents({
+        "timestampMs": {"$gte": startMs, "$lte": endMs},
+    })
+
+    # Rough byte estimate: ~90 bytes per row for radiacode_txt, ~75 for CSV.
+    # Use the larger estimate so we don't surprise users with an unexpected zip.
+    est_bytes = count * 90
+    max_bytes = 10 * 1024 * 1024  # 10 MB
+    # Ceiling division for number of files.
+    est_files = max(1, (est_bytes + max_bytes - 1) // max_bytes)
+
+    return {
+        "startMs":        startMs,
+        "endMs":          endMs,
+        "rowCount":       count,
+        "estimatedBytes": est_bytes,
+        "estimatedMB":    round(est_bytes / (1024 * 1024), 2),
+        "estimatedFiles": est_files,
+    }
+
+
+@app.post("/export/time-range")
+async def export_time_range(request: Request):
+    """Export all samples within a time window, auto-splitting into a ZIP when
+    any single file would exceed maxBytesPerFile (default 10 MB).
+
+    Request body (JSON):
+        startMs          int   Unix epoch ms, inclusive
+        endMs            int   Unix epoch ms, inclusive
+        format           str   radiacode_txt | radiacode | internal
+        maxBytesPerFile  int   optional, default 10485760 (10 MB)
+
+    Response:
+        text/plain       — single .txt file when format=radiacode_txt and data <= limit
+        text/csv         — single .csv file when format=radiacode|internal and data <= limit
+        application/zip  — ZIP archive with multiple part files when data > limit
+    """
+    body = await request.json()
+    start_ms  = body.get("startMs")
+    end_ms    = body.get("endMs")
+    fmt       = body.get("format", "radiacode_txt").lower()
+    max_bytes = int(body.get("maxBytesPerFile", 10 * 1024 * 1024))
+
+    if start_ms is None or end_ms is None:
+        raise HTTPException(status_code=400, detail="startMs and endMs are required")
+    if start_ms >= end_ms:
+        raise HTTPException(status_code=400, detail="startMs must be < endMs")
+    if fmt not in ("radiacode_txt", "radiacode", "internal"):
+        raise HTTPException(status_code=400,
+                            detail=f"unknown format {fmt!r}; use radiacode_txt, radiacode, or internal")
+
+    rows = list(app.state.samples.find(
+        {"timestampMs": {"$gte": start_ms, "$lte": end_ms}},
+        sort=[("timestampMs", 1)],
+        projection={"_id": 0},
+    ))
+
+    if not rows:
+        raise HTTPException(status_code=404,
+                            detail="no data found in the specified time range")
+
+    # Date range label for filenames.
+    start_dt_str = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).strftime("%Y%m%d")
+    end_dt_str   = datetime.fromtimestamp(end_ms   / 1000, tz=timezone.utc).strftime("%Y%m%d")
+    range_label  = f"{start_dt_str}_{end_dt_str}"
+
+    log.info("export/time-range: %d rows, format=%s, range=%s", len(rows), fmt, range_label)
+
+    # Generate the full export content.
+    if fmt == "radiacode_txt":
+        content      = _session_to_radiacode_txt(rows)
+        ext          = "txt"
+        mime         = "text/plain"
+        header_lines = 2  # "Track: ..." + column header
+    elif fmt == "radiacode":
+        content      = _session_to_radiacode_csv(rows)
+        ext          = "csv"
+        mime         = "text/csv"
+        header_lines = 1
+    else:  # internal
+        content      = _session_to_internal_csv(rows)
+        ext          = "csv"
+        mime         = "text/csv"
+        header_lines = 1
+
+    content_bytes = content.encode("utf-8")
+
+    if len(content_bytes) <= max_bytes:
+        # Single file — stream directly.
+        filename = f"radmap_{range_label}.{ext}"
+        return StreamingResponse(
+            iter([content_bytes]),
+            media_type=mime,
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    # Multiple files needed — split at row boundaries and ZIP them.
+    parts = _split_to_parts(content, max_bytes, header_lines)
+    zip_buf = io.BytesIO()
+    with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for i, part_text in enumerate(parts, start=1):
+            fname = f"radmap_{range_label}_part{i:02d}.{ext}"
+            zf.writestr(fname, part_text.encode("utf-8"))
+
+    zip_bytes    = zip_buf.getvalue()
+    zip_filename = f"radmap_{range_label}_{len(parts)}parts.zip"
+    log.info("export/time-range: split into %d parts, zip size=%d bytes",
+             len(parts), len(zip_bytes))
+
+    return StreamingResponse(
+        iter([zip_bytes]),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
+    )

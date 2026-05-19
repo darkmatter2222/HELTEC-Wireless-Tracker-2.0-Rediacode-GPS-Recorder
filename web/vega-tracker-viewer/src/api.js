@@ -189,3 +189,55 @@ export async function restoreBackup(name) {
   }
   return r.json();
 }
+
+// ---- time-range export -----------------------------------------------------
+
+/**
+ * Get an estimate of rows / size for a time window without fetching data.
+ * @param {number} startMs  Unix epoch ms, inclusive
+ * @param {number} endMs    Unix epoch ms, inclusive
+ * @returns {{ rowCount, estimatedBytes, estimatedMB, estimatedFiles }}
+ */
+export async function fetchExportPreview(startMs, endMs) {
+  const r = await fetch(`${API_BASE}/export/time-range/preview?startMs=${startMs}&endMs=${endMs}`);
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(msg);
+  }
+  return r.json();
+}
+
+/**
+ * Export all samples in a time window.  Downloads a single file or a ZIP
+ * automatically based on whether data exceeds maxBytesPerFile (10 MB).
+ * @param {number} startMs
+ * @param {number} endMs
+ * @param {'radiacode_txt'|'radiacode'|'internal'} format
+ * @param {number} maxBytesPerFile  default 10 MB
+ */
+export async function exportTimeRange(startMs, endMs, format = 'radiacode_txt', maxBytesPerFile = 10 * 1024 * 1024) {
+  const r = await fetch(`${API_BASE}/export/time-range`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ startMs, endMs, format, maxBytesPerFile }),
+  });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(msg);
+  }
+  // Derive filename from Content-Disposition header.
+  const cd = r.headers.get('Content-Disposition') || '';
+  const fnMatch = cd.match(/filename="([^"]+)"/);
+  const isZip = r.headers.get('Content-Type') === 'application/zip';
+  const fallback = isZip ? 'radmap_export.zip' : `radmap_export.${format === 'radiacode_txt' ? 'txt' : 'csv'}`;
+  const filename = fnMatch ? fnMatch[1] : fallback;
+
+  const blob = await r.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+  return { filename, sizeBytes: blob.size };
+}
