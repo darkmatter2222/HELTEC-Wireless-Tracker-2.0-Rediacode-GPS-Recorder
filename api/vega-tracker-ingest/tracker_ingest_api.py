@@ -1690,16 +1690,16 @@ async def export_time_range(request: Request):
         raise HTTPException(status_code=404,
                             detail="no data found in the specified time range")
 
-    # Date range label for filenames.
+    # Date range label for filenames — always include the actual dates so the file
+    # is self-describing regardless of which preset the user picked.
     start_dt_str = datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
     end_dt_str   = datetime.fromtimestamp(end_ms   / 1000, tz=timezone.utc).strftime("%Y-%m-%d")
-    # Sanitize the optional UI label into a filesystem-safe slug.
     import re as _re
-    if ui_label:
-        slug = _re.sub(r'[^a-z0-9]+', '-', ui_label.lower().strip()).strip('-')
-        range_label = slug
+    if start_dt_str == end_dt_str:
+        date_slug = start_dt_str          # single day: just one date
     else:
-        range_label = f"{start_dt_str}_{end_dt_str}"
+        date_slug = f"{start_dt_str}_to_{end_dt_str}"
+    range_label = date_slug               # e.g. "2026-05-01_to_2026-05-31"
     # Format suffix keeps the filename unambiguous when format != file extension.
     fmt_slug_map = {"radiacode_txt": "radiacode", "radiacode": "radiacode-csv", "internal": "internal-csv"}
     fmt_slug = fmt_slug_map.get(fmt, fmt)
