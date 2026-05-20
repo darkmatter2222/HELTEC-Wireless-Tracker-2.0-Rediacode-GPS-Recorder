@@ -99,6 +99,7 @@ export function ExportPanel() {
   const [endDate,      setEndDate]      = useState(todayDateStr());
   const [format,       setFormat]       = useState('radiacode_txt');
   const [selectedLabel, setSelectedLabel] = useState(null); // which preset/month is active
+  const [gpsOnly,      setGpsOnly]      = useState(true);  // filter to GPS-locked samples only
 
   const [preview,        setPreview]        = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -127,7 +128,7 @@ export function ExportPanel() {
 
     setPreviewLoading(true);
     try {
-      const data = await fetchExportPreview(dayStartMs(startDate), dayEndMs(endDate));
+      const data = await fetchExportPreview(dayStartMs(startDate), dayEndMs(endDate), gpsOnly);
       setPreview(data);
     } catch (e) {
       setError(`Preview failed: ${e.message}`);
@@ -153,6 +154,7 @@ export function ExportPanel() {
         format,
         MAX_BYTES_PER_FILE,
         selectedLabel || '',
+        gpsOnly,
       );
       setStatus(`Downloaded: ${filename}  (${formatBytes(sizeBytes)})`);
     } catch (e) {
@@ -231,6 +233,26 @@ export function ExportPanel() {
                   <span className="format-desc">{f.desc}</span>
                 </button>
               ))}
+            </div>
+          </div>
+
+          {/* GPS filter toggle */}
+          <div className="export-section">
+            <div className="export-section-title">Filter</div>
+            <label className="gps-toggle-row">
+              <span className="gps-toggle-label">GPS samples only</span>
+              <input
+                type="checkbox"
+                className="gps-toggle-check"
+                checked={gpsOnly}
+                onChange={e => { setGpsOnly(e.target.checked); setPreview(null); }}
+              />
+              <span className={`gps-toggle-pill${gpsOnly ? ' on' : ''}`} />
+            </label>
+            <div className="gps-toggle-desc">
+              {gpsOnly
+                ? 'Only samples with a valid GPS fix — required for RadiaCode format'
+                : 'Include all samples — rows missing coordinates are exported as blanks'}
             </div>
           </div>
 

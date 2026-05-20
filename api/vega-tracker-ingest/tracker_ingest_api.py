@@ -540,7 +540,27 @@ def _ms_to_filetime(ms: int) -> int:
     return ms * 10_000 + _FILETIME_EPOCH_DIFF
 
 
-def _session_to_radiacode_txt(rows: list[dict]) -> str:
+def _fmt_num(v) -> str:
+    """Format a float with minimal decimal places, matching RadiaCode's native style.
+    e.g. 5.08 -> '5.08', 100.0 -> '100', 3.5 -> '3.5'
+    """
+    if v is None:
+        return ""
+    # Convert to float, strip trailing zeros after decimal point.
+    s = f"{float(v):.10g}"  # up to 10 significant digits, no trailing zeros
+    return s
+
+
+def _has_gps(row: dict) -> bool:
+    lat = row.get("latitude")
+    lng = row.get("longitude")
+    return (
+        lat is not None and lng is not None
+        and not (lat == 0 and lng == 0)
+    )
+
+
+def _session_to_radiacode_txt(rows: list[dict], gps_only: bool = False) -> str:
     """Produce a RadiaCode native .txt format (tab-separated with FILETIME timestamps).
 
     This exactly matches the format exported by the RadiaCode Android app:
@@ -553,8 +573,11 @@ def _session_to_radiacode_txt(rows: list[dict]) -> str:
     Time:      UTC datetime string YYYY-MM-DD HH:MM:SS.
     Accuracy:  metres (prefers measured accuracyM; falls back to hdop*5.0).
     Event-only rows (no dose/GPS data) are skipped — they have no meaning in this format.
+    If gps_only is True, rows without a valid lat/lng are also dropped.
     """
     sorted_rows = sorted(rows, key=lambda r: r.get("timestampMs", 0))
+    if gps_only:
+        sorted_rows = [r for r in sorted_rows if _has_gps(r)]
 
     # Track header: use first row timestamp for the track date.
     if sorted_rows:
@@ -598,17 +621,16 @@ def _session_to_radiacode_txt(rows: list[dict]) -> str:
         time_str = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
         if acc_m is not None:
-            acc = f"{acc_m:.2f}"
+            acc = _fmt_num(acc_m)
         elif hdop is not None:
-            acc = f"{hdop * 5.0:.2f}"
+            acc = _fmt_num(hdop * 5.0)
         else:
             acc = ""
 
-        lat_s = f"{lat:.7f}" if lat is not None and not (lat == 0 and (lng or 0) == 0) else ""
-        lng_s = f"{lng:.7f}" if lng is not None and not (lat == 0 and (lng or 0) == 0) else ""
-
-        dose_s = f"{usv}" if usv is not None else ""
-        cps_s  = f"{cps}" if cps is not None else ""
+        lat_s  = _fmt_num(lat) if lat is not None and not (lat == 0 and (lng or 0) == 0) else ""
+        lng_s  = _fmt_num(lng) if lng is not None and not (lat == 0 and (lng or 0) == 0) else ""
+        dose_s = _fmt_num(usv) if usv is not None else ""
+        cps_s  = _fmt_num(cps) if cps is not None else ""
 
         out.write(f"{filetime}\t{time_str}\t{lat_s}\t{lng_s}\t{acc}\t{dose_s}\t{cps_s}\t \n")
 
@@ -1587,7 +1609,7 @@ async def ingest_csv_merge(
 # ---- time-range export endpoints ------------------------------------------
 
 @app.get("/export/time-range/preview")
-def export_time_range_preview(startMs: int, endMs: int):
+def export_time_range_preview(startMs: int, endMs: int, gpsOnly: bool = False):
     """Return row count and size estimate for a time-range export without fetching data.
 
     Useful for the frontend to show the user what they'll get before committing
@@ -1596,9 +1618,13 @@ def export_time_range_preview(startMs: int, endMs: int):
     if startMs >= endMs:
         raise HTTPException(status_code=400, detail="startMs must be < endMs")
 
-    count = app.state.samples.count_documents({
-        "timestampMs": {"$gte": startMs, "$lte": endMs},
-    })
+    query: dict = {"timestampMs": {"$gte": startMs, "$lte": endMs}}
+    if gpsOnly:
+        # Only count rows that have a real GPS fix (non-null, non-zero lat+lng).
+        query["latitude"]  = {"$exists": True, "$nin": [None, 0.0]}
+        query["longitude"] = {"$exists": True, "$nin": [None, 0.0]}
+
+    count = app.state.samples.count_documents(query)
 
     # Rough byte estimate: ~90 bytes per row for radiacode_txt, ~75 for CSV.
     # Use the larger estimate so we don't surprise users with an unexpected zip.
@@ -1639,6 +1665,7 @@ async def export_time_range(request: Request):
     fmt       = body.get("format", "radiacode_txt").lower()
     max_bytes = int(body.get("maxBytesPerFile", 10 * 1024 * 1024))
     ui_label  = body.get("label", "")  # optional human-readable range name for filename
+    gps_only  = bool(body.get("gpsOnly", False))
 
     if start_ms is None or end_ms is None:
         raise HTTPException(status_code=400, detail="startMs and endMs are required")
@@ -1653,6 +1680,11 @@ async def export_time_range(request: Request):
         sort=[("timestampMs", 1)],
         projection={"_id": 0},
     ))
+
+    # Filter to GPS-locked rows client-requested (or always for radiacode_txt which
+    # requires coordinates to be meaningful).
+    if gps_only or fmt == "radiacode_txt":
+        rows = [r for r in rows if _has_gps(r) and r.get("uSvPerHour") is not None]
 
     if not rows:
         raise HTTPException(status_code=404,
@@ -1676,7 +1708,7 @@ async def export_time_range(request: Request):
 
     # Generate the full export content.
     if fmt == "radiacode_txt":
-        content      = _session_to_radiacode_txt(rows)
+        content      = _session_to_radiacode_txt(rows, gps_only=True)
         ext          = "txt"
         mime         = "text/plain"
         header_lines = 2  # "Track: ..." + column header

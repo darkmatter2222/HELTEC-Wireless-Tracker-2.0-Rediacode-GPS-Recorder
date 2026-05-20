@@ -198,8 +198,8 @@ export async function restoreBackup(name) {
  * @param {number} endMs    Unix epoch ms, inclusive
  * @returns {{ rowCount, estimatedBytes, estimatedMB, estimatedFiles }}
  */
-export async function fetchExportPreview(startMs, endMs) {
-  const r = await fetch(`${API_BASE}/export/time-range/preview?startMs=${startMs}&endMs=${endMs}`);
+export async function fetchExportPreview(startMs, endMs, gpsOnly = false) {
+  const r = await fetch(`${API_BASE}/export/time-range/preview?startMs=${startMs}&endMs=${endMs}&gpsOnly=${gpsOnly}`);
   if (!r.ok) {
     const msg = await r.text().catch(() => r.status);
     throw new Error(msg);
@@ -215,11 +215,11 @@ export async function fetchExportPreview(startMs, endMs) {
  * @param {'radiacode_txt'|'radiacode'|'internal'} format
  * @param {number} maxBytesPerFile  default 10 MB
  */
-export async function exportTimeRange(startMs, endMs, format = 'radiacode_txt', maxBytesPerFile = 10 * 1024 * 1024, label = '') {
+export async function exportTimeRange(startMs, endMs, format = 'radiacode_txt', maxBytesPerFile = 10 * 1024 * 1024, label = '', gpsOnly = false) {
   const r = await fetch(`${API_BASE}/export/time-range`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ startMs, endMs, format, maxBytesPerFile, label }),
+    body: JSON.stringify({ startMs, endMs, format, maxBytesPerFile, label, gpsOnly }),
   });
   if (!r.ok) {
     const msg = await r.text().catch(() => r.status);
