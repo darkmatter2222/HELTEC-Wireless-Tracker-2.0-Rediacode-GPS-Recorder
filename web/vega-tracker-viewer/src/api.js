@@ -229,7 +229,17 @@ export async function exportTimeRange(startMs, endMs, format = 'radiacode_txt', 
   const cd = r.headers.get('Content-Disposition') || '';
   const fnMatch = cd.match(/filename="([^"]+)"/);
   const isZip = r.headers.get('Content-Type') === 'application/zip';
-  const fallback = isZip ? 'radmap_export.zip' : `radmap_export.${format === 'radiacode_txt' ? 'txt' : 'csv'}`;
+  // Fallback filename in case Content-Disposition is missing or stripped by a proxy.
+  const extMap  = { radiacode_txt: 'txt', radiacode_trk: 'rctrk', radiacode: 'csv', internal: 'csv' };
+  const slugMap = { radiacode_txt: 'radiacode', radiacode_trk: 'radiacode', radiacode: 'radiacode-csv', internal: 'internal-csv' };
+  const startDateStr = new Date(startMs).toISOString().slice(0, 10);
+  const endDateStr   = new Date(endMs).toISOString().slice(0, 10);
+  const dateSlug = startDateStr === endDateStr ? startDateStr : `${startDateStr}_to_${endDateStr}`;
+  const fmtExt  = extMap[format]  || 'txt';
+  const fmtSlug = slugMap[format] || format;
+  const fallback = isZip
+    ? `radmap_${dateSlug}_${fmtSlug}.zip`
+    : `radmap_${dateSlug}_${fmtSlug}.${fmtExt}`;
   const filename = fnMatch ? fnMatch[1] : fallback;
 
   const blob = await r.blob();
