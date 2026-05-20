@@ -215,11 +215,11 @@ export async function fetchExportPreview(startMs, endMs) {
  * @param {'radiacode_txt'|'radiacode'|'internal'} format
  * @param {number} maxBytesPerFile  default 10 MB
  */
-export async function exportTimeRange(startMs, endMs, format = 'radiacode_txt', maxBytesPerFile = 10 * 1024 * 1024) {
+export async function exportTimeRange(startMs, endMs, format = 'radiacode_txt', maxBytesPerFile = 10 * 1024 * 1024, label = '') {
   const r = await fetch(`${API_BASE}/export/time-range`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ startMs, endMs, format, maxBytesPerFile }),
+    body: JSON.stringify({ startMs, endMs, format, maxBytesPerFile, label }),
   });
   if (!r.ok) {
     const msg = await r.text().catch(() => r.status);

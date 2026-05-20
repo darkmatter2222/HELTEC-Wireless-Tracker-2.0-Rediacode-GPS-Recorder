@@ -95,9 +95,10 @@ const MONTHS    = buildMonthOptions();
 // ---- component -------------------------------------------------------------
 
 export function ExportPanel() {
-  const [startDate, setStartDate] = useState(todayDateStr());
-  const [endDate,   setEndDate]   = useState(todayDateStr());
-  const [format,    setFormat]    = useState('radiacode_txt');
+  const [startDate,    setStartDate]    = useState(todayDateStr());
+  const [endDate,      setEndDate]      = useState(todayDateStr());
+  const [format,       setFormat]       = useState('radiacode_txt');
+  const [selectedLabel, setSelectedLabel] = useState(null); // which preset/month is active
 
   const [preview,        setPreview]        = useState(null);
   const [previewLoading, setPreviewLoading] = useState(false);
@@ -105,9 +106,10 @@ export function ExportPanel() {
   const [error,          setError]          = useState('');
   const [status,         setStatus]         = useState('');
 
-  function applyRange(start, end) {
+  function applyRange(start, end, label = null) {
     setStartDate(start);
     setEndDate(end);
+    setSelectedLabel(label);
     setPreview(null);
     setError('');
     setStatus('');
@@ -150,6 +152,7 @@ export function ExportPanel() {
         dayEndMs(endDate),
         format,
         MAX_BYTES_PER_FILE,
+        selectedLabel || '',
       );
       setStatus(`Downloaded: ${filename}  (${formatBytes(sizeBytes)})`);
     } catch (e) {
@@ -173,8 +176,9 @@ export function ExportPanel() {
             <div className="export-section-title">Quick Range</div>
             <div className="preset-grid">
               {PRESETS.map(p => (
-                <button key={p.label} className="preset-btn"
-                  onClick={() => applyRange(p.start, p.end)}>
+                <button key={p.label}
+                  className={`preset-btn${selectedLabel === p.label ? ' active' : ''}`}
+                  onClick={() => applyRange(p.start, p.end, p.label)}>
                   {p.label}
                 </button>
               ))}
@@ -186,8 +190,9 @@ export function ExportPanel() {
             <div className="export-section-title">Select Month</div>
             <div className="month-scroll">
               {MONTHS.map(m => (
-                <button key={m.label} className="month-btn"
-                  onClick={() => applyRange(m.start, m.end)}>
+                <button key={m.label}
+                  className={`month-btn${selectedLabel === m.label ? ' active' : ''}`}
+                  onClick={() => applyRange(m.start, m.end, m.label)}>
                   {m.label}
                 </button>
               ))}
@@ -196,16 +201,21 @@ export function ExportPanel() {
 
           {/* Custom date range */}
           <div className="export-section">
-            <div className="export-section-title">Custom Range</div>
+            <div className="export-section-title">
+              Custom Range
+              {selectedLabel && (
+                <span className="range-badge">{selectedLabel}</span>
+              )}
+            </div>
             <div className="date-row">
               <span className="date-label">From</span>
               <input type="date" className="date-input" value={startDate}
-                onChange={e => { setStartDate(e.target.value); setPreview(null); }} />
+                onChange={e => { setStartDate(e.target.value); setSelectedLabel(null); setPreview(null); }} />
             </div>
             <div className="date-row">
               <span className="date-label">To</span>
               <input type="date" className="date-input" value={endDate}
-                onChange={e => { setEndDate(e.target.value); setPreview(null); }} />
+                onChange={e => { setEndDate(e.target.value); setSelectedLabel(null); setPreview(null); }} />
             </div>
           </div>
 
@@ -266,7 +276,9 @@ export function ExportPanel() {
               </div>
               <div className="preview-stat">
                 <span className="preview-stat-label">Date range</span>
-                <span className="preview-stat-val muted">{startDate} → {endDate}</span>
+                <span className="preview-stat-val muted">
+                  {selectedLabel ? selectedLabel : `${startDate} → ${endDate}`}
+                </span>
               </div>
               <div className="preview-stat">
                 <span className="preview-stat-label">Format</span>
