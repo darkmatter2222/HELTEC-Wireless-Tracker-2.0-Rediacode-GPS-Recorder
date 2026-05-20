@@ -1671,9 +1671,9 @@ async def export_time_range(request: Request):
         raise HTTPException(status_code=400, detail="startMs and endMs are required")
     if start_ms >= end_ms:
         raise HTTPException(status_code=400, detail="startMs must be < endMs")
-    if fmt not in ("radiacode_txt", "radiacode", "internal"):
+    if fmt not in ("radiacode_txt", "radiacode_trk", "radiacode", "internal"):
         raise HTTPException(status_code=400,
-                            detail=f"unknown format {fmt!r}; use radiacode_txt, radiacode, or internal")
+                            detail=f"unknown format {fmt!r}; use radiacode_txt, radiacode_trk, radiacode, or internal")
 
     rows = list(app.state.samples.find(
         {"timestampMs": {"$gte": start_ms, "$lte": end_ms}},
@@ -1681,9 +1681,9 @@ async def export_time_range(request: Request):
         projection={"_id": 0},
     ))
 
-    # Filter to GPS-locked rows client-requested (or always for radiacode_txt which
-    # requires coordinates to be meaningful).
-    if gps_only or fmt == "radiacode_txt":
+    # Filter to GPS-locked rows client-requested (or always for radiacode_txt/radiacode_trk
+    # which require coordinates to be meaningful).
+    if gps_only or fmt in ("radiacode_txt", "radiacode_trk"):
         rows = [r for r in rows if _has_gps(r) and r.get("uSvPerHour") is not None]
 
     if not rows:
@@ -1701,7 +1701,7 @@ async def export_time_range(request: Request):
         date_slug = f"{start_dt_str}_to_{end_dt_str}"
     range_label = date_slug               # e.g. "2026-05-01_to_2026-05-31"
     # Format suffix keeps the filename unambiguous when format != file extension.
-    fmt_slug_map = {"radiacode_txt": "radiacode", "radiacode": "radiacode-csv", "internal": "internal-csv"}
+    fmt_slug_map = {"radiacode_txt": "radiacode", "radiacode_trk": "radiacode", "radiacode": "radiacode-csv", "internal": "internal-csv"}
     fmt_slug = fmt_slug_map.get(fmt, fmt)
 
     log.info("export/time-range: %d rows, format=%s, range=%s", len(rows), fmt, range_label)
@@ -1710,6 +1710,11 @@ async def export_time_range(request: Request):
     if fmt == "radiacode_txt":
         content      = _session_to_radiacode_txt(rows, gps_only=True)
         ext          = "txt"
+        mime         = "text/plain"
+        header_lines = 2  # "Track: ..." + column header
+    elif fmt == "radiacode_trk":
+        content      = _session_to_radiacode_txt(rows, gps_only=True)
+        ext          = "rctrk"
         mime         = "text/plain"
         header_lines = 2  # "Track: ..." + column header
     elif fmt == "radiacode":

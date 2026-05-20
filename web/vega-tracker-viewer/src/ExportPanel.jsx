@@ -84,9 +84,10 @@ function buildMonthOptions() {
 }
 
 const EXPORT_FORMATS = [
-  { key: 'radiacode_txt', label: 'RadiaCode (.txt)', ext: 'txt', desc: 'Native RadiaCode app format — tab-separated with Windows FILETIME timestamps' },
-  { key: 'radiacode',     label: 'RadiaCode CSV',    ext: 'csv', desc: 'Comma-separated RadiaCode variant with running total-dose column' },
-  { key: 'internal',      label: 'Internal CSV',     ext: 'csv', desc: 'Full firmware schema — 12 columns including event markers and accuracy' },
+  { key: 'radiacode_trk', label: 'RadiaCode (.rctrk)', ext: 'rctrk', desc: 'Native RadiaCode track format — importable directly by the RadiaCode app' },
+  { key: 'radiacode_txt', label: 'RadiaCode (.txt)',   ext: 'txt',   desc: 'Same native format with .txt extension — tab-separated with Windows FILETIME timestamps' },
+  { key: 'radiacode',     label: 'RadiaCode CSV',      ext: 'csv',   desc: 'Comma-separated RadiaCode variant with running total-dose column' },
+  { key: 'internal',      label: 'Internal CSV',       ext: 'csv',   desc: 'Full firmware schema — 12 columns including event markers and accuracy' },
 ];
 
 const PRESETS   = buildPresets();
@@ -97,7 +98,7 @@ const MONTHS    = buildMonthOptions();
 export function ExportPanel() {
   const [startDate,    setStartDate]    = useState(todayDateStr());
   const [endDate,      setEndDate]      = useState(todayDateStr());
-  const [format,       setFormat]       = useState('radiacode_txt');
+  const [format,       setFormat]       = useState('radiacode_trk');
   const [selectedLabel, setSelectedLabel] = useState(null); // which preset/month is active
   const [gpsOnly,      setGpsOnly]      = useState(true);  // filter to GPS-locked samples only
 
