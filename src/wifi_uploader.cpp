@@ -112,6 +112,30 @@ void WifiUploader::taskLoop() {
         runOnce();
         if (failedCount_ > failBefore && uploadedCount_ == okBefore) {
             ++consecutiveFailures_;
+            // v0.8.1: self-heal for lwIP pool exhaustion / heap fragmentation.
+            // After a long uptime with thousands of WiFi cycles, the lwIP pbuf
+            // pool or general heap can fragment to the point where TCP writes
+            // return EAGAIN on every attempt (observed at heap_free ~37KB after
+            // 70+ hours / 2755 cycles). A soft reboot clears all networking
+            // state and restores the pools. We only reboot if heap is genuinely
+            // low -- if heap is healthy the failures are a real server problem
+            // that a reboot cannot fix. LittleFS persists through ESP.restart()
+            // so all pending .up.csv files and the active day file are safe.
+            if (consecutiveFailures_ >= cfg::WIFI_FAIL_REBOOT_THRESHOLD) {
+                const uint32_t freeHeap = ESP.getFreeHeap();
+                if (freeHeap < cfg::WIFI_HEAL_MIN_HEAP) {
+                    Serial.printf("[WIFI] self-heal: %u failures + heap=%u < %u -- rebooting\n",
+                                  (unsigned)consecutiveFailures_,
+                                  (unsigned)freeHeap,
+                                  (unsigned)cfg::WIFI_HEAL_MIN_HEAP);
+                    event_log::appendEvent("REBOOT", "wifi_heal_low_heap");
+                    vTaskDelay(pdMS_TO_TICKS(2000)); // let serial flush
+                    ESP.restart();
+                } else {
+                    Serial.printf("[WIFI] %u failures but heap=%u OK -- skipping self-reboot\n",
+                                  (unsigned)consecutiveFailures_, (unsigned)freeHeap);
+                }
+            }
         } else if (uploadedCount_ > okBefore) {
             consecutiveFailures_ = 0;
         }

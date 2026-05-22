@@ -132,7 +132,7 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "0.8.0";
+constexpr const char* FW_VERSION = "0.8.1";
 
 // ---------------- Battery / Wi-Fi safety gate (v0.4.2) -----------------------
 // Skip the Wi-Fi upload cycle entirely if VBAT is below this threshold (V).
@@ -210,6 +210,17 @@ constexpr uint32_t DOSE_NVS_MAX_INTERVAL_MS = 300000; // 5 min hard ceiling
 // connectWifi() and uploadOne(), so 60s is pure headroom for any path the
 // pet calls don't cover. A real wedge is still caught quickly enough.
 constexpr uint32_t TASK_WDT_TIMEOUT_S = 60;
+
+// ---------------- Wi-Fi upload self-heal (v0.8.1) ---------------------------
+// After this many consecutive upload failures the uploader checks heap.
+// If free heap is also below WIFI_HEAL_MIN_HEAP the task triggers a soft
+// reboot via ESP.restart() so the lwIP memory pools and heap fragmentation
+// are reset.  LittleFS is non-volatile so all pending .up.csv files and the
+// active day file survive the reboot and upload on the next boot cycle.
+// The reboot will NOT happen if the heap is healthy; that case is treated as
+// a real server-side problem that a reboot cannot fix.
+constexpr uint32_t WIFI_FAIL_REBOOT_THRESHOLD = 10;  // consecutive failures before check
+constexpr uint32_t WIFI_HEAL_MIN_HEAP         = 50000; // bytes; reboot only below this
 
 // ---------------- GPS reliability (v0.6.0) ----------------------------------
 // Default ESP32 HardwareSerial RX FIFO is 256 bytes -- at 115200 baud that

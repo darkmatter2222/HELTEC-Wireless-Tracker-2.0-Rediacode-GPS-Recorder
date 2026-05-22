@@ -113,8 +113,23 @@ MIN_VALID_TS_MS = 1_577_836_800_000  # 2020-01-01 00:00:00 UTC
 async def lifespan(app: FastAPI):
     log.info("connecting to mongo at %s (db=%s)", _redact_mongo_uri(MONGO_URI), MONGO_DB)
     client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
-    # Force connect now so startup fails fast if mongo is unreachable.
-    client.admin.command("ping")
+    # Probe MongoDB with a retry loop so we survive server reboots where
+    # MongoDB takes several seconds to become ready after the container
+    # starts.  Previously a single ping() failure here caused FastAPI
+    # "Application startup failed" which triggered a Docker restart loop,
+    # compounding the downtime.  We retry for up to 60 s before giving up.
+    _mongo_ready_deadline = time.time() + 60
+    while True:
+        try:
+            client.admin.command("ping")
+            break
+        except Exception as exc:
+            if time.time() >= _mongo_ready_deadline:
+                raise RuntimeError(
+                    f"MongoDB not ready after 60 s — giving up: {exc}"
+                ) from exc
+            log.warning("mongo not ready yet (%s), retrying in 2 s...", exc)
+            time.sleep(2)
     db = client[MONGO_DB]
     samples = db[SAMPLES_COLL]
     sessions = db[SESSIONS_COLL]

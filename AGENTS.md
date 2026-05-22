@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.8.0`.
+Current: `0.8.1`.
 
 ---
 
@@ -355,13 +355,15 @@ Connection: 115200 baud, USB-CDC. Type `?` for the live list on device.
 | `GPASSTHRU [s]`   | pipe raw GPS NMEA to serial (default 10s) |
 | `GREBAUD`         | re-probe GPS baud rates |
 | `SYNC`            | force immediate Wi-Fi upload cycle |
-| `WIFISTAT`        | Wi-Fi uploader diagnostics (enabled, busy, counts, last HTTP status) |
+| `WIFISTAT`        | Wi-Fi uploader diagnostics (enabled, busy, counts, last HTTP status, heap_free) |
+| `REBOOT`          | soft-reset device; LittleFS/SD data is safe (use to force self-heal manually) |
 
 Commands that **do not exist** (do not add them):
 - `HB` — heartbeat is automatic every 3s, no serial trigger
 - `START` / `STOP` — recording is button-only, no serial toggle
 - `RM <id>` — `removeSession()` is internal, not serial-exposed
 - `WIPE` (no count) — prints usage; count arg is mandatory
+- `REBOOT` (with args) — takes no arguments; bare `REBOOT` is the only valid form
 
 Heartbeat format (every 3 s):
 ```
@@ -715,9 +717,12 @@ Three test suites live under `test/`:
 
 | Suite                    | Tests | What it validates |
 |--------------------------|-------|-------------------|
-| `test_line_count_native` | 10    | Buffered newline-count algorithm (the O(1) fix from v0.3.4) |
-| `test_battery_native`    | 11    | LiPo voltage-to-percent interpolation table |
-| `test_csv_schema_native` | 15    | MIN_VALID_TS_MS gate, 10-column schema, field extraction |
+| `test_line_count_native`         | 10    | Buffered newline-count algorithm (the O(1) fix from v0.3.4) |
+| `test_battery_native`            | 11    | LiPo voltage-to-percent interpolation table |
+| `test_csv_schema_native`         | 15    | MIN_VALID_TS_MS gate, 10-column schema, field extraction |
+| `test_dose_persistence_native`   |  9    | `shouldSaveDose` NVS write-gate decision logic |
+| `test_gps_transition_native`     |  9    | GPS fix transition detector (first-obs, steady-state, flap) |
+| `test_link_health_native`        |  7    | BLE link-stall watchdog, including millis() wraparound |
 
 **Prerequisites on Windows**: PlatformIO's native env calls `gcc`/`g++`/`ar` which
 are not in PATH by default. If VS Build Tools 2022 is installed, create one-time
@@ -734,11 +739,11 @@ Set-Content "$wrapDir\ar.bat"   "@echo off`r`n`"$llvm\llvm-ar.exe`" %*" -Encodin
 $env:PATH = "$wrapDir;$env:PATH"
 ```
 
-Then run all three host-side suites:
+Then run all six host-side suites:
 
 ```powershell
 pio test -e native
-# Expected: 36 test cases: 36 succeeded
+# Expected: 69 test cases: 69 succeeded
 ```
 
 ### Integration tests (requires device on serial port)
@@ -874,6 +879,37 @@ Otherwise, iterate to completion.
 ---
 
 ## Lessons Learned — Do Not Re-Litigate
+
+### lwIP Heap Exhaustion + API Startup Crash Caused Multi-Hour Upload Blackout (v0.8.1) — CRITICAL
+
+- **User-reported symptom**: ~7,000 samples accumulated on device over the course of a day and never uploaded. Device showed "2 pending" and continuous Wi-Fi retries. Server had been rebooted by a power outage hours earlier.
+- **Two independent root causes** were found and fixed simultaneously:
+
+**Bug 1 — API startup crash loop on server reboot:**
+- `tracker_ingest_api.py` `lifespan()` called `client.admin.command("ping")` once with `serverSelectionTimeoutMS=5000`. When the server rebooted, MongoDB takes several seconds to become ready. FastAPI startup threw `pymongo.errors.ServerSelectionTimeoutError`, Docker `restart: unless-stopped` restarted immediately, which looped. API was down for hours until MongoDB caught up.
+- Confirmed via `docker logs vega-tracker-ingest`: three crash clusters with "Application startup failed. Exiting." at 2026-05-21 19:34, 22:41, 22:48, 22:49.
+- **Fix (v0.8.1)**: replaced the single ping with a 60-second retry loop (2-second sleep between attempts). If MongoDB isn't ready within 60 s, raises `RuntimeError` — container restarts and tries again, eventually succeeding.
+
+**Bug 2 — Device lwIP heap exhaustion after long uptime:**
+- After ~70 hours / 2,755 upload cycles, the heap dropped from ~235 KB at boot to only ~37 KB. lwIP's pbuf memory pools were exhausted from heap fragmentation.
+- Every TCP write returned `errno=11 EAGAIN` ("No more processes") — `WiFiClient.cpp:429 write(): fail on fd 48, errno: 11`. `HTTPClient` returned `HTTPC_ERROR_SEND_PAYLOAD_FAILED (-3)` on every attempt. WiFi connected fine but zero bytes reached the server.
+- No self-healing mechanism existed. Device would have stayed stuck indefinitely with growing backlog.
+- **Diagnostic**: `WIFISTAT` showed `lastHttp=-3`; `SYNC` reproduced the error repeatedly. No entries appeared in API logs during SYNC — confirms TCP layer failure, not API rejection.
+- **Fix (v0.8.1)**: after `WIFI_FAIL_REBOOT_THRESHOLD` (10) consecutive failures AND `ESP.getFreeHeap() < WIFI_HEAL_MIN_HEAP` (50,000 bytes), the uploader logs a warning, writes `REBOOT,wifi_heal_low_heap` to `/system.log`, waits 2 s, then calls `ESP.restart()`. LittleFS is non-volatile — all pending session files survive the reboot.
+- New config knobs in `src/config.h`:
+  - `WIFI_FAIL_REBOOT_THRESHOLD = 10` — consecutive failures before self-heal check
+  - `WIFI_HEAL_MIN_HEAP = 50000` — heap floor (bytes) below which reboot is triggered
+- New serial command `REBOOT` allows manual soft-reset without USB.
+- `WIFISTAT` output extended with `heap_free=N` field for ongoing monitoring.
+
+**Data outcome**: all 10,717 pending samples (507 + 2,765 + 7,445) uploaded successfully with zero data loss after firmware flash. LittleFS files survived firmware OTA intact.
+
+**Verification (v0.8.1)**: boot log showed `heap_free=235KB`; first upload cycle `[UPLOAD] cycle done; ok=3/3 heap_free=218392`. Native tests: 69/69 pass.
+
+**Rules for future code**:
+1. Any FastAPI `lifespan()` that pings an external dependency (MongoDB, Redis, etc.) MUST use a retry loop with a deadline — never a single-shot call. MongoDB on the same server can be 10-30 s behind the container restart.
+2. The `WIFI_HEAL_MIN_HEAP` threshold must always exceed `WIFI_HEAL_MIN_HEAP * 2` of typical single-cycle overhead. At 50 KB threshold with ~12 KB/cycle overhead, there are ~4 cycles of headroom before OOM — enough time for the self-heal to trigger without a crash.
+3. When diagnosing upload failures: check `WIFISTAT` for `lastHttp=-3` and `heap_free`. If heap < 100 KB and lastHttp=-3, lwIP exhaustion is the prime suspect. `SYNC` will reproduce the errno=11 pattern confirming it.
 
 ### Wi-Fi Connect TASK_WDT Panic Boot Loop When Out of Range (v0.7.1) — CRITICAL
 

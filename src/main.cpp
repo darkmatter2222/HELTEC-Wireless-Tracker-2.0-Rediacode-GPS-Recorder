@@ -344,6 +344,7 @@ static void handleSerialCommand(const String& line) {
         Serial.println("[CMD]           SDSTAT              - SD/LittleFS backend status");
         Serial.println("[CMD]           LOG                 - dump persistent event log");
         Serial.println("[CMD]           LOGCLEAR            - erase persistent event log");
+        Serial.println("[CMD]           REBOOT              - soft-reset device (data safe)");
         return;
     }
 
@@ -424,11 +425,17 @@ static void handleSerialCommand(const String& line) {
     }
     if (upper == "WIFISTAT") {
         Serial.printf("[WIFI] enabled=%d busy=%d uploaded=%u failed=%u "
-                      "lastAttempt=%ums lastSuccess=%ums lastHttp=%d\n",
+                      "lastAttempt=%ums lastSuccess=%ums lastHttp=%d heap_free=%u\n",
                       (int)gWifi.enabled(), (int)gWifi.busy(),
                       (unsigned)gWifi.uploadedCount(), (unsigned)gWifi.failedCount(),
                       (unsigned)gWifi.lastAttemptMs(), (unsigned)gWifi.lastSuccessMs(),
-                      gWifi.lastHttpStatus());
+                      gWifi.lastHttpStatus(), (unsigned)ESP.getFreeHeap());
+        return;
+    }
+    if (upper == "REBOOT") {
+        Serial.println("[REBOOT] soft-resetting device — LittleFS data is safe");
+        vTaskDelay(pdMS_TO_TICKS(500)); // let serial flush
+        ESP.restart();
         return;
     }
     if (upper.startsWith("WIPE")) {
