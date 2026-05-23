@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.9.2`.
+Current: `0.9.3`.
 
 ---
 
@@ -935,6 +935,15 @@ Otherwise, iterate to completion.
   call it once at the top of the connect sequence and do not repeat it per-SSID.
   Mid-scan radio-mode changes lock the IRQ and cause INT_WDT regardless of the
   task watchdog timeout.
+- **Follow-on crash — `WiFi.setSleep(false)` causes `abort()` on ESP32-S3 + BLE (v0.9.3)**:
+  The v0.9.2 fix also "restored" `WiFi.setSleep(false)` thinking it was accidentally
+  dropped. On ESP32-S3 with NimBLE active, this immediately triggers
+  `"Error! Should enable WiFi modem sleep when both WiFi and Bluetooth are enabled"` +
+  `abort()` from inside the WiFi driver (raw0=12 PANIC, uptime ~10s, every boot).
+  The v0.4.1 `setSleep(false)` lesson applied to a different chip variant; on ESP32-S3
+  the BLE coexistence arbiter **requires** modem sleep to remain enabled (`WIFI_PS_MIN_MODEM`).
+  Fix: permanently removed `WiFi.setSleep(false)` from `connectWifi()` in v0.9.3.
+  **Rule**: never call `WiFi.setSleep(false)` on ESP32-S3 while NimBLE is initialized.
 
 ### Upload History Logging — `tracker_uploads` Collection (API v0.9.0)
 

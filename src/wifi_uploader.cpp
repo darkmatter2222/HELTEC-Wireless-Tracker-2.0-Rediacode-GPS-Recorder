@@ -221,8 +221,12 @@ bool WifiUploader::connectWifi() {
     // wifiInFlight=1). Fix: tear down the stack once here, then let the
     // lambda just call WiFi.begin() / WiFi.disconnect() without mode changes.
     //
-    // Also restores WiFi.setSleep(false) from v0.4.1 which was accidentally
-    // dropped in the v0.9.0 dual-SSID refactor.
+    // v0.9.3: do NOT call WiFi.setSleep(false). On ESP32-S3 with NimBLE
+    // active, the WiFi driver calls abort() if modem sleep is disabled
+    // ("Error! Should enable WiFi modem sleep when both WiFi and Bluetooth
+    // are enabled"). The BLE coexistence arbiter requires WIFI_PS_MIN_MODEM.
+    // The v0.4.1 setSleep(false) workaround applied to a different chip
+    // variant (V1.2 / original ESP32); it is illegal on ESP32-S3 + NimBLE.
     // ------------------------------------------------------------------ //
     WiFi.disconnect(false, false);
     WiFi.mode(WIFI_OFF);
@@ -230,9 +234,7 @@ bool WifiUploader::connectWifi() {
     WiFi.mode(WIFI_STA);
     // Keep PA current low to avoid brown-outs on battery with BLE coex.
     WiFi.setTxPower(WIFI_POWER_8_5dBm);
-    // v0.4.1: modem sleep + active scan is buggy in the ESP-IDF Wi-Fi driver.
-    // Accidentally dropped in the v0.9.0 refactor; restored here.
-    WiFi.setSleep(false);
+    // NOTE: WiFi.setSleep(false) intentionally absent. See comment above.
 
     // ------------------------------------------------------------------ //
     // Inner helper: associate with one SSID. Radio is already in WIFI_STA
