@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.8.1`.
+Current: `0.9.0`.
 
 ---
 
@@ -248,14 +248,38 @@ Current: `0.8.1`.
 
 ```cpp
 namespace secrets {
-constexpr const char* WIFI_SSID        = "YourNetwork";
-constexpr const char* WIFI_PASSWORD    = "YourPassword";
-constexpr const char* INGEST_URL       = "http://192.168.86.48:8030/ingest/csv";
-constexpr uint32_t    UPLOAD_INTERVAL_MS = 60000;
+  // ---- Primary (home) Wi-Fi ----
+  constexpr const char* WIFI_SSID     = "YourHomeNetwork";
+  constexpr const char* WIFI_PASSWORD = "YourHomePassword";
+  constexpr const char* INGEST_URL    = "http://192.168.86.48:8030/ingest/csv";
+
+  // ---- Secondary (mobile hotspot) Wi-Fi — optional ----
+  // Leave WIFI_SSID2 empty ("") to disable hotspot fallback.
+  constexpr const char* WIFI_SSID2     = "";   // e.g. "Ryan's iPhone"
+  constexpr const char* WIFI_PASSWORD2 = "";
+  constexpr const char* INGEST_URL2    = "https://susmannet.duckdns.org/api/ingest/csv";
+
+  // ---- HTTP Basic Auth for the internet-facing endpoint ----
+  // Applied ONLY when uploading via INGEST_URL2.
+  constexpr const char* INGEST_USER = "";   // nginx proxy username
+  constexpr const char* INGEST_PASS = "";   // nginx proxy password
+
+  constexpr uint32_t UPLOAD_INTERVAL_MS    = 60000;   // 60s
+  constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 25000; // 25s per SSID attempt
 }
 ```
 
-Empty `WIFI_SSID` or `INGEST_URL` disables the Wi-Fi uploader silently.
+**Dual-network upload (v0.9.0)**:
+- Each upload cycle tries the **home** SSID first; if the AP is not found after
+  `WIFI_CONNECT_TIMEOUT_MS` (25 s), tries the **hotspot** SSID.
+- Whichever connects, uploads to its paired `INGEST_URL` / `INGEST_URL2`.
+- `INGEST_URL2` supports `https://` — TLS certificate verification is intentionally
+  skipped (`WiFiClientSecure::setInsecure()`), avoiding the need to embed a CA chain.
+- When uploading via the remote network, `Authorization: Basic <base64>` is added
+  automatically if `INGEST_USER` / `INGEST_PASS` are non-empty.
+- `WIFISTAT` serial command now includes `net=home|remote|none` to show which
+  network was used on the last cycle.
+- Feature is disabled only when NEITHER profile has a complete SSID+URL pair.
 
 ---
 
@@ -355,7 +379,7 @@ Connection: 115200 baud, USB-CDC. Type `?` for the live list on device.
 | `GPASSTHRU [s]`   | pipe raw GPS NMEA to serial (default 10s) |
 | `GREBAUD`         | re-probe GPS baud rates |
 | `SYNC`            | force immediate Wi-Fi upload cycle |
-| `WIFISTAT`        | Wi-Fi uploader diagnostics (enabled, busy, counts, last HTTP status, heap_free) |
+| `WIFISTAT`        | Wi-Fi uploader diagnostics (enabled, busy, net=home\|remote\|none, counts, last HTTP status, heap_free) |
 | `REBOOT`          | soft-reset device; LittleFS/SD data is safe (use to force self-heal manually) |
 
 Commands that **do not exist** (do not add them):
@@ -723,6 +747,7 @@ Three test suites live under `test/`:
 | `test_dose_persistence_native`   |  9    | `shouldSaveDose` NVS write-gate decision logic |
 | `test_gps_transition_native`     |  9    | GPS fix transition detector (first-obs, steady-state, flap) |
 | `test_link_health_native`        |  7    | BLE link-stall watchdog, including millis() wraparound |
+| `test_wifi_network_select_native`| 14    | Dual-network profile enable/disable, HTTPS URL detection, Basic Auth cred check |
 
 **Prerequisites on Windows**: PlatformIO's native env calls `gcc`/`g++`/`ar` which
 are not in PATH by default. If VS Build Tools 2022 is installed, create one-time
@@ -743,7 +768,7 @@ Then run all six host-side suites:
 
 ```powershell
 pio test -e native
-# Expected: 69 test cases: 69 succeeded
+# Expected: 83 test cases: 83 succeeded
 ```
 
 ### Integration tests (requires device on serial port)
@@ -879,6 +904,38 @@ Otherwise, iterate to completion.
 ---
 
 ## Lessons Learned — Do Not Re-Litigate
+
+### Dual-Network Upload (Home + Mobile Hotspot) — v0.9.0
+
+**Design**: each upload cycle tries the **home** SSID first. If not in range after
+`WIFI_CONNECT_TIMEOUT_MS` (25 s, WDT-petted throughout), it falls back to the
+**mobile hotspot** SSID. Whichever AP connects, the matching ingest URL is used.
+
+| Field | Home | Remote (hotspot) |
+|-------|------|-----------------|
+| `WIFI_SSID` / `WIFI_SSID2` | Home AP SSID | Phone hotspot SSID |
+| `INGEST_URL` / `INGEST_URL2` | `http://192.168.86.48:8030/ingest/csv` | `https://susmannet.duckdns.org/api/ingest/csv` |
+| Auth | None (LAN, unreachable from internet) | HTTP Basic Auth via nginx proxy |
+
+**HTTPS**: `WiFiClientSecure::setInsecure()` skips cert verification — root CA embedding
+was rejected because certs expire. Data is low-sensitivity (GPS + counts); MITM risk on a
+residential hotspot is acceptable. Nginx proxy Basic Auth handles actual access control.
+
+**HTTP Basic Auth**: `HTTPClient::setAuthorization(user, pass)` auto-generates the
+`Authorization: Basic <base64>` header. Applied only on the remote network when
+`INGEST_USER` is non-empty.
+
+**WDT timing check**: worst case is `2 × 25s + 30s HTTP = 80s`. But the WDT (60s) is
+continuously petted every 200ms throughout. The pet loop means the WDT timer restarts
+every 200ms — it will never fire even if total wall-clock time exceeds 60s. This was
+confirmed by the v0.7.1 analysis; same pattern here.
+
+**`WIFISTAT`**: now includes `net=home|remote|none`. Upload log lines include `net=remote`.
+
+**Rules**:
+- `connectWifi()` must reset `activeIngestUrl_` to `nullptr` before each attempt.
+- `disconnectWifi()` also clears those pointers.
+- Any new SSID added must be reviewed for WDT pet coverage in the connect wait loop.
 
 ### lwIP Heap Exhaustion + API Startup Crash Caused Multi-Hour Upload Blackout (v0.8.1) — CRITICAL
 

@@ -424,9 +424,16 @@ static void handleSerialCommand(const String& line) {
         return;
     }
     if (upper == "WIFISTAT") {
-        Serial.printf("[WIFI] enabled=%d busy=%d uploaded=%u failed=%u "
+        const char* netStr = "none";
+        switch (gWifi.activeNet()) {
+            case WifiUploader::ActiveNet::Home:   netStr = "home";   break;
+            case WifiUploader::ActiveNet::Remote: netStr = "remote"; break;
+            default: break;
+        }
+        Serial.printf("[WIFI] enabled=%d busy=%d net=%s uploaded=%u failed=%u "
                       "lastAttempt=%ums lastSuccess=%ums lastHttp=%d heap_free=%u\n",
                       (int)gWifi.enabled(), (int)gWifi.busy(),
+                      netStr,
                       (unsigned)gWifi.uploadedCount(), (unsigned)gWifi.failedCount(),
                       (unsigned)gWifi.lastAttemptMs(), (unsigned)gWifi.lastSuccessMs(),
                       gWifi.lastHttpStatus(), (unsigned)ESP.getFreeHeap());

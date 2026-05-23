@@ -2,17 +2,23 @@
 // HTIT-Tracker Wi-Fi uploader.
 //
 // On a fixed cadence (secrets::UPLOAD_INTERVAL_MS) this module:
-//   1. If the configured Wi-Fi SSID is empty, does nothing.
+//   1. If no Wi-Fi profile (home or hotspot) is configured, does nothing.
 //   2. If there are no completed sessions to upload, does nothing.
-//   3. Otherwise associates with the SSID, POSTs each session as raw CSV
-//      to secrets::INGEST_URL, and on HTTP 2xx removes the session from
-//      LittleFS. The currently-recording session (if any) is left alone.
-//   4. Disconnects Wi-Fi when finished to save power and avoid Wi-Fi/BLE
+//   3. Otherwise tries the HOME network first, then REMOTE (hotspot) as a
+//      fallback. POSTs each pending session CSV to the endpoint associated
+//      with whichever network connected. On HTTP 2xx removes the session
+//      file from LittleFS.
+//   4. Disconnects Wi-Fi when finished to save power and reduce BLE
 //      coexistence noise.
 //
+// Dual-network flow (v0.9.0):
+//   Home profile:   secrets::WIFI_SSID  + WIFI_PASSWORD  -> INGEST_URL
+//   Remote profile: secrets::WIFI_SSID2 + WIFI_PASSWORD2 -> INGEST_URL2
+//                   + optional HTTP Basic Auth (INGEST_USER / INGEST_PASS)
+//                   + HTTPS supported (TLS cert verification skipped)
+//
 // Public surface is intentionally tiny: begin() once in setup(), tick()
-// every loop iteration. Everything is non-blocking aside from the actual
-// HTTPClient.POST which runs on the main thread for ~1-3s per session.
+// every loop iteration. Work runs on a dedicated FreeRTOS task (core 0).
 // =============================================================================
 #pragma once
 #include <Arduino.h>
@@ -34,6 +40,13 @@ public:
         Connecting,      // associating with AP
         Posting,         // streaming a file to the server
         Disconnecting,   // tearing the radio back down
+    };
+
+    // Which network is currently (or was last) used for uploading.
+    enum class ActiveNet : uint8_t {
+        None   = 0,  // not connected / never tried
+        Home   = 1,  // home Wi-Fi -> INGEST_URL (direct LAN)
+        Remote = 2,  // mobile hotspot -> INGEST_URL2 (internet)
     };
 
     void begin(SessionStore* store);
@@ -63,6 +76,8 @@ public:
     // millis() at which the next upload cycle is scheduled (0 if unknown).
     uint32_t  nextAttemptMs()  const { return nextAttempt_; }
     int       lastHttpStatus() const { return lastHttpStatus_; }
+    // Which network was used during the last (or current) upload cycle.
+    ActiveNet activeNet()      const { return (ActiveNet)activeNet_; }
 
 private:
     static void taskTrampoline(void* arg);
@@ -81,7 +96,14 @@ private:
     volatile uint32_t lastAttempt_   = 0;
     volatile uint32_t lastSuccess_   = 0;
     volatile uint32_t nextAttempt_   = 0;
-    volatile uint32_t uploadedCount_ = 0;
-    volatile uint32_t failedCount_   = 0;
+    volatile uint32_t uploadedCount_  = 0;
+    volatile uint32_t failedCount_    = 0;
     volatile int      lastHttpStatus_ = 0;
+    volatile uint8_t  activeNet_      = 0;  // ActiveNet enum
+
+    // Set by connectWifi() on success; cleared by disconnectWifi().
+    // Only accessed from the wifi_up task (no lock needed).
+    const char* activeIngestUrl_  = nullptr;
+    const char* activeIngestUser_ = nullptr;
+    const char* activeIngestPass_ = nullptr;
 };

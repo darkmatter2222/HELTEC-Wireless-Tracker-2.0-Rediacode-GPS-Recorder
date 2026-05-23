@@ -1,6 +1,7 @@
 #include "wifi_uploader.h"
 
 #include <WiFi.h>
+#include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <esp_system.h>
 #include <esp_task_wdt.h>
@@ -34,19 +35,38 @@ bool readWholeFile(SessionStore& store, const String& id, size_t maxBytes, Strin
     return store.readSessionToString(id, maxBytes, out);
 }
 
+// Returns true if a non-empty SSID + non-empty URL form a complete profile.
+static bool hasProfile(const char* ssid, const char* url) {
+    return ssid && ssid[0] != '\0' && url && url[0] != '\0';
+}
+
+// Returns true if this URL uses HTTPS.
+static bool isHttpsUrl(const char* url) {
+    // Compare the first 8 characters case-insensitively.
+    if (!url) return false;
+    const char prefix[] = "https://";
+    for (int i = 0; i < 8; ++i) {
+        char c = url[i];
+        if (c >= 'A' && c <= 'Z') c += 32;  // tolower, no ctype dependency
+        if (c != prefix[i]) return false;
+    }
+    return true;
+}
+
 } // namespace
 
 
 void WifiUploader::begin(SessionStore* store) {
     store_ = store;
 
-    // No SSID == feature disabled; this is the default for `secrets.h.example`
-    // so the firmware still builds for users who haven't set up Wi-Fi yet.
-    if (!secrets::WIFI_SSID || secrets::WIFI_SSID[0] == '\0' ||
-        !secrets::INGEST_URL || secrets::INGEST_URL[0] == '\0') {
+    // Feature requires at least one complete profile (SSID + URL pair).
+    // Either home, or remote/hotspot, or both.
+    const bool hasHome   = hasProfile(secrets::WIFI_SSID,  secrets::INGEST_URL);
+    const bool hasRemote = hasProfile(secrets::WIFI_SSID2, secrets::INGEST_URL2);
+    if (!hasHome && !hasRemote) {
         enabled_ = false;
         phase_ = (uint8_t)Phase::Disabled;
-        Serial.println("[WIFI] disabled (no SSID/INGEST_URL in secrets.h)");
+        Serial.println("[WIFI] disabled (no complete SSID+URL profile in secrets.h)");
         return;
     }
     enabled_ = true;
@@ -78,8 +98,9 @@ void WifiUploader::begin(SessionStore* store) {
         return;
     }
 
-    Serial.printf("[WIFI] uploader armed; ssid='%s' url='%s' interval=%us trackerId=%s\n",
-                  secrets::WIFI_SSID, secrets::INGEST_URL,
+    Serial.printf("[WIFI] uploader armed; home='%s' remote='%s' interval=%us trackerId=%s\n",
+                  hasHome ? secrets::WIFI_SSID   : "(disabled)",
+                  hasRemote ? secrets::WIFI_SSID2 : "(disabled)",
                   (unsigned)(secrets::UPLOAD_INTERVAL_MS / 1000),
                   chipIdString().c_str());
 }
@@ -182,59 +203,73 @@ void WifiUploader::taskLoop() {
 
 
 bool WifiUploader::connectWifi() {
-    Serial.printf("[WIFI] connecting to '%s'...\n", secrets::WIFI_SSID);
+    // Reset per-cycle state so a stale pointer from a previous cycle is never
+    // used if begin() was somehow called twice or in a weird order.
+    activeIngestUrl_  = nullptr;
+    activeIngestUser_ = nullptr;
+    activeIngestPass_ = nullptr;
+    activeNet_ = (uint8_t)ActiveNet::None;
 
-    // v0.4.8: disconnect(eraseAP=true, disconnect=true) was wiping the
-    // saved AP info every cycle, which is exactly what defeats the
-    // WiFi.persistent(true) cache. Pass false for eraseAP so the cached
-    // BSSID/channel survive and the next associate is fast.
-    WiFi.disconnect(false, false);
-    WiFi.mode(WIFI_OFF);
-    vTaskDelay(pdMS_TO_TICKS(150));
-    WiFi.mode(WIFI_STA);
-
-    // Cap TX power at 8.5 dBm before begin(). v0.4.1 used 11 dBm but
-    // brown-outs continued on battery, so we drop another notch. 8.5 dBm
-    // is still ample for any indoor home AP at <30 m and cuts the PA peak
-    // current roughly in half again vs. 11 dBm.
-    WiFi.setTxPower(WIFI_POWER_8_5dBm);
-
-    // CRITICAL (v0.4.3): leave Wi-Fi modem sleep ENABLED. With BT (NimBLE)
-    // running simultaneously, the ESP32 Wi-Fi/BT coex driver calls abort()
-    // if modem sleep is off:
-    //   "Should enable WiFi modem sleep when both WiFi and Bluetooth are enabled"
-    // The v0.4.1 setSleep(false) call (intended to stabilize connect) was
-    // the actual root cause of the boot loop, not brown-outs.
-    WiFi.begin(secrets::WIFI_SSID, secrets::WIFI_PASSWORD);
-
-    // v0.4.8: timeout now 25 s in secrets.h (was 12 s). With NimBLE running,
-    // a cold WiFi.begin can take 10-15 s for scan+assoc+DHCP, and we were
-    // missing valid associations by ~1-3 s every time. Verified in field
-    // logs: every connect that eventually succeeded did so in 2-7 s once
-    // it got past the cold start.
-    const uint32_t connectStart = millis();
-    const uint32_t deadline = connectStart + secrets::WIFI_CONNECT_TIMEOUT_MS;
-    while (WiFi.status() != WL_CONNECTED && (int32_t)(deadline - millis()) > 0) {
-        // v0.7.1: pet the task watchdog every iteration. The 25 s connect
-        // wait was the longest blocking call in the whole firmware and was
-        // NOT pet-ing the WDT, so the moment the user left Wi-Fi range the
-        // 30 s WDT (v0.6.0) panicked every cycle -> hard boot loop until
-        // they came back into range. With the WDT also bumped to 60 s in
-        // config.h this gives plenty of margin.
-        esp_task_wdt_reset();
-        vTaskDelay(pdMS_TO_TICKS(200));
-    }
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.printf("[WIFI] connect timeout (status=%d after %ums)\n",
-                      (int)WiFi.status(), (unsigned)(millis() - connectStart));
+    // ------------------------------------------------------------------ //
+    // Inner helper: attempt to associate with one SSID within the timeout.
+    // Pets the WDT every 200ms (covers the 25s cold-connect window without
+    // hitting the 60s WDT limit).  Returns true on WL_CONNECTED.
+    // ------------------------------------------------------------------ //
+    auto tryConnect = [&](const char* ssid, const char* pass) -> bool {
+        Serial.printf("[WIFI] trying '%s'...\n", ssid);
         WiFi.disconnect(false, false);
         WiFi.mode(WIFI_OFF);
+        vTaskDelay(pdMS_TO_TICKS(150));
+        WiFi.mode(WIFI_STA);
+        // Keep PA current low to avoid brown-outs on battery with BLE coex.
+        WiFi.setTxPower(WIFI_POWER_8_5dBm);
+        WiFi.begin(ssid, pass);
+        const uint32_t start    = millis();
+        const uint32_t deadline = start + secrets::WIFI_CONNECT_TIMEOUT_MS;
+        while (WiFi.status() != WL_CONNECTED && (int32_t)(deadline - millis()) > 0) {
+            esp_task_wdt_reset();   // v0.7.1: pet inside the blocking wait
+            vTaskDelay(pdMS_TO_TICKS(200));
+        }
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.printf("[WIFI] connected ip=%s rssi=%d dBm in %ums ch=%d\n",
+                          WiFi.localIP().toString().c_str(), WiFi.RSSI(),
+                          (unsigned)(millis() - start), WiFi.channel());
+            return true;
+        }
+        Serial.printf("[WIFI] '%s' timeout (status=%d after %ums)\n",
+                      ssid, (int)WiFi.status(), (unsigned)(millis() - start));
         return false;
+    };
+
+    // ---- 1. Try home profile first ----------------------------------------
+    const bool hasHome = hasProfile(secrets::WIFI_SSID, secrets::INGEST_URL);
+    if (hasHome) {
+        if (tryConnect(secrets::WIFI_SSID, secrets::WIFI_PASSWORD)) {
+            activeIngestUrl_ = secrets::INGEST_URL;
+            activeNet_ = (uint8_t)ActiveNet::Home;
+            return true;
+        }
     }
-    Serial.printf("[WIFI] connected ip=%s rssi=%d dBm in %ums ch=%d\n",
-                  WiFi.localIP().toString().c_str(), WiFi.RSSI(),
-                  (unsigned)(millis() - connectStart), WiFi.channel());
-    return true;
+
+    // ---- 2. Fall back to remote (mobile hotspot) --------------------------
+    const bool hasRemote = hasProfile(secrets::WIFI_SSID2, secrets::INGEST_URL2);
+    if (hasRemote) {
+        if (tryConnect(secrets::WIFI_SSID2, secrets::WIFI_PASSWORD2)) {
+            activeIngestUrl_ = secrets::INGEST_URL2;
+            // Apply Basic Auth credentials if configured for remote endpoint.
+            if (secrets::INGEST_USER && secrets::INGEST_USER[0] != '\0') {
+                activeIngestUser_ = secrets::INGEST_USER;
+                activeIngestPass_ = secrets::INGEST_PASS;
+            }
+            activeNet_ = (uint8_t)ActiveNet::Remote;
+            return true;
+        }
+    }
+
+    // Neither network connected.
+    WiFi.disconnect(false, false);
+    WiFi.mode(WIFI_OFF);
+    return false;
 }
 
 
@@ -243,14 +278,26 @@ void WifiUploader::disconnectWifi() {
     // v0.4.8: eraseAP=false so persistent cache survives between cycles.
     WiFi.disconnect(false, false);
     WiFi.mode(WIFI_OFF);
+    // Clear per-cycle networking state so stale pointers aren't used
+    // if something goes wrong between cycles.
+    activeIngestUrl_  = nullptr;
+    activeIngestUser_ = nullptr;
+    activeIngestPass_ = nullptr;
+    activeNet_ = (uint8_t)ActiveNet::None;
     event_log::markPhase("WIFI_DISCO_OUT");
 }
 
 
 bool WifiUploader::uploadOne(const String& filename, const String& sessionId, size_t expectedBytes) {
-    Serial.printf("[UPLOAD] %s (file=%s): file_bytes=%u heap_free=%u\n",
+    // Use the URL selected when connectWifi() succeeded. Fall back to the
+    // primary URL as a safety net (should never be needed in normal flow).
+    const char* url = activeIngestUrl_ ? activeIngestUrl_ : secrets::INGEST_URL;
+
+    Serial.printf("[UPLOAD] %s (file=%s): file_bytes=%u heap_free=%u net=%s url=%s\n",
                   sessionId.c_str(), filename.c_str(), (unsigned)expectedBytes,
-                  (unsigned)ESP.getFreeHeap());
+                  (unsigned)ESP.getFreeHeap(),
+                  activeNet_ == (uint8_t)ActiveNet::Remote ? "remote" : "home",
+                  url);
 
     // --- Stream directly from the file into HTTPClient ---------------------
     // Avoids loading the whole CSV into a heap String. On a 320 KB DRAM
@@ -289,10 +336,25 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
     }
 
     HTTPClient http;
-    if (!http.begin(secrets::INGEST_URL)) {
+    // v0.9.0: HTTPS support for the remote (internet-facing) endpoint.
+    // WiFiClientSecure is heap-allocated so it doesn't blow the task stack.
+    // setInsecure() skips certificate chain verification -- acceptable for
+    // GPS/radiation telemetry over a residential hotspot; avoids needing to
+    // embed a CA bundle in flash.
+    WiFiClientSecure* secureClient = nullptr;
+    bool beginOk;
+    if (isHttpsUrl(url)) {
+        secureClient = new WiFiClientSecure();
+        secureClient->setInsecure();
+        beginOk = http.begin(*secureClient, url);
+    } else {
+        beginOk = http.begin(url);
+    }
+    if (!beginOk) {
         Serial.printf("[UPLOAD] %s: http.begin('%s') failed\n",
-                      sessionId.c_str(), secrets::INGEST_URL);
+                      sessionId.c_str(), url);
         store_->closeSessionStream();
+        delete secureClient;
         return false;
     }
     http.setTimeout(30000);   // larger sessions need more time to stream
@@ -300,8 +362,10 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
     http.addHeader("X-Session-Id", sessionId);
     http.addHeader("X-Tracker-Id", chipIdString());
     http.addHeader("X-Firmware",   cfg::FW_VERSION);
-    if (secrets::INGEST_TOKEN && secrets::INGEST_TOKEN[0] != '\0') {
-        http.addHeader("Authorization", String("Bearer ") + secrets::INGEST_TOKEN);
+    // v0.9.0: HTTP Basic Auth for the internet-facing endpoint (nginx proxy).
+    // Applied only when creds are configured and we're on the remote network.
+    if (activeIngestUser_ && activeIngestUser_[0] != '\0') {
+        http.setAuthorization(activeIngestUser_, activeIngestPass_ ? activeIngestPass_ : "");
     }
 
     const uint32_t t0 = millis();
@@ -323,6 +387,9 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
     const String resp = (code > 0) ? http.getString() : String();
     http.end();
     store_->closeSessionStream();
+    // Clean up the heap-allocated TLS client (if any) after http.end().
+    delete secureClient;
+    secureClient = nullptr;
     lastHttpStatus_ = code;
 
     if (code >= 200 && code < 300) {
