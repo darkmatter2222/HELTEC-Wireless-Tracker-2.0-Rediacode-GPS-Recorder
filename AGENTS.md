@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.9.0`.
+Current: `0.9.2`.
 
 ---
 
@@ -620,6 +620,7 @@ ssh darkmatter2222@192.168.86.48 "curl -s http://localhost:8030/info"
 | POST   | /admin/purge/{id}          | permanent hard-delete; requires session already soft-deleted + `?confirm=PURGE_CONFIRMED` |
 | POST   | /admin/recompute-sessions  | purge pre-2020 rows, recompute all session metadata |
 | POST   | /admin/migrate-to-daily-sessions | one-shot v0.5.0 migration: rekey samples to local-eastern `YYYY-MM-DD` (requires `?confirm=MIGRATE_CONFIRMED`) |
+| GET    | /sessions/{id}/uploads     | list upload log records for a session (newest-first); `?limit=N` (default 100) |
 | POST   | /admin/backup              | trigger full-db mongodump; `?source=cron\|manual` |
 | GET    | /admin/backups             | list backups with source/status/elapsed |
 | POST   | /admin/restore/{name}      | restore from a named backup (full mongorestore) |
@@ -909,6 +910,67 @@ Otherwise, iterate to completion.
 ---
 
 ## Lessons Learned — Do Not Re-Litigate
+
+### INT_WDT Crash During Wi-Fi Mode Cycle (v0.9.2)
+
+- **Symptom**: device INT_WDT-panicked during a dual-network upload cycle when the
+  home AP was out of range. The old `connectWifi()` code called `WiFi.mode(WIFI_OFF)`
+  then `WiFi.mode(WIFI_STA)` inside the inner per-SSID lambda — once per SSID attempt.
+  The second radio-mode cycle (for the fallback hotspot SSID) happened while the MAC
+  scanner was still running, locking the radio IRQ for >800 ms, which triggers INT_WDT
+  immediately regardless of the WDT timeout setting.
+- **Fix (v0.9.2)** in `src/wifi_uploader.cpp`:
+  - `WiFi.mode(WIFI_OFF)` + `WiFi.mode(WIFI_STA)` moved to the **top** of
+    `connectWifi()`, called **once** before the per-SSID loop. The driver is fully
+    reinitialised once before any scan or association.
+  - `WiFi.setSleep(false)` restored (had been accidentally dropped in the v0.9.0
+    dual-network refactor).
+- **GPS gap on crash boot** (v0.9.2) in `src/main.cpp` and `src/event_log.{h,cpp}`:
+  - `wasLastResetCrash()` added to `event_log.h/cpp` — returns `true` for
+    INT_WDT / TASK_WDT / PANIC / WDT / BROWNOUT reset reasons.
+  - On the first GPS fix after a crash boot, `main.cpp` writes a synthetic
+    `GPS_LOST` + `GPS_REGAINED` event row at the same timestamp so the viewer
+    breaks the polyline at the crash gap, preventing a straight phantom line.
+- **Rule**: never call `WiFi.mode(WIFI_OFF)` while a scan is in progress. Always
+  call it once at the top of the connect sequence and do not repeat it per-SSID.
+  Mid-scan radio-mode changes lock the IRQ and cause INT_WDT regardless of the
+  task watchdog timeout.
+
+### Upload History Logging — `tracker_uploads` Collection (API v0.9.0)
+
+- **Purpose**: every `POST /ingest/csv` call is logged to a `tracker_uploads`
+  MongoDB collection so upload frequency, size, source IP, firmware version,
+  and row-level success/failure rates can be audited without scanning application logs.
+- **Document schema** (one doc per call):
+  ```
+  sessionId    - X-Session-Id header value
+  receivedAt   - Unix epoch ms (server-side)
+  clientIp     - request.client.host
+  username     - decoded from Authorization: Basic <b64>; "" if absent/malformed
+  payloadBytes - len(raw body bytes)
+  trackerId    - X-Tracker-Id header value
+  firmware     - X-Firmware header value
+  rowsSeen     - rowsAccepted + rowsRejected
+  rowsAccepted - rows that passed MIN_VALID_TS_MS gate
+  rowsRejected - rows below MIN_VALID_TS_MS
+  rowsInserted - documents newly written to tracker_samples
+  rowsDuplicate- docs skipped by unique index (sessionId, timestampMs)
+  durationMs   - total processing time from request entry to upload log write
+  httpStatus   - integer HTTP status returned
+  ```
+- **Index**: `[("sessionId", 1), ("receivedAt", -1)]` named `upload_session_ts`.
+- **`_extract_basic_auth_user(auth_header)`** helper: decodes `Authorization: Basic <b64>`
+  to username string; returns `""` if absent or malformed, never raises.
+- **New endpoint**: `GET /sessions/{session_id}/uploads?limit=N` — returns upload
+  docs newest-first. Route placed **before** `POST /ingest/csv` and before
+  `GET /sessions/{session_id}` to avoid FastAPI path matching conflicts.
+- **Viewer**: "Uploads" sub-tab in Data Management. Session picker auto-selects
+  the first session on mount. Table: Time / Rows (inserted/dup/rejected) / Size /
+  IP / User / Firmware / ms. Zero-insert rows are dimmed.
+- **Historical data**: records only exist from API v0.9.0 deployment onward.
+  Pre-existing sessions show an empty list, which is correct — not a bug.
+- **Rule**: any new ingest endpoint writing to `tracker_samples` must also log an
+  upload document. The `tracker_uploads` collection is the authoritative audit trail.
 
 ### Dual-Network Upload (Home + Mobile Hotspot) — v0.9.0
 
