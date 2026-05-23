@@ -440,18 +440,23 @@ function UploadsTab({ sessions }) {
 
   return (
     <div>
-      <div className="section-head">Select a session to view its ingest upload history.</div>
-
-      {/* Session picker */}
-      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, padding: '4px 12px 8px' }}>
-        {sessions.map(s => (
-          <button key={s.sessionId}
-            className={`btn-sm${selectedId === s.sessionId ? ' btn-accent' : ''}`}
-            style={{ fontSize: 10 }}
-            onClick={() => load(s.sessionId)}>
-            {s.displayName || s.sessionId}
-          </button>
-        ))}
+      {/* Session picker — single dropdown */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px' }}>
+        <label style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}>Session:</label>
+        <select
+          value={selectedId ?? ''}
+          onChange={e => load(e.target.value)}
+          style={{
+            flex: 1, background: 'var(--bg2)', color: 'var(--fg)',
+            border: '1px solid var(--border)', borderRadius: 4,
+            padding: '3px 6px', fontSize: 12,
+          }}>
+          {sessions.map(s => (
+            <option key={s.sessionId} value={s.sessionId}>
+              {s.displayName || s.sessionId}
+            </option>
+          ))}
+        </select>
       </div>
 
       {loading && (
