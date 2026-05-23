@@ -637,8 +637,23 @@ void loop() {
         static bool gpsInitDone = false;
         const bool curHasGps = gGps.hasFix();
         if (!gpsInitDone) {
-            // First observation post-boot. Don't emit -- we have no prior
-            // state to transition from. Just record the starting condition.
+            // First observation post-boot. Normally silent (no prior state to
+            // transition from). Exception: if the previous boot ended in a
+            // crash (PANIC / INT_WDT / TASK_WDT / BROWNOUT), emit GPS_LOST +
+            // GPS_REGAINED so the viewer breaks the polyline at the crash
+            // boundary rather than drawing a straight line across it.
+            if (event_log::wasLastResetCrash() && curHasGps) {
+                const uint64_t ts = gGps.bestEpochMs();
+                constexpr uint64_t MIN_VALID_TS_MS = 1577836800000ULL;
+                if (ts >= MIN_VALID_TS_MS && gStore.isRecording()) {
+                    String id = gRadia.peerAddress();
+                    id.replace(":", "");
+                    gStore.appendEvent(ts, "GPS_LOST",     id);
+                    gStore.appendEvent(ts, "GPS_REGAINED", id);
+                    Serial.printf("[GPS] crash-boot gap: wrote GPS_LOST+GPS_REGAINED at %llu\n",
+                                  (unsigned long long)ts);
+                }
+            }
             prevHasGps = curHasGps;
             gpsInitDone = true;
         } else if (curHasGps != prevHasGps) {

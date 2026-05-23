@@ -43,6 +43,7 @@ POST   /admin/restore/{name}           restore a backup into mongo (requires con
 """
 from __future__ import annotations
 
+import base64
 import csv
 import glob
 import io
@@ -96,7 +97,8 @@ MONGO_DB          = os.getenv("MONGO_DB", "radiacode")
 SAMPLES_COLL      = os.getenv("MONGO_SAMPLES_COLLECTION", "tracker_samples")
 SESSIONS_COLL     = os.getenv("MONGO_SESSIONS_COLLECTION", "tracker_sessions")
 BACKUPS_COLL      = "tracker_backups"    # telemetry: one doc per backup attempt
-API_VERSION       = "0.8.0"
+UPLOADS_COLL      = "tracker_uploads"    # one doc per POST /ingest/csv call
+API_VERSION       = "0.9.0"
 MAX_BODY_BYTES    = int(os.getenv("MAX_BODY_BYTES", str(8 * 1024 * 1024)))   # 8 MB
 INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "1000"))
 BACKUP_DIR        = os.getenv("BACKUP_DIR", "/backups")  # host-mounted volume
@@ -148,12 +150,17 @@ async def lifespan(app: FastAPI):
     backups.create_index([("name", 1)], name="backup_name_unique", unique=True)
     backups.create_index([("tsMs", -1)], name="backup_ts_desc")
 
+    uploads = db[UPLOADS_COLL]
+    uploads.create_index([("sessionId", 1), ("receivedAt", -1)], name="upload_session_ts")
+
     app.state.mongo    = client
     app.state.db       = db
     app.state.samples  = samples
     app.state.sessions = sessions
     app.state.backups  = backups
-    log.info("mongo ready; collections=%s,%s,%s", SAMPLES_COLL, SESSIONS_COLL, BACKUPS_COLL)
+    app.state.uploads  = uploads
+    log.info("mongo ready; collections=%s,%s,%s,%s",
+             SAMPLES_COLL, SESSIONS_COLL, BACKUPS_COLL, UPLOADS_COLL)
     try:
         yield
     finally:
@@ -191,6 +198,24 @@ def _safe_int(v: str) -> int | None:
             return int(f)
         except ValueError:
             return None
+
+
+def _extract_basic_auth_user(auth_header: str) -> str:
+    """Extract the username from an HTTP Basic Auth header value.
+
+    Returns the decoded username string, or empty string if the header is
+    absent, malformed, or not Basic scheme.  Never raises.
+    """
+    try:
+        if not auth_header:
+            return ""
+        scheme, _, encoded = auth_header.partition(" ")
+        if scheme.lower() != "basic" or not encoded:
+            return ""
+        decoded = base64.b64decode(encoded.strip()).decode("utf-8", errors="replace")
+        return decoded.split(":", 1)[0]
+    except Exception:
+        return ""
 
 
 def _parse_csv(body: str, session_id: str, header_device_id: str | None,
@@ -1482,6 +1507,23 @@ def restore_backup(backup_name: str, confirm: str = Query(default="")):
     }
 
 
+@app.get("/sessions/{session_id}/uploads")
+def session_uploads(session_id: str, limit: int = 100):
+    """Return the upload history for a session, newest first.
+
+    Each document records one POST /ingest/csv call: timestamp, payload size,
+    row counts (seen/accepted/rejected/inserted/duplicate), client IP,
+    authenticated username, firmware version, and processing duration.
+    """
+    cur = app.state.uploads.find(
+        {"sessionId": session_id},
+        sort=[("receivedAt", -1)],
+        limit=limit,
+        projection={"_id": 0},
+    )
+    return list(cur)
+
+
 @app.post("/ingest/csv")
 async def ingest_csv(
     request: Request,
@@ -1490,14 +1532,17 @@ async def ingest_csv(
     x_tracker_id: str | None = Header(None, alias="X-Tracker-Id"),
     x_firmware:   str | None = Header(None, alias="X-Firmware"),
 ):
+    _t0          = time.monotonic()
+    client_ip    = request.client.host if request.client else ""
+    username     = _extract_basic_auth_user(request.headers.get("authorization", ""))
     body = await request.body()
     if not body:
         raise HTTPException(status_code=400, detail="empty body")
     if len(body) > MAX_BODY_BYTES:
         raise HTTPException(status_code=413, detail=f"body > {MAX_BODY_BYTES} bytes")
 
-    log.info("ingest request sessionId=%s tracker=%s firmware=%s bodyBytes=%d",
-             x_session_id, x_tracker_id, x_firmware, len(body))
+    log.info("ingest request sessionId=%s tracker=%s firmware=%s bodyBytes=%d ip=%s user=%s",
+             x_session_id, x_tracker_id, x_firmware, len(body), client_ip, username or "(none)")
 
     text = body.decode("utf-8", errors="replace")
     docs, rejected = _parse_csv(text, x_session_id, x_device_id, x_tracker_id, x_firmware)
@@ -1557,10 +1602,33 @@ async def ingest_csv(
 
     log.info(
         "ingest OK sessionId=%s received=%d valid=%d rejected=%d inserted=%d dup=%d "
-        "firstTsMs=%d lastTsMs=%d",
+        "firstTsMs=%d lastTsMs=%d ip=%s user=%s durationMs=%d",
         x_session_id, len(docs) + rejected, len(docs), rejected,
-        inserted, duplicates, first_ts, last_ts,
+        inserted, duplicates, first_ts, last_ts, client_ip, username or "(none)",
+        int((time.monotonic() - _t0) * 1000),
     )
+
+    # Record one document per upload call for the upload-history UI.
+    try:
+        app.state.uploads.insert_one({
+            "sessionId":    x_session_id,
+            "receivedAt":   now_ms,
+            "clientIp":     client_ip,
+            "username":     username,
+            "payloadBytes": len(body),
+            "trackerId":    x_tracker_id,
+            "firmware":     x_firmware,
+            "rowsSeen":     len(docs) + rejected,
+            "rowsAccepted": len(docs),
+            "rowsRejected": rejected,
+            "rowsInserted": inserted,
+            "rowsDuplicate": duplicates,
+            "durationMs":   int((time.monotonic() - _t0) * 1000),
+            "httpStatus":   200,
+        })
+    except Exception as _ue:
+        log.warning("uploads: failed to record upload log for %s: %s", x_session_id, _ue)
+
     return JSONResponse({
         "sessionId":   x_session_id,
         "received":    len(docs) + rejected,

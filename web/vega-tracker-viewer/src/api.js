@@ -37,6 +37,17 @@ export async function fetchSessionRows(sessionId, { pageSize = 5000 } = {}) {
   return out;
 }
 
+/** Return the upload history for a session, newest first.
+ *  Each entry: receivedAt, payloadBytes, rowsSeen/Accepted/Rejected/Inserted/Duplicate,
+ *  clientIp, username, firmware, trackerId, durationMs, httpStatus. */
+export async function fetchSessionUploads(sessionId, limit = 100) {
+  const r = await fetch(
+    `${API_BASE}/sessions/${encodeURIComponent(sessionId)}/uploads?limit=${limit}`
+  );
+  if (!r.ok) throw new Error(`session uploads ${r.status}`);
+  return r.json();
+}
+
 // ---- management ------------------------------------------------------------
 
 /** Rename a session (sets displayName field; sessionId is not changed). */

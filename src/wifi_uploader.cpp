@@ -211,18 +211,35 @@ bool WifiUploader::connectWifi() {
     activeNet_ = (uint8_t)ActiveNet::None;
 
     // ------------------------------------------------------------------ //
-    // Inner helper: attempt to associate with one SSID within the timeout.
-    // Pets the WDT every 200ms (covers the 25s cold-connect window without
-    // hitting the 60s WDT limit).  Returns true on WL_CONNECTED.
+    // v0.9.2: cycle the radio stack exactly ONCE per connect attempt, not
+    // once per SSID. The previous code (v0.9.0) called WiFi.mode(WIFI_OFF)
+    // inside the tryConnect lambda, meaning a second SSID attempt would call
+    // mode(WIFI_OFF) while the MAC task was mid-scan (active on-channel 25s
+    // timeout just elapsed). esp_wifi_stop() called at that point can block
+    // the radio IRQ line >800ms which trips the interrupt watchdog (INT_WDT,
+    // raw0=8). Root-cause confirmed in the field log (lastUptimeMs=591784,
+    // wifiInFlight=1). Fix: tear down the stack once here, then let the
+    // lambda just call WiFi.begin() / WiFi.disconnect() without mode changes.
+    //
+    // Also restores WiFi.setSleep(false) from v0.4.1 which was accidentally
+    // dropped in the v0.9.0 dual-SSID refactor.
+    // ------------------------------------------------------------------ //
+    WiFi.disconnect(false, false);
+    WiFi.mode(WIFI_OFF);
+    vTaskDelay(pdMS_TO_TICKS(300));   // let the driver fully settle after stop
+    WiFi.mode(WIFI_STA);
+    // Keep PA current low to avoid brown-outs on battery with BLE coex.
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
+    // v0.4.1: modem sleep + active scan is buggy in the ESP-IDF Wi-Fi driver.
+    // Accidentally dropped in the v0.9.0 refactor; restored here.
+    WiFi.setSleep(false);
+
+    // ------------------------------------------------------------------ //
+    // Inner helper: associate with one SSID. Radio is already in WIFI_STA
+    // mode; only calls begin() / disconnect() -- never mode().
     // ------------------------------------------------------------------ //
     auto tryConnect = [&](const char* ssid, const char* pass) -> bool {
         Serial.printf("[WIFI] trying '%s'...\n", ssid);
-        WiFi.disconnect(false, false);
-        WiFi.mode(WIFI_OFF);
-        vTaskDelay(pdMS_TO_TICKS(150));
-        WiFi.mode(WIFI_STA);
-        // Keep PA current low to avoid brown-outs on battery with BLE coex.
-        WiFi.setTxPower(WIFI_POWER_8_5dBm);
         WiFi.begin(ssid, pass);
         const uint32_t start    = millis();
         const uint32_t deadline = start + secrets::WIFI_CONNECT_TIMEOUT_MS;
@@ -238,6 +255,10 @@ bool WifiUploader::connectWifi() {
         }
         Serial.printf("[WIFI] '%s' timeout (status=%d after %ums)\n",
                       ssid, (int)WiFi.status(), (unsigned)(millis() - start));
+        // Between SSIDs: stop the current association attempt without cycling
+        // the radio stack (that's what triggers INT_WDT on the second attempt).
+        WiFi.disconnect(false, false);
+        vTaskDelay(pdMS_TO_TICKS(300));
         return false;
     };
 

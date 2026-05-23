@@ -1433,6 +1433,43 @@ canvas {
   min-width: 0;
 }
 
+/* ---- Upload history table (ManagePanel → Uploads tab) ----------------- */
+
+.uploads-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 10px;
+  color: var(--fg);
+}
+.uploads-table th {
+  text-align: left;
+  padding: 4px 6px;
+  background: var(--panel2);
+  color: var(--accent);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+.uploads-table td {
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: middle;
+}
+.uploads-table tbody tr:last-child td { border-bottom: none; }
+.uploads-table tbody tr:hover td { background: var(--panel2); }
+
+/* Fully-duplicate upload row (0 new inserts, all dupes) — dim it */
+.upload-row-dup td { opacity: 0.55; }
+
+.upload-cell-time { white-space: nowrap; font-size: 10px; }
+.upload-cell-rows { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.upload-cell-mono { font-family: monospace; font-size: 9px; color: var(--muted); }
+
+.upload-dup { color: var(--accent);  margin-left: 2px; }
+.upload-rej { color: var(--danger);  margin-left: 2px; }
+
 .rp-section-head {
   text-transform: uppercase;
   font-size: 10px;
