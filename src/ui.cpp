@@ -120,11 +120,14 @@ void Ui::onLongPress() {
             pendingAction_ = ACTION_START_PICKER;
             break;
         case SCREEN_GPS:
-        case SCREEN_STORAGE:
-            // Recording is always-on so long-press here is harmless.
-            // Treat it the same as short-press so a slow finger still navigates.
+            // Long-press on GPS advances screen (same as short-press).
             screen_ = (Screen)((screen_ + 1) % SCREEN_NORMAL_COUNT);
             forceFullRedraw_ = true;
+            break;
+        case SCREEN_STORAGE:
+            // Long-press on STORAGE triggers an immediate Wi-Fi sync,
+            // bypassing any exponential backoff countdown.
+            pendingAction_ = ACTION_FORCE_SYNC;
             break;
         case SCREEN_DOSE:
             // Long-press on DOSE screen signals main.cpp to zero the accumulator.
@@ -484,7 +487,7 @@ void Ui::renderStorage() {
     const int rawPending = (int)store_->sessionCount() - (store_->isRecording() ? 1 : 0);
     const int pending    = rawPending < 0 ? 0 : rawPending;
     snprintf(buf, sizeof(buf), "Pending: %d", pending);
-    field(35, 4, 58, 156, 8, buf,
+    field(35, 4, 56, 156, 8, buf,
           pending > 0 ? COL_AMBER : COL_GREEN,
           COL_BG, 1);
 
@@ -535,7 +538,14 @@ void Ui::renderStorage() {
         }
         }
     }
-    field(36, 4, 70, 156, 8, wifiBuf, wifiCol, COL_BG, 1);
+    field(36, 4, 64, 156, 8, wifiBuf, wifiCol, COL_BG, 1);
+    // Hold-to-sync hint. Cleared with a blank field when Wi-Fi is disabled
+    // so a previous force-full-redraw doesn't leave stale text.
+    if (wifi_ && wifi_->enabled()) {
+        field(37, 4, 72, 156, 8, "Hold: sync now", COL_DIM, COL_BG, 1);
+    } else {
+        field(37, 4, 72, 156, 8, "", COL_DIM, COL_BG, 1);
+    }
 }
 
 // ---------------------------------------------------------------------------

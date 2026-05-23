@@ -739,6 +739,10 @@ void loop() {
                 case Ui::ACTION_RESET_DOSE:
                     resetDose();
                     break;
+                case Ui::ACTION_FORCE_SYNC:
+                    Serial.println("[UI] STORAGE long-press: forcing sync now");
+                    gWifi.requestNow();
+                    break;
                 default: break;
             }
             break;

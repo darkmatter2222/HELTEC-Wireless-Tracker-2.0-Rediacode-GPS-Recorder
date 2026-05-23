@@ -344,6 +344,11 @@ namespace secrets {
     and writes `0.0` to NVS immediately. Serial logs: `[DOSE] reset by user (was X.XXXX uSv)`.
   - Heartbeat `[HB]` extended with `dose=X.XXXXuSv` field.
   - `gUi.setTripDose(float)` called each main-loop iteration to push latest value to the UI.
+- **STORAGE screen long-press** (v0.9.1): Long-press emits `ACTION_FORCE_SYNC` → `gWifi.requestNow()`.
+  Immediately kicks the upload task, bypassing any exponential backoff countdown. Footer hint
+  `Hold: sync now` shown at y=72 when Wi-Fi is configured. GPS long-press still advances the screen.
+  STORAGE screen layout (v0.9.1): y=14 REC/AUTO/Samp; y=26 Day; y=38 Disk%; y=50 bar; y=56 Pending;
+  y=64 Wi-Fi status; y=72 `Hold: sync now` hint.
 
 ### Wi-Fi Uploader — `wifi_uploader.{h,cpp}`
 
@@ -1320,9 +1325,11 @@ confirmed by the v0.7.1 analysis; same pattern here.
   shown in COL_GREEN when 0 (all uploaded) or COL_AMBER when > 0 (data queued).
 - **Battery indicator now green when >= 40%**: was white (`COL_FG`); changed to `COL_GREEN` so the
   color signal is consistent (green = healthy, amber = moderate, red = low).
-- **Long-press on GPS and STORAGE screens now advances the screen**: previously a no-op, which made
+- **Long-press on GPS screen now advances the screen**: previously a no-op, which made
   navigation confusing (hold > 800ms = long-press fires, does nothing; release = no short-press).
-  Now GPS and STORAGE long-press behave identically to short-press — cycle to the next screen.
+  GPS long-press now behaves identically to short-press — cycles to the next screen.
+  **Note (v0.9.1)**: STORAGE long-press was later changed to trigger an immediate Wi-Fi sync
+  instead of advancing the screen (see `ACTION_FORCE_SYNC`).
 - **Screen render PNG mockups**: `scripts/render_screens.py` generates 5 PNG files at 3× scale
   (480×240) into `docs/screens/`.  Run with `python scripts/render_screens.py`.  Requires Pillow.
 
