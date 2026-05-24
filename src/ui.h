@@ -44,6 +44,7 @@ public:
         ACTION_PICK_DEVICE,     // Picker: connect to selected
         ACTION_CANCEL_PICKER,
         ACTION_RESET_DOSE,      // DOSE screen long-press: zero accumulator
+        ACTION_FORCE_SYNC,      // STORAGE long-press: kick upload cycle now
     };
     LongAction lastLongAction() {
         LongAction a = pendingAction_;

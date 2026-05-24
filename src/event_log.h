@@ -57,4 +57,10 @@ void clear();
 // True once beginBoot() has been called.
 bool ready();
 
+// True if the PREVIOUS boot ended due to a crash (PANIC, INT_WDT, TASK_WDT,
+// BROWNOUT, WDT) rather than a clean power-on or deliberate software reset.
+// Used by main.cpp to emit GPS_LOST+REGAINED gap markers on first post-crash
+// GPS fix so the viewer does not draw a straight line across the crash gap.
+bool wasLastResetCrash();
+
 } // namespace event_log

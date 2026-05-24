@@ -1,6 +1,6 @@
-// ManagePanel — data management UI: rename, soft-delete/restore/purge, merge, export.
-import { useState, useMemo, useRef } from 'react';
-import { renameSession, deleteSession, restoreSession, purgeSession, mergeSessions, exportSession, exportBulk, fetchSessions } from './api.js';
+// ManagePanel — data management UI: rename, soft-delete/restore/purge, merge, export, upload history.
+import { useState, useMemo, useRef, useEffect } from 'react';
+import { renameSession, deleteSession, restoreSession, purgeSession, mergeSessions, exportSession, exportBulk, fetchSessions, fetchSessionUploads } from './api.js';
 import { sessionColor, fmtTs, fmtDose } from './colors.js';
 
 const MIN_VALID_TS_MS = 1577836800000;
@@ -401,9 +401,121 @@ function ExportPanel({ sessions, onError }) {
   );
 }
 
+// ---- Uploads tab ---------------------------------------------------------
+function UploadsTab({ sessions }) {
+  const [selectedId, setSelectedId] = useState(() => sessions[0]?.sessionId ?? null);
+  const [uploads,    setUploads]    = useState(null);
+  const [loading,    setLoading]    = useState(false);
+  const [error,      setError]      = useState(null);
+
+  async function load(sessionId) {
+    if (!sessionId) return;
+    setSelectedId(sessionId);
+    setLoading(true);
+    setError(null);
+    setUploads(null);
+    try {
+      const list = await fetchSessionUploads(sessionId);
+      setUploads(list);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Auto-load the first session on mount.
+  useEffect(() => {
+    if (sessions.length > 0) load(sessions[0].sessionId);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  function fmtTime(ms) {
+    if (!ms) return '—';
+    return new Date(ms).toLocaleString();
+  }
+  function fmtKb(bytes) {
+    if (bytes == null) return '—';
+    return `${(bytes / 1024).toFixed(1)} KB`;
+  }
+
+  return (
+    <div>
+      {/* Session picker — single dropdown */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px' }}>
+        <label style={{ fontSize: 11, color: 'var(--muted)', whiteSpace: 'nowrap' }}>Session:</label>
+        <select
+          value={selectedId ?? ''}
+          onChange={e => load(e.target.value)}
+          style={{
+            flex: 1, background: 'var(--bg2)', color: 'var(--fg)',
+            border: '1px solid var(--border)', borderRadius: 4,
+            padding: '3px 6px', fontSize: 12,
+          }}>
+          {sessions.map(s => (
+            <option key={s.sessionId} value={s.sessionId}>
+              {s.displayName || s.sessionId}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {loading && (
+        <div className="muted" style={{ padding: '8px 12px', fontSize: 11 }}>Loading…</div>
+      )}
+      {error && (
+        <div style={{ padding: '8px 12px', color: 'var(--danger)', fontSize: 11 }}>{error}</div>
+      )}
+
+      {uploads !== null && !loading && (
+        uploads.length === 0 ? (
+          <div className="muted" style={{ padding: '8px 12px', fontSize: 11 }}>
+            No upload records found for this session.
+            Records are written for each POST /ingest/csv starting from API v0.9.0.
+          </div>
+        ) : (
+          <div style={{ overflowX: 'auto' }}>
+            <table className="uploads-table">
+              <thead>
+                <tr>
+                  <th>Time</th>
+                  <th title="Rows inserted (new) / duplicate / rejected">Rows</th>
+                  <th>Size</th>
+                  <th>IP</th>
+                  <th>User</th>
+                  <th>Firmware</th>
+                  <th title="Processing time in milliseconds">ms</th>
+                </tr>
+              </thead>
+              <tbody>
+                {uploads.map((u, i) => (
+                  <tr key={i}
+                    className={`upload-row${u.rowsInserted === 0 && (u.rowsDuplicate ?? 0) > 0 ? ' upload-row-dup' : ''}`}
+                    title={`seen=${u.rowsSeen ?? '?'} accepted=${u.rowsAccepted ?? '?'} rejected=${u.rowsRejected ?? 0} inserted=${u.rowsInserted ?? '?'} duplicate=${u.rowsDuplicate ?? 0}`}>
+                    <td className="upload-cell-time">{fmtTime(u.receivedAt)}</td>
+                    <td className="upload-cell-rows">
+                      {u.rowsInserted ?? '?'}↑
+                      {(u.rowsDuplicate ?? 0) > 0 && <span className="upload-dup"> {u.rowsDuplicate}≡</span>}
+                      {(u.rowsRejected ?? 0) > 0 && <span className="upload-rej"> {u.rowsRejected}✕</span>}
+                    </td>
+                    <td>{fmtKb(u.payloadBytes)}</td>
+                    <td className="upload-cell-mono">{u.clientIp || '—'}</td>
+                    <td className="upload-cell-mono">{u.username || '—'}</td>
+                    <td className="upload-cell-mono">{u.firmware || '—'}</td>
+                    <td>{u.durationMs ?? '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
+      )}
+    </div>
+  );
+}
+
 // ---- Main ManagePanel component ------------------------------------------
 export function ManagePanel({ sessions, onRenamed, onDeleted, onMerged, onRestored, onPurged, onError }) {
-  const [subTab, setSubTab] = useState('rename'); // rename | delete | merge | export
+  const [subTab, setSubTab] = useState('rename'); // rename | delete | merge | export | uploads
 
   return (
     <div className="panel-scroll">
@@ -413,6 +525,7 @@ export function ManagePanel({ sessions, onRenamed, onDeleted, onMerged, onRestor
           { key: 'delete',  label: '🗑 Delete / Restore' },
           { key: 'merge',   label: '⊕ Merge' },
           { key: 'export',  label: '↓ Export' },
+          { key: 'uploads', label: '↑ Uploads' },
         ].map(t => (
           <button key={t.key}
             className={`tab ${subTab === t.key ? 'active' : ''}`}
@@ -449,6 +562,10 @@ export function ManagePanel({ sessions, onRenamed, onDeleted, onMerged, onRestor
 
       {subTab === 'export' && (
         <ExportPanel sessions={sessions} onError={onError} />
+      )}
+
+      {subTab === 'uploads' && (
+        <UploadsTab sessions={sessions} />
       )}
     </div>
   );

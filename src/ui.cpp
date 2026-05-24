@@ -120,11 +120,14 @@ void Ui::onLongPress() {
             pendingAction_ = ACTION_START_PICKER;
             break;
         case SCREEN_GPS:
-        case SCREEN_STORAGE:
-            // Recording is always-on so long-press here is harmless.
-            // Treat it the same as short-press so a slow finger still navigates.
+            // Long-press on GPS advances screen (same as short-press).
             screen_ = (Screen)((screen_ + 1) % SCREEN_NORMAL_COUNT);
             forceFullRedraw_ = true;
+            break;
+        case SCREEN_STORAGE:
+            // Long-press on STORAGE triggers an immediate Wi-Fi sync,
+            // bypassing any exponential backoff countdown.
+            pendingAction_ = ACTION_FORCE_SYNC;
             break;
         case SCREEN_DOSE:
             // Long-press on DOSE screen signals main.cpp to zero the accumulator.
@@ -282,12 +285,27 @@ void Ui::renderHeader() {
 
 // ---------------------------------------------------------------------------
 // STATS screen (160 x 68 below header)
-//   y=14: "DOSE"  small dim
+//   y=14: "DOSE nSv/h"  (x=4..63)   | "Smp NNNNN"  (x=100..157)
 //   y=22: big nSv/h value (size 3) ~24px tall
 //   y=46: "CPS"   small dim    + count rate (size 2) ~16px
 //   y=66: footer (errors / addr last 5)
 void Ui::renderStats() {
     field(10, 4, 14, 60, 8, "DOSE nSv/h", COL_DIM, COL_BG, 1);
+
+    // Sample counter — right side of the DOSE label row (96 px free).
+    // Shows sampleCount(): rises as samples are recorded; drops to 0 after
+    // each upload cycle when the active file is rotated. This gives the user
+    // a live "currently buffered / awaiting upload" count without the data-
+    // loss confusion of the monotonic lifetimeSamples counter.
+    // Green when recording + RC ready (actively filling); dim otherwise.
+    {
+        char sbuf[12];
+        const uint32_t sc = store_ ? store_->sampleCount() : 0;
+        snprintf(sbuf, sizeof(sbuf), "Smp%5lu", (unsigned long)sc);
+        const bool rcOk = (rcState_ == RadiaCode::State::Ready);
+        const bool rec  = store_ && store_->isRecording();
+        field(17, 100, 14, 58, 8, sbuf, (rec && rcOk) ? COL_GREEN : COL_DIM, COL_BG, 1);
+    }
 
     char buf[24];
     if (lastReading_.valid) {
@@ -484,7 +502,7 @@ void Ui::renderStorage() {
     const int rawPending = (int)store_->sessionCount() - (store_->isRecording() ? 1 : 0);
     const int pending    = rawPending < 0 ? 0 : rawPending;
     snprintf(buf, sizeof(buf), "Pending: %d", pending);
-    field(35, 4, 58, 156, 8, buf,
+    field(35, 4, 56, 156, 8, buf,
           pending > 0 ? COL_AMBER : COL_GREEN,
           COL_BG, 1);
 
@@ -535,7 +553,14 @@ void Ui::renderStorage() {
         }
         }
     }
-    field(36, 4, 70, 156, 8, wifiBuf, wifiCol, COL_BG, 1);
+    field(36, 4, 64, 156, 8, wifiBuf, wifiCol, COL_BG, 1);
+    // Hold-to-sync hint. Cleared with a blank field when Wi-Fi is disabled
+    // so a previous force-full-redraw doesn't leave stale text.
+    if (wifi_ && wifi_->enabled()) {
+        field(37, 4, 72, 156, 8, "Hold: sync now", COL_DIM, COL_BG, 1);
+    } else {
+        field(37, 4, 72, 156, 8, "", COL_DIM, COL_BG, 1);
+    }
 }
 
 // ---------------------------------------------------------------------------

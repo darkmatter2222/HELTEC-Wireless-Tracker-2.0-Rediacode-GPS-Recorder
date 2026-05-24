@@ -15,6 +15,7 @@ constexpr const char* kLogOldPath = "/system.log.old";
 constexpr size_t      kLogMaxBytes = 12 * 1024;   // roll over at ~12 KB
 
 bool g_ready = false;
+bool g_lastResetWasCrash = false;  // set in beginBoot(); read by main.cpp
 
 // RTC slow memory survives software resets, brown-outs, and watchdog
 // reboots (cleared only by full power-off or deep sleep). We use it to
@@ -69,7 +70,8 @@ void appendLineRaw(const String& line) {
 
 namespace event_log {
 
-bool ready() { return g_ready; }
+bool ready()             { return g_ready; }
+bool wasLastResetCrash() { return g_lastResetWasCrash; }
 
 void beginBoot() {
     // CRITICAL: do NOT call LittleFS.begin() here. SessionStore already
@@ -85,6 +87,14 @@ void beginBoot() {
 
     const esp_reset_reason_t rr = esp_reset_reason();
     const char* rname = resetReasonName(rr);
+    // Record whether this boot follows a crash so main.cpp can emit GPS gap
+    // markers. Treat clean power-on, deliberate SW reset (serial REBOOT cmd),
+    // and USB-JTAG cycling as non-crash boots; everything else is a crash.
+    g_lastResetWasCrash = (rr == ESP_RST_PANIC    ||
+                           rr == ESP_RST_INT_WDT  ||
+                           rr == ESP_RST_TASK_WDT ||
+                           rr == ESP_RST_WDT      ||
+                           rr == ESP_RST_BROWNOUT);
     // v0.4.7: also capture the raw hardware reset reason for each CPU.
     // esp_reset_reason() returns ESP_RST_UNKNOWN when the IDF couldn't
     // classify the reset; the raw register usually still gives us a clue.

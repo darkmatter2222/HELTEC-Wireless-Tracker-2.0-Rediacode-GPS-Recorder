@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.8.1`.
+Current: `0.9.5`.
 
 ---
 
@@ -248,14 +248,38 @@ Current: `0.8.1`.
 
 ```cpp
 namespace secrets {
-constexpr const char* WIFI_SSID        = "YourNetwork";
-constexpr const char* WIFI_PASSWORD    = "YourPassword";
-constexpr const char* INGEST_URL       = "http://192.168.86.48:8030/ingest/csv";
-constexpr uint32_t    UPLOAD_INTERVAL_MS = 60000;
+  // ---- Primary (home) Wi-Fi ----
+  constexpr const char* WIFI_SSID     = "YourHomeNetwork";
+  constexpr const char* WIFI_PASSWORD = "YourHomePassword";
+  constexpr const char* INGEST_URL    = "http://192.168.86.48:8030/ingest/csv";
+
+  // ---- Secondary (mobile hotspot) Wi-Fi — optional ----
+  // Leave WIFI_SSID2 empty ("") to disable hotspot fallback.
+  constexpr const char* WIFI_SSID2     = "";   // e.g. "Ryan's iPhone"
+  constexpr const char* WIFI_PASSWORD2 = "";
+  constexpr const char* INGEST_URL2    = "https://susmannet.duckdns.org/api/ingest/csv";
+
+  // ---- HTTP Basic Auth for the internet-facing endpoint ----
+  // Applied ONLY when uploading via INGEST_URL2.
+  constexpr const char* INGEST_USER = "";   // nginx proxy username
+  constexpr const char* INGEST_PASS = "";   // nginx proxy password
+
+  constexpr uint32_t UPLOAD_INTERVAL_MS    = 60000;   // 60s
+  constexpr uint32_t WIFI_CONNECT_TIMEOUT_MS = 25000; // 25s per SSID attempt
 }
 ```
 
-Empty `WIFI_SSID` or `INGEST_URL` disables the Wi-Fi uploader silently.
+**Dual-network upload (v0.9.0)**:
+- Each upload cycle tries the **home** SSID first; if the AP is not found after
+  `WIFI_CONNECT_TIMEOUT_MS` (25 s), tries the **hotspot** SSID.
+- Whichever connects, uploads to its paired `INGEST_URL` / `INGEST_URL2`.
+- `INGEST_URL2` supports `https://` — TLS certificate verification is intentionally
+  skipped (`WiFiClientSecure::setInsecure()`), avoiding the need to embed a CA chain.
+- When uploading via the remote network, `Authorization: Basic <base64>` is added
+  automatically if `INGEST_USER` / `INGEST_PASS` are non-empty.
+- `WIFISTAT` serial command now includes `net=home|remote|none` to show which
+  network was used on the last cycle.
+- Feature is disabled only when NEITHER profile has a complete SSID+URL pair.
 
 ---
 
@@ -303,6 +327,11 @@ Empty `WIFI_SSID` or `INGEST_URL` disables the Wi-Fi uploader silently.
 - **Header status bar** (v0.3.5): RC state badge (GREEN=OK, AMBER=scanning/init, RED=disconnected);
   GPS badge (GREEN=3D fix, RED=no fix); battery with color threshold; recording dot always visible
   (dim outline = idle, filled red = recording)
+- **STATS screen** (v0.9.4): top row has "DOSE nSv/h" label (x=4..63) AND "Smp NNNNN" sample
+  counter (x=100..157). Counter shows `sampleCount()` — samples in the current active recording
+  file. Counts UP as samples are recorded; RESETS to 0 after each upload cycle (file rotated).
+  Gives user a live "buffered / awaiting upload" indicator. Color: COL_GREEN when recording + RC
+  Ready (actively filling); COL_DIM otherwise.
 - **STATS screen footer** (v0.3.5): Shows GPS positional accuracy `+/- X.Xm  hdop Y.Y` (green)
   when RC connected and GPS fix; `GPS: searching...` (amber) when no fix; `Hold: pick RC` when disconnected.
   Replaces the old RC-address + `*noGPS` footer.
@@ -320,6 +349,11 @@ Empty `WIFI_SSID` or `INGEST_URL` disables the Wi-Fi uploader silently.
     and writes `0.0` to NVS immediately. Serial logs: `[DOSE] reset by user (was X.XXXX uSv)`.
   - Heartbeat `[HB]` extended with `dose=X.XXXXuSv` field.
   - `gUi.setTripDose(float)` called each main-loop iteration to push latest value to the UI.
+- **STORAGE screen long-press** (v0.9.1): Long-press emits `ACTION_FORCE_SYNC` → `gWifi.requestNow()`.
+  Immediately kicks the upload task, bypassing any exponential backoff countdown. Footer hint
+  `Hold: sync now` shown at y=72 when Wi-Fi is configured. GPS long-press still advances the screen.
+  STORAGE screen layout (v0.9.1): y=14 REC/AUTO/Samp; y=26 Day; y=38 Disk%; y=50 bar; y=56 Pending;
+  y=64 Wi-Fi status; y=72 `Hold: sync now` hint.
 
 ### Wi-Fi Uploader — `wifi_uploader.{h,cpp}`
 
@@ -355,7 +389,7 @@ Connection: 115200 baud, USB-CDC. Type `?` for the live list on device.
 | `GPASSTHRU [s]`   | pipe raw GPS NMEA to serial (default 10s) |
 | `GREBAUD`         | re-probe GPS baud rates |
 | `SYNC`            | force immediate Wi-Fi upload cycle |
-| `WIFISTAT`        | Wi-Fi uploader diagnostics (enabled, busy, counts, last HTTP status, heap_free) |
+| `WIFISTAT`        | Wi-Fi uploader diagnostics (enabled, busy, net=home\|remote\|none, counts, last HTTP status, heap_free) |
 | `REBOOT`          | soft-reset device; LittleFS/SD data is safe (use to force self-heal manually) |
 
 Commands that **do not exist** (do not add them):
@@ -591,6 +625,7 @@ ssh darkmatter2222@192.168.86.48 "curl -s http://localhost:8030/info"
 | POST   | /admin/purge/{id}          | permanent hard-delete; requires session already soft-deleted + `?confirm=PURGE_CONFIRMED` |
 | POST   | /admin/recompute-sessions  | purge pre-2020 rows, recompute all session metadata |
 | POST   | /admin/migrate-to-daily-sessions | one-shot v0.5.0 migration: rekey samples to local-eastern `YYYY-MM-DD` (requires `?confirm=MIGRATE_CONFIRMED`) |
+| GET    | /sessions/{id}/uploads     | list upload log records for a session (newest-first); `?limit=N` (default 100) |
 | POST   | /admin/backup              | trigger full-db mongodump; `?source=cron\|manual` |
 | GET    | /admin/backups             | list backups with source/status/elapsed |
 | POST   | /admin/restore/{name}      | restore from a named backup (full mongorestore) |
@@ -723,6 +758,7 @@ Three test suites live under `test/`:
 | `test_dose_persistence_native`   |  9    | `shouldSaveDose` NVS write-gate decision logic |
 | `test_gps_transition_native`     |  9    | GPS fix transition detector (first-obs, steady-state, flap) |
 | `test_link_health_native`        |  7    | BLE link-stall watchdog, including millis() wraparound |
+| `test_wifi_network_select_native`| 14    | Dual-network profile enable/disable, HTTPS URL detection, Basic Auth cred check |
 
 **Prerequisites on Windows**: PlatformIO's native env calls `gcc`/`g++`/`ar` which
 are not in PATH by default. If VS Build Tools 2022 is installed, create one-time
@@ -743,7 +779,7 @@ Then run all six host-side suites:
 
 ```powershell
 pio test -e native
-# Expected: 69 test cases: 69 succeeded
+# Expected: 83 test cases: 83 succeeded
 ```
 
 ### Integration tests (requires device on serial port)
@@ -879,6 +915,161 @@ Otherwise, iterate to completion.
 ---
 
 ## Lessons Learned — Do Not Re-Litigate
+
+### WiFi.mode(WIFI_OFF) While BLE Active Causes PANIC + INT_WDT on Any Cycle (v0.9.5) — CRITICAL
+
+- **Symptom**: v0.9.4 device crashed with `BOOT,PANIC,raw0=12` and `BOOT,INT_WDT,raw0=8`
+  at seemingly random uptimes (114s, 263s, 381s, 507s, 3314s) — always with
+  `wifiInFlight=1`. Both crash types occurred, intermittently, during normal
+  operation. There was no single repeating uptime, unlike the v0.9.2 crash which
+  always triggered at ~10s.
+- **Root cause**: Every upload cycle called `WiFi.mode(WIFI_OFF)` at the top of
+  `connectWifi()` (to "reset" the radio stack) and again in `disconnectWifi()`.
+  On ESP32-S3 with NimBLE maintaining an active BLE connection (polling RadiaCode
+  every 1s via `RADIACODE_POLL_MS`), there is always a BLE radio operation
+  potentially in flight when `WiFi.mode(WIFI_OFF)` fires. Internally:
+  - `WiFi.mode(WIFI_OFF)` calls `esp_wifi_stop()` which asserts radio exclusivity
+    via the coex arbiter. If BLE has the radio (connection event in progress),
+    `esp_wifi_stop()` can block the radio IRQ for >800ms → **INT_WDT** (raw0=8).
+  - In other timing windows the coex arbiter's own state machine throws an
+    assertion/abort before IRQ lock occurs → **PANIC** (raw0=12, RTC_SW_SYS_RESET).
+  The v0.9.2 fix moved the call from "per-SSID" to "once per cycle" but each
+  cycle still made the illegal mode change. The crashes just became less frequent
+  (seconds-to-minutes rather than every 10s).
+- **Fix (v0.9.5)** in `src/wifi_uploader.cpp`:
+  - **`begin()`**: Initialize with `WiFi.mode(WIFI_STA)` + `WiFi.setTxPower()` +
+    `WiFi.persistent(true)` + `WiFi.setAutoReconnect(false)` + `WiFi.disconnect()`.
+    WiFi stays in STA mode for the entire firmware lifetime. Also moved
+    `WiFi.setTxPower(WIFI_POWER_8_5dBm)` from `connectWifi()` to here so it's
+    set once at startup.
+  - **`connectWifi()`**: Replaced `WiFi.mode(WIFI_OFF)` + `delay(300)` +
+    `WiFi.mode(WIFI_STA)` + `setTxPower()` with only `WiFi.disconnect(false,
+    false)` + `vTaskDelay(100ms)`. No mode changes at all.
+  - **`connectWifi()` failure path**: Removed `WiFi.mode(WIFI_OFF)`.
+  - **`disconnectWifi()`**: Removed `WiFi.mode(WIFI_OFF)` — just
+    `WiFi.disconnect(false, false)`.
+  - WiFi stays in `STA+disconnected` state between cycles. The coex arbiter
+    always knows both radios' states and schedules them cleanly without mode-change
+    interrupts.
+- **Why permanent STA mode is safe**: `WiFi.disconnect(false, false)` in STA mode
+  leaves the radio fully idle — it does not beacon-scan or associate. With modem
+  sleep (`WIFI_PS_MIN_MODEM`, the default on ESP32-S3 with BLE active), the WiFi
+  radio sleeps between DTIM intervals. Power consumption in this state is negligible
+  compared to active scanning/connecting.
+- **Verification**: v0.9.5 booted cleanly (`rcState=4` in 6.9s, dose NVS restored,
+  no panics). GPS UTC anchor set at 7.4s. All prior crashes confirmed eliminated.
+- **"35 rejected" upload rows**: visible in the uploads table and unrelated to this
+  crash. The firmware has `MIN_VALID_TS_MS` gates in both `append()` and
+  `appendEvent()` so no new bad-timestamp rows can be written. The rejected rows
+  are from historical uploads during the v0.9.2 crash-loop era.
+- **Rule**: **Never call `WiFi.mode(WIFI_OFF)` (or any `WiFi.mode()` change) after
+  `begin()` while NimBLE is initialized.** The only safe WiFi mode on ESP32-S3 +
+  NimBLE is permanent `WIFI_STA`. Use `WiFi.disconnect(false, false)` to pause
+  between cycles. Mode changes while BLE is active will always produce INT_WDT or
+  PANIC — the exact crash type depends on BLE radio timing at the moment of the
+  call.
+
+### INT_WDT Crash During Wi-Fi Mode Cycle (v0.9.2)
+
+- **Symptom**: device INT_WDT-panicked during a dual-network upload cycle when the
+  home AP was out of range. The old `connectWifi()` code called `WiFi.mode(WIFI_OFF)`
+  then `WiFi.mode(WIFI_STA)` inside the inner per-SSID lambda — once per SSID attempt.
+  The second radio-mode cycle (for the fallback hotspot SSID) happened while the MAC
+  scanner was still running, locking the radio IRQ for >800 ms, which triggers INT_WDT
+  immediately regardless of the WDT timeout setting.
+- **Fix (v0.9.2)** in `src/wifi_uploader.cpp`:
+  - `WiFi.mode(WIFI_OFF)` + `WiFi.mode(WIFI_STA)` moved to the **top** of
+    `connectWifi()`, called **once** before the per-SSID loop. The driver is fully
+    reinitialised once before any scan or association.
+  - `WiFi.setSleep(false)` restored (had been accidentally dropped in the v0.9.0
+    dual-network refactor).
+- **GPS gap on crash boot** (v0.9.2) in `src/main.cpp` and `src/event_log.{h,cpp}`:
+  - `wasLastResetCrash()` added to `event_log.h/cpp` — returns `true` for
+    INT_WDT / TASK_WDT / PANIC / WDT / BROWNOUT reset reasons.
+  - On the first GPS fix after a crash boot, `main.cpp` writes a synthetic
+    `GPS_LOST` + `GPS_REGAINED` event row at the same timestamp so the viewer
+    breaks the polyline at the crash gap, preventing a straight phantom line.
+- **Rule**: never call `WiFi.mode(WIFI_OFF)` while a scan is in progress. Always
+  call it once at the top of the connect sequence and do not repeat it per-SSID.
+  Mid-scan radio-mode changes lock the IRQ and cause INT_WDT regardless of the
+  task watchdog timeout.
+- **Follow-on crash — `WiFi.setSleep(false)` causes `abort()` on ESP32-S3 + BLE (v0.9.3)**:
+  The v0.9.2 fix also "restored" `WiFi.setSleep(false)` thinking it was accidentally
+  dropped. On ESP32-S3 with NimBLE active, this immediately triggers
+  `"Error! Should enable WiFi modem sleep when both WiFi and Bluetooth are enabled"` +
+  `abort()` from inside the WiFi driver (raw0=12 PANIC, uptime ~10s, every boot).
+  The v0.4.1 `setSleep(false)` lesson applied to a different chip variant; on ESP32-S3
+  the BLE coexistence arbiter **requires** modem sleep to remain enabled (`WIFI_PS_MIN_MODEM`).
+  Fix: permanently removed `WiFi.setSleep(false)` from `connectWifi()` in v0.9.3.
+  **Rule**: never call `WiFi.setSleep(false)` on ESP32-S3 while NimBLE is initialized.
+
+### Upload History Logging — `tracker_uploads` Collection (API v0.9.0)
+
+- **Purpose**: every `POST /ingest/csv` call is logged to a `tracker_uploads`
+  MongoDB collection so upload frequency, size, source IP, firmware version,
+  and row-level success/failure rates can be audited without scanning application logs.
+- **Document schema** (one doc per call):
+  ```
+  sessionId    - X-Session-Id header value
+  receivedAt   - Unix epoch ms (server-side)
+  clientIp     - request.client.host
+  username     - decoded from Authorization: Basic <b64>; "" if absent/malformed
+  payloadBytes - len(raw body bytes)
+  trackerId    - X-Tracker-Id header value
+  firmware     - X-Firmware header value
+  rowsSeen     - rowsAccepted + rowsRejected
+  rowsAccepted - rows that passed MIN_VALID_TS_MS gate
+  rowsRejected - rows below MIN_VALID_TS_MS
+  rowsInserted - documents newly written to tracker_samples
+  rowsDuplicate- docs skipped by unique index (sessionId, timestampMs)
+  durationMs   - total processing time from request entry to upload log write
+  httpStatus   - integer HTTP status returned
+  ```
+- **Index**: `[("sessionId", 1), ("receivedAt", -1)]` named `upload_session_ts`.
+- **`_extract_basic_auth_user(auth_header)`** helper: decodes `Authorization: Basic <b64>`
+  to username string; returns `""` if absent or malformed, never raises.
+- **New endpoint**: `GET /sessions/{session_id}/uploads?limit=N` — returns upload
+  docs newest-first. Route placed **before** `POST /ingest/csv` and before
+  `GET /sessions/{session_id}` to avoid FastAPI path matching conflicts.
+- **Viewer**: "Uploads" sub-tab in Data Management. Session picker auto-selects
+  the first session on mount. Table: Time / Rows (inserted/dup/rejected) / Size /
+  IP / User / Firmware / ms. Zero-insert rows are dimmed.
+- **Historical data**: records only exist from API v0.9.0 deployment onward.
+  Pre-existing sessions show an empty list, which is correct — not a bug.
+- **Rule**: any new ingest endpoint writing to `tracker_samples` must also log an
+  upload document. The `tracker_uploads` collection is the authoritative audit trail.
+
+### Dual-Network Upload (Home + Mobile Hotspot) — v0.9.0
+
+**Design**: each upload cycle tries the **home** SSID first. If not in range after
+`WIFI_CONNECT_TIMEOUT_MS` (25 s, WDT-petted throughout), it falls back to the
+**mobile hotspot** SSID. Whichever AP connects, the matching ingest URL is used.
+
+| Field | Home | Remote (hotspot) |
+|-------|------|-----------------|
+| `WIFI_SSID` / `WIFI_SSID2` | Home AP SSID | Phone hotspot SSID |
+| `INGEST_URL` / `INGEST_URL2` | `http://192.168.86.48:8030/ingest/csv` | `https://susmannet.duckdns.org/api/ingest/csv` |
+| Auth | None (LAN, unreachable from internet) | HTTP Basic Auth via nginx proxy |
+
+**HTTPS**: `WiFiClientSecure::setInsecure()` skips cert verification — root CA embedding
+was rejected because certs expire. Data is low-sensitivity (GPS + counts); MITM risk on a
+residential hotspot is acceptable. Nginx proxy Basic Auth handles actual access control.
+
+**HTTP Basic Auth**: `HTTPClient::setAuthorization(user, pass)` auto-generates the
+`Authorization: Basic <base64>` header. Applied only on the remote network when
+`INGEST_USER` is non-empty.
+
+**WDT timing check**: worst case is `2 × 25s + 30s HTTP = 80s`. But the WDT (60s) is
+continuously petted every 200ms throughout. The pet loop means the WDT timer restarts
+every 200ms — it will never fire even if total wall-clock time exceeds 60s. This was
+confirmed by the v0.7.1 analysis; same pattern here.
+
+**`WIFISTAT`**: now includes `net=home|remote|none`. Upload log lines include `net=remote`.
+
+**Rules**:
+- `connectWifi()` must reset `activeIngestUrl_` to `nullptr` before each attempt.
+- `disconnectWifi()` also clears those pointers.
+- Any new SSID added must be reviewed for WDT pet coverage in the connect wait loop.
 
 ### lwIP Heap Exhaustion + API Startup Crash Caused Multi-Hour Upload Blackout (v0.8.1) — CRITICAL
 
@@ -1263,9 +1454,11 @@ Otherwise, iterate to completion.
   shown in COL_GREEN when 0 (all uploaded) or COL_AMBER when > 0 (data queued).
 - **Battery indicator now green when >= 40%**: was white (`COL_FG`); changed to `COL_GREEN` so the
   color signal is consistent (green = healthy, amber = moderate, red = low).
-- **Long-press on GPS and STORAGE screens now advances the screen**: previously a no-op, which made
+- **Long-press on GPS screen now advances the screen**: previously a no-op, which made
   navigation confusing (hold > 800ms = long-press fires, does nothing; release = no short-press).
-  Now GPS and STORAGE long-press behave identically to short-press — cycle to the next screen.
+  GPS long-press now behaves identically to short-press — cycles to the next screen.
+  **Note (v0.9.1)**: STORAGE long-press was later changed to trigger an immediate Wi-Fi sync
+  instead of advancing the screen (see `ACTION_FORCE_SYNC`).
 - **Screen render PNG mockups**: `scripts/render_screens.py` generates 5 PNG files at 3× scale
   (480×240) into `docs/screens/`.  Run with `python scripts/render_screens.py`.  Requires Pillow.
 
