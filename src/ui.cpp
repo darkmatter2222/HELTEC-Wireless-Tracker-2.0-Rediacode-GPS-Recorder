@@ -285,12 +285,27 @@ void Ui::renderHeader() {
 
 // ---------------------------------------------------------------------------
 // STATS screen (160 x 68 below header)
-//   y=14: "DOSE"  small dim
+//   y=14: "DOSE nSv/h"  (x=4..63)   | "Smp NNNNN"  (x=100..157)
 //   y=22: big nSv/h value (size 3) ~24px tall
 //   y=46: "CPS"   small dim    + count rate (size 2) ~16px
 //   y=66: footer (errors / addr last 5)
 void Ui::renderStats() {
     field(10, 4, 14, 60, 8, "DOSE nSv/h", COL_DIM, COL_BG, 1);
+
+    // Sample counter — right side of the DOSE label row (96 px free).
+    // Shows sampleCount(): rises as samples are recorded; drops to 0 after
+    // each upload cycle when the active file is rotated. This gives the user
+    // a live "currently buffered / awaiting upload" count without the data-
+    // loss confusion of the monotonic lifetimeSamples counter.
+    // Green when recording + RC ready (actively filling); dim otherwise.
+    {
+        char sbuf[12];
+        const uint32_t sc = store_ ? store_->sampleCount() : 0;
+        snprintf(sbuf, sizeof(sbuf), "Smp%5lu", (unsigned long)sc);
+        const bool rcOk = (rcState_ == RadiaCode::State::Ready);
+        const bool rec  = store_ && store_->isRecording();
+        field(17, 100, 14, 58, 8, sbuf, (rec && rcOk) ? COL_GREEN : COL_DIM, COL_BG, 1);
+    }
 
     char buf[24];
     if (lastReading_.valid) {

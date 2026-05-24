@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.9.3`.
+Current: `0.9.4`.
 
 ---
 
@@ -327,6 +327,11 @@ namespace secrets {
 - **Header status bar** (v0.3.5): RC state badge (GREEN=OK, AMBER=scanning/init, RED=disconnected);
   GPS badge (GREEN=3D fix, RED=no fix); battery with color threshold; recording dot always visible
   (dim outline = idle, filled red = recording)
+- **STATS screen** (v0.9.4): top row has "DOSE nSv/h" label (x=4..63) AND "Smp NNNNN" sample
+  counter (x=100..157). Counter shows `sampleCount()` — samples in the current active recording
+  file. Counts UP as samples are recorded; RESETS to 0 after each upload cycle (file rotated).
+  Gives user a live "buffered / awaiting upload" indicator. Color: COL_GREEN when recording + RC
+  Ready (actively filling); COL_DIM otherwise.
 - **STATS screen footer** (v0.3.5): Shows GPS positional accuracy `+/- X.Xm  hdop Y.Y` (green)
   when RC connected and GPS fix; `GPS: searching...` (amber) when no fix; `Hold: pick RC` when disconnected.
   Replaces the old RC-address + `*noGPS` footer.
