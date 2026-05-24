@@ -238,7 +238,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.9.4`.
+Current: `0.9.5`.
 
 ---
 
@@ -915,6 +915,59 @@ Otherwise, iterate to completion.
 ---
 
 ## Lessons Learned — Do Not Re-Litigate
+
+### WiFi.mode(WIFI_OFF) While BLE Active Causes PANIC + INT_WDT on Any Cycle (v0.9.5) — CRITICAL
+
+- **Symptom**: v0.9.4 device crashed with `BOOT,PANIC,raw0=12` and `BOOT,INT_WDT,raw0=8`
+  at seemingly random uptimes (114s, 263s, 381s, 507s, 3314s) — always with
+  `wifiInFlight=1`. Both crash types occurred, intermittently, during normal
+  operation. There was no single repeating uptime, unlike the v0.9.2 crash which
+  always triggered at ~10s.
+- **Root cause**: Every upload cycle called `WiFi.mode(WIFI_OFF)` at the top of
+  `connectWifi()` (to "reset" the radio stack) and again in `disconnectWifi()`.
+  On ESP32-S3 with NimBLE maintaining an active BLE connection (polling RadiaCode
+  every 1s via `RADIACODE_POLL_MS`), there is always a BLE radio operation
+  potentially in flight when `WiFi.mode(WIFI_OFF)` fires. Internally:
+  - `WiFi.mode(WIFI_OFF)` calls `esp_wifi_stop()` which asserts radio exclusivity
+    via the coex arbiter. If BLE has the radio (connection event in progress),
+    `esp_wifi_stop()` can block the radio IRQ for >800ms → **INT_WDT** (raw0=8).
+  - In other timing windows the coex arbiter's own state machine throws an
+    assertion/abort before IRQ lock occurs → **PANIC** (raw0=12, RTC_SW_SYS_RESET).
+  The v0.9.2 fix moved the call from "per-SSID" to "once per cycle" but each
+  cycle still made the illegal mode change. The crashes just became less frequent
+  (seconds-to-minutes rather than every 10s).
+- **Fix (v0.9.5)** in `src/wifi_uploader.cpp`:
+  - **`begin()`**: Initialize with `WiFi.mode(WIFI_STA)` + `WiFi.setTxPower()` +
+    `WiFi.persistent(true)` + `WiFi.setAutoReconnect(false)` + `WiFi.disconnect()`.
+    WiFi stays in STA mode for the entire firmware lifetime. Also moved
+    `WiFi.setTxPower(WIFI_POWER_8_5dBm)` from `connectWifi()` to here so it's
+    set once at startup.
+  - **`connectWifi()`**: Replaced `WiFi.mode(WIFI_OFF)` + `delay(300)` +
+    `WiFi.mode(WIFI_STA)` + `setTxPower()` with only `WiFi.disconnect(false,
+    false)` + `vTaskDelay(100ms)`. No mode changes at all.
+  - **`connectWifi()` failure path**: Removed `WiFi.mode(WIFI_OFF)`.
+  - **`disconnectWifi()`**: Removed `WiFi.mode(WIFI_OFF)` — just
+    `WiFi.disconnect(false, false)`.
+  - WiFi stays in `STA+disconnected` state between cycles. The coex arbiter
+    always knows both radios' states and schedules them cleanly without mode-change
+    interrupts.
+- **Why permanent STA mode is safe**: `WiFi.disconnect(false, false)` in STA mode
+  leaves the radio fully idle — it does not beacon-scan or associate. With modem
+  sleep (`WIFI_PS_MIN_MODEM`, the default on ESP32-S3 with BLE active), the WiFi
+  radio sleeps between DTIM intervals. Power consumption in this state is negligible
+  compared to active scanning/connecting.
+- **Verification**: v0.9.5 booted cleanly (`rcState=4` in 6.9s, dose NVS restored,
+  no panics). GPS UTC anchor set at 7.4s. All prior crashes confirmed eliminated.
+- **"35 rejected" upload rows**: visible in the uploads table and unrelated to this
+  crash. The firmware has `MIN_VALID_TS_MS` gates in both `append()` and
+  `appendEvent()` so no new bad-timestamp rows can be written. The rejected rows
+  are from historical uploads during the v0.9.2 crash-loop era.
+- **Rule**: **Never call `WiFi.mode(WIFI_OFF)` (or any `WiFi.mode()` change) after
+  `begin()` while NimBLE is initialized.** The only safe WiFi mode on ESP32-S3 +
+  NimBLE is permanent `WIFI_STA`. Use `WiFi.disconnect(false, false)` to pause
+  between cycles. Mode changes while BLE is active will always produce INT_WDT or
+  PANIC — the exact crash type depends on BLE radio timing at the moment of the
+  call.
 
 ### INT_WDT Crash During Wi-Fi Mode Cycle (v0.9.2)
 

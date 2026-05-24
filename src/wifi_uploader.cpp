@@ -72,14 +72,27 @@ void WifiUploader::begin(SessionStore* store) {
     enabled_ = true;
     phase_ = (uint8_t)Phase::Idle;
 
-    // Park the radio so the cadenced task starts from a known state.
-    WiFi.mode(WIFI_OFF);
+    // v0.9.5: Keep WiFi in WIFI_STA permanently for the lifetime of the
+    // firmware. Every prior version cycled to WIFI_OFF between upload cycles
+    // which, on ESP32-S3 with NimBLE actively connected, races with the BLE
+    // radio IRQ during esp_wifi_stop(). That race manifests as either:
+    //   - INT_WDT (raw0=8):  IRQ masked >800 ms while mode-change completes
+    //   - PANIC  (raw0=12): coex arbiter assert/abort()
+    // Both were confirmed in field logs at uptimes from 114 s to 3314 s.
+    // Keeping WiFi in STA+disconnected state between uploads is fully
+    // compatible with BLE modem-sleep coex (WIFI_PS_MIN_MODEM). The coex
+    // arbiter always knows where both radios are and schedules them cleanly.
+    WiFi.mode(WIFI_STA);
+    // Keep PA current low to avoid brown-outs on battery with BLE coex.
+    WiFi.setTxPower(WIFI_POWER_8_5dBm);
     // v0.4.8: persistent=true so the WiFi driver caches the AP info (BSSID,
     // channel, etc.) in NVS. Subsequent connects can use that cache to skip
     // a full scan. Was false, which forced a full active scan every cycle
     // and contributed to the 12 s timeout being too short.
     WiFi.persistent(true);
     WiFi.setAutoReconnect(false);
+    // Start disconnected so the task's first cycle does a clean begin().
+    WiFi.disconnect(false, false);
 
     // Pin the worker to core 0; the Arduino loop runs on core 1, so HTTP
     // POSTs and Wi-Fi connect timeouts can never freeze the UI/button polling.
@@ -211,34 +224,23 @@ bool WifiUploader::connectWifi() {
     activeNet_ = (uint8_t)ActiveNet::None;
 
     // ------------------------------------------------------------------ //
-    // v0.9.2: cycle the radio stack exactly ONCE per connect attempt, not
-    // once per SSID. The previous code (v0.9.0) called WiFi.mode(WIFI_OFF)
-    // inside the tryConnect lambda, meaning a second SSID attempt would call
-    // mode(WIFI_OFF) while the MAC task was mid-scan (active on-channel 25s
-    // timeout just elapsed). esp_wifi_stop() called at that point can block
-    // the radio IRQ line >800ms which trips the interrupt watchdog (INT_WDT,
-    // raw0=8). Root-cause confirmed in the field log (lastUptimeMs=591784,
-    // wifiInFlight=1). Fix: tear down the stack once here, then let the
-    // lambda just call WiFi.begin() / WiFi.disconnect() without mode changes.
+    // v0.9.5: WiFi stays in WIFI_STA for the entire firmware lifetime (set
+    // once in begin()). We only flush the previous association here.
+    // No mode() calls at all -- cycling WIFI_OFF<->WIFI_STA while NimBLE
+    // has an active connection races with the BLE radio IRQ and causes
+    // INT_WDT (raw0=8) or coex-arbiter PANIC (raw0=12). See begin() comment.
     //
     // v0.9.3: do NOT call WiFi.setSleep(false). On ESP32-S3 with NimBLE
     // active, the WiFi driver calls abort() if modem sleep is disabled
     // ("Error! Should enable WiFi modem sleep when both WiFi and Bluetooth
     // are enabled"). The BLE coexistence arbiter requires WIFI_PS_MIN_MODEM.
-    // The v0.4.1 setSleep(false) workaround applied to a different chip
-    // variant (V1.2 / original ESP32); it is illegal on ESP32-S3 + NimBLE.
     // ------------------------------------------------------------------ //
     WiFi.disconnect(false, false);
-    WiFi.mode(WIFI_OFF);
-    vTaskDelay(pdMS_TO_TICKS(300));   // let the driver fully settle after stop
-    WiFi.mode(WIFI_STA);
-    // Keep PA current low to avoid brown-outs on battery with BLE coex.
-    WiFi.setTxPower(WIFI_POWER_8_5dBm);
-    // NOTE: WiFi.setSleep(false) intentionally absent. See comment above.
+    vTaskDelay(pdMS_TO_TICKS(100));   // brief settle before begin()
 
     // ------------------------------------------------------------------ //
-    // Inner helper: associate with one SSID. Radio is already in WIFI_STA
-    // mode; only calls begin() / disconnect() -- never mode().
+    // Inner helper: associate with one SSID. Already in WIFI_STA mode;
+    // only calls begin() / disconnect() -- never mode().
     // ------------------------------------------------------------------ //
     auto tryConnect = [&](const char* ssid, const char* pass) -> bool {
         Serial.printf("[WIFI] trying '%s'...\n", ssid);
@@ -289,9 +291,8 @@ bool WifiUploader::connectWifi() {
         }
     }
 
-    // Neither network connected.
+    // Neither network connected -- stay in STA+disconnected (no mode change).
     WiFi.disconnect(false, false);
-    WiFi.mode(WIFI_OFF);
     return false;
 }
 
@@ -299,8 +300,8 @@ bool WifiUploader::connectWifi() {
 void WifiUploader::disconnectWifi() {
     event_log::markPhase("WIFI_DISCO_IN");
     // v0.4.8: eraseAP=false so persistent cache survives between cycles.
+    // v0.9.5: no WiFi.mode(WIFI_OFF) -- stay in STA+disconnected permanently.
     WiFi.disconnect(false, false);
-    WiFi.mode(WIFI_OFF);
     // Clear per-cycle networking state so stale pointers aren't used
     // if something goes wrong between cycles.
     activeIngestUrl_  = nullptr;
