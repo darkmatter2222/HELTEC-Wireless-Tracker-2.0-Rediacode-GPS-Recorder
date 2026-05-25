@@ -429,8 +429,8 @@ function DayBarChart({ data, label, color, loading }) {
                 className="day-bar"
                 title={`${d.date}: ${d.value.toLocaleString()}`}
                 style={{
-                  height: d.value > 0 ? `${Math.max((d.value / max) * 100, 3)}%` : '2px',
-                  background: d.value > 0 ? color : 'rgba(255,255,255,0.06)',
+                  height: d.value > 0 ? `${Math.max((d.value / max) * 100, 3)}%` : '5px',
+                  background: d.value > 0 ? color : 'rgba(255,255,255,0.15)',
                 }}
               />
             ))}
@@ -446,37 +446,77 @@ function DayBarChart({ data, label, color, loading }) {
   );
 }
 
+const DAY_OPTIONS = [
+  { value: 30,  label: '30d' },
+  { value: 60,  label: '60d' },
+  { value: 90,  label: '90d' },
+  { value: 180, label: '6m'  },
+  { value: 365, label: '1y'  },
+];
+
+/** Build a full YYYY-MM-DD array for the last N days (today included), local time. */
+function buildDateRange(days) {
+  const dates = [];
+  const now = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    dates.push(d.toISOString().slice(0, 10));
+  }
+  return dates;
+}
+
 // ---- Activity charts strip (rendered above subtabs) ----------------------
 function ActivityCharts({ sessions }) {
+  const [days,       setDays]       = useState(90);
   const [dailyStats, setDailyStats] = useState(null); // null = loading, [] = error/empty
 
   useEffect(() => {
-    fetchDailyStats(90)
+    setDailyStats(null);
+    fetchDailyStats(days)
       .then(data => setDailyStats(data))
       .catch(() => setDailyStats([]));
-  }, []);
+  }, [days]);
 
-  // Samples per day from sessions prop — sessionId is YYYY-MM-DD for day-bucketed sessions.
+  // Full date spine for the selected window — zero-filled by default.
+  const dateRange = useMemo(() => buildDateRange(days), [days]);
+
+  // Samples per day — fill zeros for all dates in the window.
   const recordsData = useMemo(() => {
+    const dateSet = new Set(dateRange);
     const dayMap = {};
     for (const s of sessions) {
-      if (/^\d{4}-\d{2}-\d{2}$/.test(s.sessionId) && (s.samples ?? 0) > 0) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s.sessionId) && dateSet.has(s.sessionId)) {
         dayMap[s.sessionId] = (dayMap[s.sessionId] ?? 0) + (s.samples ?? 0);
       }
     }
-    return Object.entries(dayMap)
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, value]) => ({ date, value }));
-  }, [sessions]);
+    return dateRange.map(date => ({ date, value: dayMap[date] ?? 0 }));
+  }, [sessions, dateRange]);
 
-  // Upload-call count per day from API.
+  // Upload-call count per day — fill zeros for missing dates.
   const uploadsData = useMemo(() => {
     if (!dailyStats) return null;
-    return dailyStats.map(d => ({ date: d.date, value: d.uploads ?? 0 }));
-  }, [dailyStats]);
+    const statMap = {};
+    for (const d of dailyStats) statMap[d.date] = d.uploads ?? 0;
+    return dateRange.map(date => ({ date, value: statMap[date] ?? 0 }));
+  }, [dailyStats, dateRange]);
 
   return (
     <div className="activity-charts-strip">
+      <div className="day-range-bar">
+        <span className="day-range-label">Date range</span>
+        <div className="day-range-pills">
+          {DAY_OPTIONS.map(opt => (
+            <button
+              key={opt.value}
+              className={`day-range-pill${days === opt.value ? ' active' : ''}`}
+              onClick={() => setDays(opt.value)}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
       <DayBarChart
         data={recordsData}
         label="Samples / day"

@@ -1477,6 +1477,42 @@ canvas {
   flex-shrink: 0;
 }
 
+.day-range-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.day-range-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.day-range-pills {
+  display: flex;
+  gap: 3px;
+}
+
+.day-range-pill {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--muted);
+  font-size: 9px;
+  padding: 2px 6px;
+  cursor: pointer;
+  line-height: 1.4;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.day-range-pill:hover { background: var(--panel); color: var(--fg); }
+.day-range-pill.active { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 700; }
+
 .day-chart-wrap {
   padding: 7px 12px 4px;
   border-bottom: 1px solid var(--border);
