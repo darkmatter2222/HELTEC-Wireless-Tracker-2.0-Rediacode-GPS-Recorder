@@ -16,6 +16,7 @@ import { DatabasePanel } from './DatabasePanel.jsx';
 import { DualRangeSlider } from './DualRangeSlider.jsx';
 import RenderPanel from './RenderPanel.jsx';
 import { ExportPanel } from './ExportPanel.jsx';
+import { ThreeDView } from './ThreeDView.jsx';
 
 // ---- constants -------------------------------------------------------------
 
@@ -356,6 +357,7 @@ export default function App() {
   const [trackWeight, setTrackWeight]   = useState(4);
   const [pointRadius, setPointRadius]   = useState(5);
   const [showTooltips, setShowTooltips] = useState(true);
+  const [threeDMode,   setThreeDMode]   = useState(false);
   const [arrowEvery, setArrowEvery]         = useState(5);    // show 1-in-N arrows
   const [hexBinZoom, setHexBinZoom]         = useState(6);    // bin resolution (default = initial map zoom)
   const [hexBinAuto, setHexBinAuto]         = useState(true); // auto-follow map zoom
@@ -896,6 +898,11 @@ export default function App() {
             <SectionHead>Rendering</SectionHead>
             <div className="render-cards">
               <label className="toggle-pill">
+                <input type="checkbox" checked={threeDMode} onChange={e => setThreeDMode(e.target.checked)} />
+                <span className="toggle-track"><span className="toggle-thumb" /></span>
+                <span className="toggle-label">▲ 3D view (alt = Z)</span>
+              </label>
+              <label className="toggle-pill">
                 <input type="checkbox" checked={nanoMode} onChange={e => setNanoMode(e.target.checked)} />
                 <span className="toggle-track"><span className="toggle-thumb" /></span>
                 <span className="toggle-label">nSv/h mode</span>
@@ -1043,8 +1050,21 @@ export default function App() {
         <div className="resize-handle" onMouseDown={startResize} />
       </aside>
 
-      {/* === MAP === */}
+      {/* === MAP / 3D VIEW === */}
       <main className="map-pane">
+        {/* 3D overlay — floats above the Leaflet map; can be combined with any map mode. */}
+        {threeDMode && (
+          <ThreeDView
+            filteredTraces={filteredTraces}
+            colorChannel={colorChannel}
+            ranges={ranges}
+            tileUrl={tile.url}
+          />
+        )}
+
+        {/* 2D Leaflet map — hidden (not unmounted) while 3D overlay is active so
+            zoom/pan state is preserved when switching back. */}
+        <div style={{ display: threeDMode ? 'none' : 'contents' }}>
         <MapContainer center={[39.5, -98.35]} zoom={6} maxZoom={22} style={{ width: '100%', height: '100%' }}>
           <TileLayer
             key={tile.url}
@@ -1173,6 +1193,7 @@ export default function App() {
             );
           })}
         </MapContainer>
+        </div>{/* end 2D Leaflet map wrapper */}
 
         {/* === SCRUBBER === */}
         <div className="scrubber">
