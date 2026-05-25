@@ -16,13 +16,14 @@ import { DatabasePanel } from './DatabasePanel.jsx';
 import { DualRangeSlider } from './DualRangeSlider.jsx';
 import RenderPanel from './RenderPanel.jsx';
 import { ExportPanel } from './ExportPanel.jsx';
+import { ThreeDView } from './ThreeDView.jsx';
 
 // ---- constants -------------------------------------------------------------
 
 const MIN_VALID_TS_MS = 1577836800000; // 2020-01-01 UTC
 
 // Map display modes
-const MAP_MODES = ['Track', 'Dots', 'Hex', 'Arrows'];
+const MAP_MODES = ['Track', 'Dots', 'Hex', 'Arrows', '3D'];
 
 // Color channel options
 const COLOR_CHANNELS = [
@@ -1043,8 +1044,20 @@ export default function App() {
         <div className="resize-handle" onMouseDown={startResize} />
       </aside>
 
-      {/* === MAP === */}
+      {/* === MAP / 3D VIEW === */}
       <main className="map-pane">
+        {/* 3D mode — replaces the Leaflet map with a Three.js WebGL scene. */}
+        {mapMode === '3D' && (
+          <ThreeDView
+            filteredTraces={filteredTraces}
+            colorChannel={colorChannel}
+            ranges={ranges}
+          />
+        )}
+
+        {/* 2D Leaflet map — hidden (not unmounted) while 3D is active so the
+            map state (zoom, pan) is preserved when you switch back. */}
+        <div style={{ display: mapMode === '3D' ? 'none' : 'contents' }}>
         <MapContainer center={[39.5, -98.35]} zoom={6} maxZoom={22} style={{ width: '100%', height: '100%' }}>
           <TileLayer
             key={tile.url}
@@ -1173,6 +1186,7 @@ export default function App() {
             );
           })}
         </MapContainer>
+        </div>{/* end 2D Leaflet map wrapper */}
 
         {/* === SCRUBBER === */}
         <div className="scrubber">
@@ -1309,6 +1323,7 @@ function modeIcon(mode) {
     case 'Dots':    return '⬤';
     case 'Heatmap': return '🌡';
     case 'Arrows':  return '➤';
+    case '3D':      return '▲';
     default: return '';
   }
 }

@@ -2020,6 +2020,125 @@ canvas {
   cursor: pointer;
   transition: opacity .15s;
 }
+
+/* =====================================================================
+   3D View — ThreeDView.jsx
+   ===================================================================== */
+
+/* Full-bleed container that fills the map-pane */
+.three-d-container {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0d1117;
+}
+
+.three-d-canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* Empty-state center overlay */
+.three-d-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  pointer-events: none;
+  font-size: 14px;
+}
+
+/* HUD controls panel — top-right corner */
+.three-d-hud {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  background: rgba(10, 12, 15, 0.82);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px 8px;
+  min-width: 210px;
+  max-width: 270px;
+  backdrop-filter: blur(6px);
+  z-index: 10;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.three-d-hud-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--accent2);
+  font-weight: 600;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+
+.three-d-hud-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.three-d-hud-label {
+  font-size: 11px;
+  color: var(--muted);
+  min-width: 52px;
+}
+
+.three-d-hud-slider {
+  flex: 1;
+  height: 3px;
+  accent-color: var(--accent2);
+  cursor: pointer;
+}
+
+/* Checkbox + label inside the HUD */
+.three-d-check {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text);
+  cursor: pointer;
+  user-select: none;
+}
+.three-d-check input[type=checkbox] {
+  accent-color: var(--accent2);
+  width: 13px;
+  height: 13px;
+}
+
+.three-d-hud-count {
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.three-d-hud-compass {
+  display: flex;
+  gap: 10px;
+  font-size: 10px;
+  color: var(--muted);
+  font-family: monospace;
+}
+
+.three-d-hud-hint {
+  font-size: 10px;
+  color: var(--muted);
+  opacity: 0.65;
+  padding-top: 3px;
+  border-top: 1px solid var(--border);
+}
+
 .export-btn:hover:not(:disabled) { opacity: .85; }
 .export-btn:disabled { opacity: .45; cursor: default; }
 
