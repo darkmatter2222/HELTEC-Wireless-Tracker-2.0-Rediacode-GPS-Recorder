@@ -48,6 +48,15 @@ export async function fetchSessionUploads(sessionId, limit = 100) {
   return r.json();
 }
 
+/** Return per-day upload activity aggregated across all sessions, oldest first.
+ *  Each entry: {date, uploads, rowsInserted, rowsRejected}
+ *  Date is YYYY-MM-DD in America/New_York timezone. */
+export async function fetchDailyStats(days = 90) {
+  const r = await fetch(`${API_BASE}/admin/daily-stats?days=${days}`);
+  if (!r.ok) throw new Error(`daily-stats ${r.status}`);
+  return r.json();
+}
+
 // ---- management ------------------------------------------------------------
 
 /** Rename a session (sets displayName field; sessionId is not changed). */

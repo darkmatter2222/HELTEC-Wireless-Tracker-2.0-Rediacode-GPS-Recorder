@@ -1,6 +1,6 @@
 // ManagePanel — data management UI: rename, soft-delete/restore/purge, merge, export, upload history.
 import { useState, useMemo, useRef, useEffect } from 'react';
-import { renameSession, deleteSession, restoreSession, purgeSession, mergeSessions, exportSession, exportBulk, fetchSessions, fetchSessionUploads } from './api.js';
+import { renameSession, deleteSession, restoreSession, purgeSession, mergeSessions, exportSession, exportBulk, fetchSessions, fetchSessionUploads, fetchDailyStats } from './api.js';
 import { sessionColor, fmtTs, fmtDose } from './colors.js';
 
 const MIN_VALID_TS_MS = 1577836800000;
@@ -401,6 +401,98 @@ function ExportPanel({ sessions, onError }) {
   );
 }
 
+// ---- Activity bar chart (no canvas/SVG — pure CSS flex bars) -------------
+function DayBarChart({ data, label, color, loading }) {
+  const max = data && data.length > 0 ? Math.max(...data.map(d => d.value), 1) : 1;
+  const fmtD = d => d ? `${d.slice(5, 7)}/${d.slice(8, 10)}` : '';
+  const isEmpty = !data || data.length === 0;
+
+  return (
+    <div className="day-chart-wrap">
+      <div className="day-chart-header">
+        <span className="day-chart-label">{label}</span>
+        {loading
+          ? <span className="day-chart-val" style={{ fontStyle: 'italic' }}>loading…</span>
+          : isEmpty
+            ? <span className="day-chart-val">no data</span>
+            : <span className="day-chart-val">max {max.toLocaleString()}</span>
+        }
+      </div>
+      {isEmpty ? (
+        <div className="day-chart-empty" />
+      ) : (
+        <>
+          <div className="day-chart-bars">
+            {data.map(d => (
+              <div
+                key={d.date}
+                className="day-bar"
+                title={`${d.date}: ${d.value.toLocaleString()}`}
+                style={{
+                  height: d.value > 0 ? `${Math.max((d.value / max) * 100, 3)}%` : '2px',
+                  background: d.value > 0 ? color : 'rgba(255,255,255,0.06)',
+                }}
+              />
+            ))}
+          </div>
+          <div className="day-chart-xaxis">
+            <span>{fmtD(data[0]?.date)}</span>
+            <span>{fmtD(data[Math.floor(data.length / 2)]?.date)}</span>
+            <span>{fmtD(data[data.length - 1]?.date)}</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ---- Activity charts strip (rendered above subtabs) ----------------------
+function ActivityCharts({ sessions }) {
+  const [dailyStats, setDailyStats] = useState(null); // null = loading, [] = error/empty
+
+  useEffect(() => {
+    fetchDailyStats(90)
+      .then(data => setDailyStats(data))
+      .catch(() => setDailyStats([]));
+  }, []);
+
+  // Samples per day from sessions prop — sessionId is YYYY-MM-DD for day-bucketed sessions.
+  const recordsData = useMemo(() => {
+    const dayMap = {};
+    for (const s of sessions) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s.sessionId) && (s.samples ?? 0) > 0) {
+        dayMap[s.sessionId] = (dayMap[s.sessionId] ?? 0) + (s.samples ?? 0);
+      }
+    }
+    return Object.entries(dayMap)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([date, value]) => ({ date, value }));
+  }, [sessions]);
+
+  // Upload-call count per day from API.
+  const uploadsData = useMemo(() => {
+    if (!dailyStats) return null;
+    return dailyStats.map(d => ({ date: d.date, value: d.uploads ?? 0 }));
+  }, [dailyStats]);
+
+  return (
+    <div className="activity-charts-strip">
+      <DayBarChart
+        data={recordsData}
+        label="Samples / day"
+        color="var(--accent)"
+        loading={false}
+      />
+      <DayBarChart
+        data={uploadsData}
+        label="Upload calls / day"
+        color="hsl(200,80%,60%)"
+        loading={dailyStats === null}
+      />
+    </div>
+  );
+}
+
 // ---- Uploads tab ---------------------------------------------------------
 function UploadsTab({ sessions }) {
   const [selectedId, setSelectedId] = useState(() => sessions[0]?.sessionId ?? null);
@@ -519,6 +611,7 @@ export function ManagePanel({ sessions, onRenamed, onDeleted, onMerged, onRestor
 
   return (
     <div className="panel-scroll">
+      <ActivityCharts sessions={sessions} />
       <div className="mgmt-subtabs">
         {[
           { key: 'rename',  label: '✏ Rename' },

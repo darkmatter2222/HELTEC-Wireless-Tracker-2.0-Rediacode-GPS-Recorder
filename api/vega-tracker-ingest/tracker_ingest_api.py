@@ -98,7 +98,7 @@ SAMPLES_COLL      = os.getenv("MONGO_SAMPLES_COLLECTION", "tracker_samples")
 SESSIONS_COLL     = os.getenv("MONGO_SESSIONS_COLLECTION", "tracker_sessions")
 BACKUPS_COLL      = "tracker_backups"    # telemetry: one doc per backup attempt
 UPLOADS_COLL      = "tracker_uploads"    # one doc per POST /ingest/csv call
-API_VERSION       = "0.9.0"
+API_VERSION       = "0.9.1"
 MAX_BODY_BYTES    = int(os.getenv("MAX_BODY_BYTES", str(8 * 1024 * 1024)))   # 8 MB
 INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "1000"))
 BACKUP_DIR        = os.getenv("BACKUP_DIR", "/backups")  # host-mounted volume
@@ -1522,6 +1522,44 @@ def session_uploads(session_id: str, limit: int = 100):
         projection={"_id": 0},
     )
     return list(cur)
+
+
+@app.get("/admin/daily-stats")
+def admin_daily_stats(days: int = 90, tz: str = "America/New_York"):
+    """Return per-day upload activity aggregated from tracker_uploads, oldest first.
+
+    Each entry: {date, uploads, rowsInserted, rowsRejected}.
+    Date is localised to the requested timezone (default America/New_York), YYYY-MM-DD.
+    Only the most recent `days` days of data are returned (default 90).
+    """
+    cutoff_ms = int((time.time() - days * 86400) * 1000)
+    pipeline = [
+        {"$match": {"receivedAt": {"$gte": cutoff_ms}}},
+        {"$project": {
+            "date": {"$dateToString": {
+                "format":   "%Y-%m-%d",
+                "date":     {"$toDate": "$receivedAt"},
+                "timezone": tz,
+            }},
+            "rowsInserted": 1,
+            "rowsRejected": 1,
+        }},
+        {"$group": {
+            "_id":          "$date",
+            "uploads":      {"$sum": 1},
+            "rowsInserted": {"$sum": "$rowsInserted"},
+            "rowsRejected": {"$sum": "$rowsRejected"},
+        }},
+        {"$sort": {"_id": 1}},
+        {"$project": {
+            "_id":          0,
+            "date":         "$_id",
+            "uploads":      1,
+            "rowsInserted": 1,
+            "rowsRejected": 1,
+        }},
+    ]
+    return list(app.state.uploads.aggregate(pipeline))
 
 
 @app.post("/ingest/csv")
