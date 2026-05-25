@@ -1,5 +1,7 @@
 ﻿<div align="center">
 
+<img src="docs/hero.png" alt="HELTEC Wireless Tracker 2.0 — RadiaCode GPS Recorder" width="100%">
+
 # Heltec Tracker — RadiaCode GPS Field Logger
 
 [![Firmware](https://img.shields.io/badge/firmware-v0.5.0-brightgreen?logo=cplusplus&logoColor=white)](src/config.h)
