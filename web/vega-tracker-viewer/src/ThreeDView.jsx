@@ -66,6 +66,36 @@ function buildTileUrl(template, z, tx, ty) {
     .replace('{r}', '');
 }
 
+// ---- Terrain elevation -------------------------------------------------------
+
+// 32×32 = 1 024 quad faces per tile — enough detail without melting the GPU.
+const TERRAIN_SEGS = 32;
+
+// Fetch one AWS Terrarium tile and decode per-pixel elevation values.
+// Terrarium encoding: elev_m = R×256 + G + B/256 − 32768
+// Returns a Float32Array of 256×256 elevation values (metres, absolute).
+async function decodeTerrariumTile(tx, ty, z, signal) {
+  const url = `https://s3.amazonaws.com/elevation-tiles-prod/terrarium/${z}/${tx}/${ty}.png`;
+  const img = new Image();
+  img.crossOrigin = 'anonymous';
+  await new Promise((res, rej) => {
+    if (signal?.aborted) return rej(new DOMException('aborted', 'AbortError'));
+    img.onload  = res;
+    img.onerror = () => rej(new Error('terrain fetch failed'));
+    img.src = url;
+  });
+  if (signal?.aborted) throw new DOMException('aborted', 'AbortError');
+  const cv  = document.createElement('canvas');
+  cv.width  = cv.height = 256;
+  const ctx = cv.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  const px   = ctx.getImageData(0, 0, 256, 256).data;
+  const elev = new Float32Array(256 * 256);
+  for (let i = 0; i < 256 * 256; i++)
+    elev[i] = px[i * 4] * 256 + px[i * 4 + 1] + px[i * 4 + 2] / 256 - 32768;
+  return elev;
+}
+
 // ---- Color helpers ----------------------------------------------------------
 
 function channelColor(p, channel, traceIdx, ranges) {
@@ -161,6 +191,7 @@ export function ThreeDView({ filteredTraces, colorChannel, ranges, tileUrl }) {
   const [altExag,       setAltExag]       = useState(5);
   const [showDropLines, setShowDropLines] = useState(false);
   const [showTiles,     setShowTiles]     = useState(true);
+  const [showTerrain,   setShowTerrain]   = useState(true);
   const [showGrid,      setShowGrid]      = useState(false);
   const [noData,        setNoData]        = useState(false);
   const [pointCount,    setPointCount]    = useState(0);
@@ -297,7 +328,8 @@ export function ThreeDView({ filteredTraces, colorChannel, ranges, tileUrl }) {
           const wx =  lngM((nw.lng + se.lng) / 2 - cLng, cLat);
           const wz = -latM((nw.lat + se.lat) / 2 - cLat);
 
-          const planeGeo = new THREE.PlaneGeometry(tileW, tileH);
+          const segs = showTerrain ? TERRAIN_SEGS : 1;
+          const planeGeo = new THREE.PlaneGeometry(tileW, tileH, segs, segs);
           const mat = new THREE.MeshBasicMaterial({
             color: new THREE.Color(0x111824), // dark placeholder until texture loads
             transparent: true,
@@ -308,6 +340,29 @@ export function ThreeDView({ filteredTraces, colorChannel, ranges, tileUrl }) {
           mesh.rotation.x = -Math.PI / 2; // rotate to lie flat in the XZ ground plane
           mesh.position.set(wx, -1, wz);  // Y = −1: tiles sit just below the track lines
           scene.add(mesh);
+
+          // Async: fetch Terrarium elevation tile and displace PlaneGeometry vertices.
+          // PlaneGeometry is in the XY plane; after rotation.x=-PI/2, local Z→world Y,
+          // so setZ() on a vertex moves it upward in world space.
+          if (showTerrain) {
+            const capGeo = planeGeo; // captured for async closure
+            decodeTerrariumTile(tx, ty, tileZ, abort.signal).then(elevData => {
+              if (abort.signal.aborted) return;
+              const pos = capGeo.attributes.position;
+              for (let vi = 0; vi < pos.count; vi++) {
+                // PlaneGeometry vertex layout: row-major, row 0 = north (+y / -z after rotation).
+                const col = vi % (TERRAIN_SEGS + 1);
+                const row = Math.floor(vi / (TERRAIN_SEGS + 1));
+                // u=0→west, v=0→north — matches Terrarium tile pixel layout (col 0=west, row 0=north).
+                const px = Math.min(255, Math.floor((col / TERRAIN_SEGS) * 255.999));
+                const py = Math.min(255, Math.floor((row / TERRAIN_SEGS) * 255.999));
+                const elevM = elevData[py * 256 + px];
+                pos.setZ(vi, (elevM - minAlt) * adjExag);
+              }
+              pos.needsUpdate = true;
+              capGeo.computeVertexNormals();
+            }).catch(() => {}); // silently ignore CORS/network errors
+          }
 
           // Fetch the tile texture — crossOrigin is set to 'anonymous' by TextureLoader.
           const url = buildTileUrl(tileUrl, tileZ, tx, ty);
@@ -376,7 +431,7 @@ export function ThreeDView({ filteredTraces, colorChannel, ranges, tileUrl }) {
     // Abort any in-flight tile fetches when the effect re-runs or component unmounts.
     return () => abort.abort();
 
-  }, [filteredTraces, colorChannel, ranges, altExag, showDropLines, showTiles, showGrid, tileUrl]);
+  }, [filteredTraces, colorChannel, ranges, altExag, showDropLines, showTiles, showTerrain, showGrid, tileUrl]);
 
   // ---- HUD ----------------------------------------------------------------
   return (
@@ -416,6 +471,11 @@ export function ThreeDView({ filteredTraces, colorChannel, ranges, tileUrl }) {
             <input type="checkbox" checked={showTiles}
               onChange={e => setShowTiles(e.target.checked)} />
             <span>Map tiles</span>
+          </label>
+          <label className="three-d-check" style={{ marginLeft: 8 }}>
+            <input type="checkbox" checked={showTerrain} disabled={!showTiles}
+              onChange={e => setShowTerrain(e.target.checked)} />
+            <span style={{ opacity: showTiles ? 1 : 0.4 }}>Terrain</span>
           </label>
           <label className="three-d-check" style={{ marginLeft: 8 }}>
             <input type="checkbox" checked={showGrid}
