@@ -1470,6 +1470,104 @@ canvas {
 .upload-dup { color: var(--accent);  margin-left: 2px; }
 .upload-rej { color: var(--danger);  margin-left: 2px; }
 
+/* ---- Activity Charts strip (top of ManagePanel) ----------------------- */
+.activity-charts-strip {
+  background: var(--panel2);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.day-range-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.day-range-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: var(--muted);
+  flex-shrink: 0;
+}
+
+.day-range-pills {
+  display: flex;
+  gap: 3px;
+}
+
+.day-range-pill {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  color: var(--muted);
+  font-size: 9px;
+  padding: 2px 6px;
+  cursor: pointer;
+  line-height: 1.4;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.day-range-pill:hover { background: var(--panel); color: var(--fg); }
+.day-range-pill.active { background: var(--accent); color: #000; border-color: var(--accent); font-weight: 700; }
+
+.day-chart-wrap {
+  padding: 7px 12px 4px;
+  border-bottom: 1px solid var(--border);
+}
+.day-chart-wrap:last-child { border-bottom: none; }
+
+.day-chart-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 4px;
+}
+
+.day-chart-label {
+  font-size: 9px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.9px;
+  color: var(--muted);
+}
+
+.day-chart-val {
+  font-size: 9px;
+  color: var(--muted);
+}
+
+.day-chart-bars {
+  display: flex;
+  align-items: flex-end;
+  height: 56px;
+  gap: 1px;
+  overflow: hidden;
+}
+
+.day-bar {
+  flex: 1;
+  min-width: 0;
+  border-radius: 1px 1px 0 0;
+  cursor: default;
+  transition: opacity 0.12s;
+}
+.day-bar:hover { opacity: 0.5; }
+
+.day-chart-empty { height: 56px; }
+
+.day-chart-xaxis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 8px;
+  color: var(--muted);
+  margin-top: 2px;
+  padding: 0 1px 2px;
+  opacity: 0.7;
+}
+
 .rp-section-head {
   text-transform: uppercase;
   font-size: 10px;

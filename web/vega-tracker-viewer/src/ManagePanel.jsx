@@ -1,6 +1,6 @@
 // ManagePanel — data management UI: rename, soft-delete/restore/purge, merge, export, upload history.
 import { useState, useMemo, useRef, useEffect } from 'react';
-import { renameSession, deleteSession, restoreSession, purgeSession, mergeSessions, exportSession, exportBulk, fetchSessions, fetchSessionUploads } from './api.js';
+import { renameSession, deleteSession, restoreSession, purgeSession, mergeSessions, exportSession, exportBulk, fetchSessions, fetchSessionUploads, fetchDailyStats } from './api.js';
 import { sessionColor, fmtTs, fmtDose } from './colors.js';
 
 const MIN_VALID_TS_MS = 1577836800000;
@@ -401,6 +401,138 @@ function ExportPanel({ sessions, onError }) {
   );
 }
 
+// ---- Activity bar chart (no canvas/SVG — pure CSS flex bars) -------------
+function DayBarChart({ data, label, color, loading }) {
+  const max = data && data.length > 0 ? Math.max(...data.map(d => d.value), 1) : 1;
+  const fmtD = d => d ? `${d.slice(5, 7)}/${d.slice(8, 10)}` : '';
+  const isEmpty = !data || data.length === 0;
+
+  return (
+    <div className="day-chart-wrap">
+      <div className="day-chart-header">
+        <span className="day-chart-label">{label}</span>
+        {loading
+          ? <span className="day-chart-val" style={{ fontStyle: 'italic' }}>loading…</span>
+          : isEmpty
+            ? <span className="day-chart-val">no data</span>
+            : <span className="day-chart-val">max {max.toLocaleString()}</span>
+        }
+      </div>
+      {isEmpty ? (
+        <div className="day-chart-empty" />
+      ) : (
+        <>
+          <div className="day-chart-bars">
+            {data.map(d => (
+              <div
+                key={d.date}
+                className="day-bar"
+                title={`${d.date}: ${d.value.toLocaleString()}`}
+                style={{
+                  height: d.value > 0 ? `${Math.max((d.value / max) * 100, 3)}%` : '5px',
+                  background: d.value > 0 ? color : 'rgba(255,255,255,0.15)',
+                }}
+              />
+            ))}
+          </div>
+          <div className="day-chart-xaxis">
+            <span>{fmtD(data[0]?.date)}</span>
+            <span>{fmtD(data[Math.floor(data.length / 2)]?.date)}</span>
+            <span>{fmtD(data[data.length - 1]?.date)}</span>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+const DAY_OPTIONS = [
+  { value: 30,  label: '30d' },
+  { value: 60,  label: '60d' },
+  { value: 90,  label: '90d' },
+  { value: 180, label: '6m'  },
+  { value: 365, label: '1y'  },
+];
+
+/** Build a full YYYY-MM-DD array for the last N days (today included), local time. */
+function buildDateRange(days) {
+  const dates = [];
+  const now = new Date();
+  for (let i = days - 1; i >= 0; i--) {
+    const d = new Date(now);
+    d.setDate(d.getDate() - i);
+    dates.push(d.toISOString().slice(0, 10));
+  }
+  return dates;
+}
+
+// ---- Activity charts strip (rendered above subtabs) ----------------------
+function ActivityCharts({ sessions }) {
+  const [days,       setDays]       = useState(90);
+  const [dailyStats, setDailyStats] = useState(null); // null = loading, [] = error/empty
+
+  useEffect(() => {
+    setDailyStats(null);
+    fetchDailyStats(days)
+      .then(data => setDailyStats(data))
+      .catch(() => setDailyStats([]));
+  }, [days]);
+
+  // Full date spine for the selected window — zero-filled by default.
+  const dateRange = useMemo(() => buildDateRange(days), [days]);
+
+  // Samples per day — fill zeros for all dates in the window.
+  const recordsData = useMemo(() => {
+    const dateSet = new Set(dateRange);
+    const dayMap = {};
+    for (const s of sessions) {
+      if (/^\d{4}-\d{2}-\d{2}$/.test(s.sessionId) && dateSet.has(s.sessionId)) {
+        dayMap[s.sessionId] = (dayMap[s.sessionId] ?? 0) + (s.samples ?? 0);
+      }
+    }
+    return dateRange.map(date => ({ date, value: dayMap[date] ?? 0 }));
+  }, [sessions, dateRange]);
+
+  // Upload-call count per day — fill zeros for missing dates.
+  const uploadsData = useMemo(() => {
+    if (!dailyStats) return null;
+    const statMap = {};
+    for (const d of dailyStats) statMap[d.date] = d.uploads ?? 0;
+    return dateRange.map(date => ({ date, value: statMap[date] ?? 0 }));
+  }, [dailyStats, dateRange]);
+
+  return (
+    <div className="activity-charts-strip">
+      <div className="day-range-bar">
+        <span className="day-range-label">Date range</span>
+        <div className="day-range-pills">
+          {DAY_OPTIONS.map(opt => (
+            <button
+              key={opt.value}
+              className={`day-range-pill${days === opt.value ? ' active' : ''}`}
+              onClick={() => setDays(opt.value)}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <DayBarChart
+        data={recordsData}
+        label="Samples / day"
+        color="var(--accent)"
+        loading={false}
+      />
+      <DayBarChart
+        data={uploadsData}
+        label="Upload calls / day"
+        color="hsl(200,80%,60%)"
+        loading={dailyStats === null}
+      />
+    </div>
+  );
+}
+
 // ---- Uploads tab ---------------------------------------------------------
 function UploadsTab({ sessions }) {
   const [selectedId, setSelectedId] = useState(() => sessions[0]?.sessionId ?? null);
@@ -519,6 +651,7 @@ export function ManagePanel({ sessions, onRenamed, onDeleted, onMerged, onRestor
 
   return (
     <div className="panel-scroll">
+      <ActivityCharts sessions={sessions} />
       <div className="mgmt-subtabs">
         {[
           { key: 'rename',  label: '✏ Rename' },
