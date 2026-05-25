@@ -196,6 +196,7 @@ export function ThreeDView({ filteredTraces, colorChannel, ranges, tileUrl }) {
   const [noData,        setNoData]        = useState(false);
   const [pointCount,    setPointCount]    = useState(0);
   const [tileStatus,    setTileStatus]    = useState('');  // '' | 'loading' | 'N/M loaded'
+  const [terrainStatus, setTerrainStatus] = useState('');  // '' | 'loading' | 'N/M loaded'
 
   // ---- One-time Three.js setup --------------------------------------------
   useEffect(() => {
@@ -272,6 +273,7 @@ export function ThreeDView({ filteredTraces, colorChannel, ranges, tileUrl }) {
     setPointCount(allPts.length);
     setNoData(allPts.length === 0);
     setTileStatus('');
+    setTerrainStatus('');
 
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0d1117);
@@ -315,7 +317,9 @@ export function ThreeDView({ filteredTraces, colorChannel, ranges, tileUrl }) {
       const loader = new THREE.TextureLoader();
       const total  = (seTile.tx - nwTile.tx + 1) * (seTile.ty - nwTile.ty + 1);
       let loaded = 0;
+      let terrainLoaded = 0;
       setTileStatus('loading');
+      if (showTerrain) setTerrainStatus('loading');
 
       for (let tx = nwTile.tx; tx <= seTile.tx; tx++) {
         for (let ty = nwTile.ty; ty <= seTile.ty; ty++) {
@@ -330,12 +334,22 @@ export function ThreeDView({ filteredTraces, colorChannel, ranges, tileUrl }) {
 
           const segs = showTerrain ? TERRAIN_SEGS : 1;
           const planeGeo = new THREE.PlaneGeometry(tileW, tileH, segs, segs);
-          const mat = new THREE.MeshBasicMaterial({
-            color: new THREE.Color(0x111824), // dark placeholder until texture loads
-            transparent: true,
-            opacity: 0.90,
-            side: THREE.FrontSide,
-          });
+          // PhongMaterial responds to the DirectionalLight → hillshading on displaced terrain.
+          // BasicMaterial ignores all lights — used when terrain is off (flat plane).
+          const mat = showTerrain
+            ? new THREE.MeshPhongMaterial({
+                color: new THREE.Color(0x111824),
+                transparent: true,
+                opacity: 0.90,
+                side: THREE.FrontSide,
+                shininess: 5,
+              })
+            : new THREE.MeshBasicMaterial({
+                color: new THREE.Color(0x111824),
+                transparent: true,
+                opacity: 0.90,
+                side: THREE.FrontSide,
+              });
           const mesh = new THREE.Mesh(planeGeo, mat);
           mesh.rotation.x = -Math.PI / 2; // rotate to lie flat in the XZ ground plane
           mesh.position.set(wx, -1, wz);  // Y = −1: tiles sit just below the track lines
@@ -361,7 +375,13 @@ export function ThreeDView({ filteredTraces, colorChannel, ranges, tileUrl }) {
               }
               pos.needsUpdate = true;
               capGeo.computeVertexNormals();
-            }).catch(() => {}); // silently ignore CORS/network errors
+              terrainLoaded++;
+              if (!abort.signal.aborted) setTerrainStatus(`${terrainLoaded}/${total}`);
+            }).catch(() => {
+              // Count failures so the status counter still reaches N/N.
+              terrainLoaded++;
+              if (!abort.signal.aborted) setTerrainStatus(`${terrainLoaded}/${total}`);
+            });
           }
 
           // Fetch the tile texture — crossOrigin is set to 'anonymous' by TextureLoader.
@@ -405,8 +425,15 @@ export function ThreeDView({ filteredTraces, colorChannel, ranges, tileUrl }) {
     );
     for (const o of trackObjects) scene.add(o);
 
-    // Ambient light.
+    // Ambient light + directional sun for hillshading when terrain is active.
+    // MeshBasicMaterial ignores lights, so the DirectionalLight only has visible
+    // effect on tiles rendered with MeshPhongMaterial (i.e. when showTerrain=true).
     scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+    if (showTerrain && showTiles) {
+      const sun = new THREE.DirectionalLight(0xffffff, 0.8);
+      sun.position.set(-1, 2, 0.5); // NW + slight south: classic oblique hillshade angle
+      scene.add(sun);
+    }
 
     // N–S / E–W compass cross at ground level.
     const cs = Math.max(spanX, spanZ) * 0.65;
@@ -488,6 +515,12 @@ export function ThreeDView({ filteredTraces, colorChannel, ranges, tileUrl }) {
           <div className="three-d-hud-count"
             style={{ color: tileStatus === 'loading' ? 'var(--accent)' : '#4fc3f7' }}>
             {tileStatus === 'loading' ? 'Fetching tiles…' : `Tiles: ${tileStatus} loaded`}
+          </div>
+        )}
+        {terrainStatus && (
+          <div className="three-d-hud-count"
+            style={{ color: terrainStatus === 'loading' ? '#ffb74d' : '#a5d6a7' }}>
+            {terrainStatus === 'loading' ? 'Fetching terrain…' : `Terrain: ${terrainStatus} loaded`}
           </div>
         )}
 
