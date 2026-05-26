@@ -40,7 +40,8 @@ and a full-featured web application — all in one repo. If any of these apply t
 - You own a **RadiaCode RC-102 or RC-110** and want to build a personal, private radiation history
   without uploading your data to anyone else's server
 - You want to contribute to **citizen science** — export and share your readings with
-  [Safecast](https://safecast.org/), [OpenRadiation](https://www.openradiation.org/), or other
+  [Safecast](https://safecast.org/), [OpenRadiation](https://www.openradiation.org/),
+  [RadiaMaps](https://radiamaps.com/), [Radiaverse](https://www.radiaverse.com/), or other
   community radiation mapping platforms in native RadiaCode format
 - You're building an **embedded sensor pipeline** and need a rock-solid reference for BLE + GNSS +
   FreeRTOS + Wi-Fi on ESP32-S3 with NimBLE coexistence
@@ -54,7 +55,7 @@ and a full-featured web application — all in one repo. If any of these apply t
 
 > **Keywords (for discoverability):** RadiaCode, RC-102, RC-110, radiation map, GPS radiation logger,
 > ESP32-S3, BLE dosimeter, Geiger counter GPS, citizen science radiation, radiacode bluetooth,
-> Safecast, OpenRadiation, NimBLE, GNSS tracker, radiation data platform, open source radiation,
+> Safecast, OpenRadiation, RadiaMaps, Radiaverse, NimBLE, GNSS tracker, radiation data platform, open source radiation,
 > personal radiation history, ESP32 radiation, self-hosted radiation map
 
 ---
@@ -105,7 +106,8 @@ Once readings land in MongoDB, the **Radiological Map Viewer** gives you four fu
 This is **your personal radiation data repository** — not a shared community database. It is the
 trustworthy, backed-up, fully private archive of every reading your device has ever taken. From here,
 you choose what to share and where: export to [Safecast](https://safecast.org/),
-[OpenRadiation](https://www.openradiation.org/), the RadiaCode app's own track library, or keep it
+[OpenRadiation](https://www.openradiation.org/), [RadiaMaps](https://radiamaps.com/),
+[Radiaverse](https://www.radiaverse.com/), the RadiaCode app's own track library, or keep it
 entirely private. The data never leaves your server without your action.
 
 ---
@@ -540,6 +542,8 @@ download your readings in formats accepted by radiation mapping communities:
 | Platform | Format to use | Notes |
 |----------|--------------|-------|
 | [RadiaCode app](https://radiacode.com/) | **RadiaCode .rctrk** | Direct import into the RadiaCode mobile app; shows as a track on the app map |
+| [RadiaMaps](https://radiamaps.com/) | **RadiaCode .rctrk** or **RadiaCode CSV** | Community radiation mapping platform for RadiaCode users |
+| [Radiaverse](https://www.radiaverse.com/) | **RadiaCode .rctrk** or **RadiaCode CSV** | Community radiation data sharing and visualization platform |
 | [Safecast](https://safecast.org/) | **Internal CSV** → convert via Safecast import tools | World's largest open radiation dataset (258M+ measurements) |
 | [OpenRadiation](https://www.openradiation.org/) | **RadiaCode CSV** | French citizen science initiative; open-data API |
 | Any GIS tool | **Internal CSV** | Full 12-column schema with lat/lon/alt — importable in QGIS, ArcGIS, Excel |
