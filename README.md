@@ -26,6 +26,12 @@
 lands in your own MongoDB database — automatically, over Wi-Fi, the moment you walk home.  
 Then explore, manage, render, and export your complete radiation history exactly the way you want.*
 
+<br>
+
+[![Watch the demo on YouTube](https://img.youtube.com/vi/xzfiZ4xy9B8/maxresdefault.jpg)](https://www.youtube.com/watch?v=xzfiZ4xy9B8)
+
+*Click to watch the demo on YouTube*
+
 </div>
 
 ---
