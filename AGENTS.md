@@ -59,7 +59,15 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 ├── RADIACODE_PROTOCOL.md         # full BLE/GATT protocol reference for RadiaCode devices
 ├── README.md                     # quick-start for humans
 ├── platformio.ini                # PlatformIO build config
-├── partitions_tracker_v2.csv     # custom flash partition table
+├── hardware/                     # partition tables + 3D-print STL files + assembly assets
+│   ├── partitions_tracker.csv    # V1.2 flash partition table (referenced by platformio.ini)
+│   ├── partitions_tracker_v2.csv # V2 flash partition table (referenced by platformio.ini)
+│   ├── stl/                      # 3D-printable case files
+│   │   ├── tracker_v2_case.stl
+│   │   ├── tracker_v2_lid.stl
+│   │   └── tracker_v2_magsafe_adapter.stl
+│   └── img/
+│       └── tracker_v2_case_cad.png
 ├── src/                          # ESP32-S3 firmware (C++)
 │   ├── main.cpp                  # setup() / loop(), serial REPL
 │   ├── config.h                  # ALL pin assignments + feature flags
@@ -181,7 +189,7 @@ DUCKDNS_TOKEN=<token — see DuckDNS account page>
   (V1.2 env inverts the display; produces a solid white screen on V2 hardware)
 - **Panel offsets**: `XSTART=0 / YSTART=24`, `invertDisplay(false)`
 - **Upload port**: COM4 (this dev machine); auto-detected by PlatformIO
-- **Flash partition**: `partitions_tracker_v2.csv`
+- **Flash partition**: `hardware/partitions_tracker_v2.csv`
 
 ### GPIO assignments (do NOT reuse these)
 
@@ -689,15 +697,15 @@ patching `public/config.js` so the compiled JS references the right API URL.
 Viewer URL (LAN direct): `http://192.168.86.48:8031/`
 Viewer URL (public): `https://susmannet.duckdns.org/tracker/`
 
-### Viewer Layout — Three Top-Level Modes
+### Viewer Layout — Four Top-Level Modes
 
-The viewer has a persistent top navigation bar with **Explore**, **Data Management**, and **Render** mode buttons.
+The viewer has a persistent top navigation bar with **Explore**, **Data Management**, **Render**, and **Export** mode buttons.
 
 **Explore mode** (default) — left sidebar + full map:
 - Sidebar tabs: Sessions | Display | Stats
 - Map modes: Track (colored polyline), Dots (circle markers), Hex (hex-bin canvas), Arrows (bearing arrows + dot underlay)
 - Map zoom: `maxZoom=22`; per-tile `maxNativeZoom` (OSM=19, CartoDB=20, OpenTopoMap=17, Esri Satellite=18) for graceful over-zoom; initial zoom=6
-- Color channels: Dose rate, CPS, Speed, Altitude, HDOP, Session index
+- Color channels: Dose rate, CPS, Speed, Altitude, HDOP, Accuracy (m), Session index
 - Per-mode display controls (Display tab) — rendered as **ctrl-cards** (label + accent value + range slider) and **toggle-pills** (iOS-style switch):
   - Track: track width ctrl-card; dot overlay toggle-pill + dot opacity ctrl-card
   - Dots: point radius ctrl-card
@@ -705,18 +713,22 @@ The viewer has a persistent top navigation bar with **Explore**, **Data Manageme
   - Arrows: arrow-every-N ctrl-card; dot opacity ctrl-card; track underlay toggle-pill + track opacity ctrl-card
 - Session timeline scrubber + playback
 - Tile layers: OSM Streets, CartoDB Dark (default), OpenTopoMap, Satellite (Esri)
+- **3D terrain toggle** (Display tab, in Explore mode): overlays a Three.js WebGL canvas above the Leaflet map. GPS tracks rendered as 3D polylines (X=East metres, Y=altitude×exaggeration, Z=South metres). Ground plane tiled with slippy-map tiles from the active tile layer using `crossOrigin='anonymous'`. AWS Terrarium elevation tiles decode per-pixel `R×256+G+B/256−32768` to float32 elevation, meshed at 32×32 quad faces per tile. Controls: left-drag=orbit, right-drag=pan, scroll=zoom via `OrbitControls`. Tile zoom chosen as the coarsest level where the bbox spans ≤8 tiles per axis. Tracks are colored by the active color channel (same color mapping functions as 2D map). Can be combined with any map mode (the Leaflet map stays mounted underneath, hidden while 3D is active so tile cache is preserved). `ThreeDView.jsx` uses `three@^0.165`, `three/addons/controls/OrbitControls.js` from the same package.
 
 **Data Management mode** — full-width two-column layout, no map:
 - **Left panel — Session Management** (`ManagePanel`): Rename, Delete/Restore, Merge, Export sub-tabs; active + soft-deleted sessions; triple-confirm Purge
-- **Right panel — Database** (`DatabasePanel`): backup history with source/status badges; manual backup trigger; restore; DB stats
+- **Right panel — Database** (`DatabasePanel`): backup history with source/status badges; manual backup trigger; restore; DB stats; **activity charts** — daily sample counts and daily upload counts for the last 90 days, rendered as `<SparkChart>` bar charts with a date-range selector (last 7/30/90 days or custom range). Data from `GET /admin/daily-stats?days=N`.
 
 **Render mode** — full-screen offline PNG renderer (`RenderPanel.jsx`). Designed
 for producing wall-poster-grade images from hundreds of tracks / millions of
 points that would crash the live Leaflet map.
 - **Left setup column**: track picker (filter by name + date range, select all
-  visible / clear), output size presets (1080p / 2K / 4K / 6K / 8K UHD / 8K
-  square / 24×36 @300dpi poster — capped at ~88 megapixels for browser canvas
-  safety), bbox padding %, render mode (Track lines / Dots / Hex bins /
+  visible / clear), output size presets (HD 1080p / 2K square / 4K UHD / 4K square /
+  6K wide / 8K UHD / 8K square / **12K wide** / **16K UHD** / **16K square** /
+  24×36 @300dpi poster / 36×24 @300dpi poster — **no hard pixel cap**: the render
+  is never blocked by size; the browser's own canvas dimension limit is the floor),
+  aspect ratio lock (free/16:9/9:16/21:9/4:3/1:1/2:1 etc.),
+  bbox padding %, render mode (Track lines / Dots / Hex bins /
   Heatmap / Gaussian splat), color channel (dose / cps / speed / alt / hdop /
   accM / **time** / session), palette presets (default / inferno / viridis /
   plasma / magma / turbo / grayscale / cyberpunk / aurora / fire / ice /
@@ -734,13 +746,28 @@ points that would crash the live Leaflet map.
   datasets; Mercator projection is identical to Leaflet so a rendered PNG
   geographically matches the Explore map exactly. Output is held as an
   ObjectURL blob; pressing **Save PNG** downloads it as
-  `radmap_<W>x<H>_<mode>_<palette>_<timestamp>.png`.
+  `radmap_<W>x<H>_<mode>_<palette>_<timestamp>.png`. If output exceeds
+  `PREVIEW_MAX_PIXELS` (~64 MP) a preview `<img>` is skipped and the file
+  is auto-downloaded directly to avoid crashing the tab.
 - **Concurrency / safety**: tile basemap downloader caps at 6 parallel
-  requests with `crossOrigin='anonymous'`; canvas memory is hard-capped at
-  ~88 MP (8K square) before the render button is allowed to fire.
+  requests with `crossOrigin='anonymous'`; haversine distance check skips
+  drawing lines between GPS fixes far apart in space (older firmware before
+  v0.7.0 GPS_LOST/GPS_REGAINED events).
 - **Auto subtitle**: when the subtitle field is left blank, the renderer
   embeds `<N tracks> · <pts> pts · <start-date> → <end-date>` in the
   overlay box automatically.
+
+**Export mode** — time-range data export panel (`ExportPanel.jsx`):
+- **Format selector**: four export formats:
+  - `radiacode_trk` (.rctrk) — native RadiaCode track format, importable directly by the RadiaCode app
+  - `radiacode_txt` (.txt) — same native format with .txt extension, tab-separated with Windows FILETIME timestamps
+  - `radiacode` (.csv) — comma-separated RadiaCode variant with running total-dose column
+  - `internal` (.csv) — full firmware 12-column schema including event markers and accuracyM
+- **Time-range selector**: quick-select presets (Today / Yesterday / This Week / Last Week / This Month / Last Month), a month-picker dropdown (36 months back), and custom start/end date pickers. All dates are UTC midnight-to-midnight boundaries.
+- **Preview**: shows estimated row count and file size before download (calls `GET /sessions/export-bulk` preview mode). Preview is cached to avoid re-fetching on re-renders.
+- **Auto-ZIP**: when the export spans multiple calendar-day files, the API returns a ZIP; the panel handles `Content-Disposition` filename detection and triggers a browser download.
+- **Max file size guard**: 10 MB per file; multi-file exports always ZIP.
+- **GPS-only toggle**: strips non-GPS rows from export (useful for RadiaCode app import which requires lat/lng on every row).
 
 ---
 
@@ -748,13 +775,13 @@ points that would crash the live Leaflet map.
 
 ### Native unit tests (runs on host PC — no hardware required)
 
-Three test suites live under `test/`:
+Seven test suites live under `test/`:
 
 | Suite                    | Tests | What it validates |
 |--------------------------|-------|-------------------|
 | `test_line_count_native`         | 10    | Buffered newline-count algorithm (the O(1) fix from v0.3.4) |
 | `test_battery_native`            | 11    | LiPo voltage-to-percent interpolation table |
-| `test_csv_schema_native`         | 15    | MIN_VALID_TS_MS gate, 10-column schema, field extraction |
+| `test_csv_schema_native`         | 15    | MIN_VALID_TS_MS gate, 12-column schema, field extraction |
 | `test_dose_persistence_native`   |  9    | `shouldSaveDose` NVS write-gate decision logic |
 | `test_gps_transition_native`     |  9    | GPS fix transition detector (first-obs, steady-state, flap) |
 | `test_link_health_native`        |  7    | BLE link-stall watchdog, including millis() wraparound |
@@ -775,7 +802,7 @@ Set-Content "$wrapDir\ar.bat"   "@echo off`r`n`"$llvm\llvm-ar.exe`" %*" -Encodin
 $env:PATH = "$wrapDir;$env:PATH"
 ```
 
-Then run all six host-side suites:
+Then run all seven host-side suites:
 
 ```powershell
 pio test -e native
