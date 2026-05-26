@@ -205,12 +205,18 @@ A custom three-part enclosure keeps the tracker road-ready and MagSafe-mountable
 | Qty | Part | Amazon |
 |-----|------|---------|
 | 1 | **Heltec Wireless Tracker V2** — ESP32-S3FN8 · UC6580 GNSS · SX1262 LoRa · 0.96" TFT | [Heltec store ($22.90)](https://heltec.org/project/wireless-tracker/) · [Amazon](https://www.amazon.com/Heltec-Wireless-V2-Compatible-Positioning/dp/B0GSZN129X/) |
+| 1 | **RadiaCode-110** — gamma / beta dosimeter with BLE 5 extended advertising | [Amazon search](https://www.amazon.com/s?k=RadiaCode+110+dosimeter) |
 | 2 | **M3 × 10 mm socket head cap screws** (hex drive, cylindrical head) | [Amazon search](https://www.amazon.com/s?k=M3+10mm+socket+head+cap+screws) |
 | 2 | **M3 heat-set threaded inserts for PLA** (4 mm OD × 5 mm length) | [Amazon search](https://www.amazon.com/s?k=M3+4x5+heat+set+threaded+inserts) |
+| 1 | **Universal Metal Rings Compatible with MagSafe Sticker** — magnetic ring for phone cases & wireless charging | [Amazon search](https://www.amazon.com/s?k=Universal+Metal+Rings+Compatible+with+Magsafe+Sticker+Magnetic+Ring+Phone+Cases) |
+| 4–6 | **Small Neodymium Magnets Bars 70 Pcs, 12×5×3 mm** — rare earth rectangular fridge / craft magnets | [Amazon search](https://www.amazon.com/s?k=Small+Neodymium+Magnets+Bars+70+Pcs+12x5x3mm+Rare+Earth) |
+| — | **White PLA filament** (1.75 mm) | [Amazon search](https://www.amazon.com/s?k=white+PLA+filament+1.75mm) |
+| — | **Creality K2 Pro 3D Printer** (or equivalent FDM printer) | [Amazon search](https://www.amazon.com/s?k=Creality+K2+Pro+3D+Printer) |
 
 > Print in PLA at 0.2 mm layer height, 20 % infill. No supports required for the case or lid.
 > Press the heat-set inserts into the case body with a soldering iron before assembly.
 > The MagSafe adapter is separate so you can use the case standalone without it.
+> Embed the neodymium bar magnets into the adapter base before closing the case to align with the MagSafe ring.
 
 ---
 
