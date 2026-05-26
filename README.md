@@ -188,6 +188,32 @@ entirely private. The data never leaves your server without your action.
 
 ---
 
+## 3D-Printed Case
+
+A custom three-part enclosure keeps the tracker road-ready and MagSafe-mountable.
+
+![Tracker V2 case — CAD preview](hardware/img/tracker_v2_case_cad.png)
+
+| Part | STL | Description |
+|------|-----|-------------|
+| Case body | [`hardware/stl/tracker_v2_case.stl`](hardware/stl/tracker_v2_case.stl) | Main shell — holds the Heltec Tracker, exposes TFT, USB-C, and button |
+| Lid | [`hardware/stl/tracker_v2_lid.stl`](hardware/stl/tracker_v2_lid.stl) | Top cover; fastens with two M3 screws into heat-set inserts |
+| MagSafe adapter | [`hardware/stl/tracker_v2_magsafe_adapter.stl`](hardware/stl/tracker_v2_magsafe_adapter.stl) | Snap-on base; accepts a standard MagSafe puck for dash / bike mount |
+
+### Assembly BOM
+
+| Qty | Part | Amazon |
+|-----|------|---------|
+| 1 | **Heltec Wireless Tracker V2** — ESP32-S3FN8 · UC6580 GNSS · SX1262 LoRa · 0.96" TFT | [Heltec store ($22.90)](https://heltec.org/project/wireless-tracker/) · [Amazon](https://www.amazon.com/Heltec-Wireless-V2-Compatible-Positioning/dp/B0GSZN129X/) |
+| 2 | **M3 × 10 mm socket head cap screws** (hex drive, cylindrical head) | [Amazon search](https://www.amazon.com/s?k=M3+10mm+socket+head+cap+screws) |
+| 2 | **M3 heat-set threaded inserts for PLA** (4 mm OD × 5 mm length) | [Amazon search](https://www.amazon.com/s?k=M3+4x5+heat+set+threaded+inserts) |
+
+> Print in PLA at 0.2 mm layer height, 20 % infill. No supports required for the case or lid.
+> Press the heat-set inserts into the case body with a soldering iron before assembly.
+> The MagSafe adapter is separate so you can use the case standalone without it.
+
+---
+
 ## Repository Layout
 
 ```

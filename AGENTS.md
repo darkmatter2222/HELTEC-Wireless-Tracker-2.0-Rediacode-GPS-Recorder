@@ -59,7 +59,15 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 ├── RADIACODE_PROTOCOL.md         # full BLE/GATT protocol reference for RadiaCode devices
 ├── README.md                     # quick-start for humans
 ├── platformio.ini                # PlatformIO build config
-├── partitions_tracker_v2.csv     # custom flash partition table
+├── hardware/                     # partition tables + 3D-print STL files + assembly assets
+│   ├── partitions_tracker.csv    # V1.2 flash partition table (referenced by platformio.ini)
+│   ├── partitions_tracker_v2.csv # V2 flash partition table (referenced by platformio.ini)
+│   ├── stl/                      # 3D-printable case files
+│   │   ├── tracker_v2_case.stl
+│   │   ├── tracker_v2_lid.stl
+│   │   └── tracker_v2_magsafe_adapter.stl
+│   └── img/
+│       └── tracker_v2_case_cad.png
 ├── src/                          # ESP32-S3 firmware (C++)
 │   ├── main.cpp                  # setup() / loop(), serial REPL
 │   ├── config.h                  # ALL pin assignments + feature flags
@@ -181,7 +189,7 @@ DUCKDNS_TOKEN=<token — see DuckDNS account page>
   (V1.2 env inverts the display; produces a solid white screen on V2 hardware)
 - **Panel offsets**: `XSTART=0 / YSTART=24`, `invertDisplay(false)`
 - **Upload port**: COM4 (this dev machine); auto-detected by PlatformIO
-- **Flash partition**: `partitions_tracker_v2.csv`
+- **Flash partition**: `hardware/partitions_tracker_v2.csv`
 
 ### GPIO assignments (do NOT reuse these)
 
