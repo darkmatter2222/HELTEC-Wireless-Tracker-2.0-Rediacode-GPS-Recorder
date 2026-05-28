@@ -249,6 +249,7 @@ export async function deleteMission(missionId) {
 export async function analyzeCoverage({
   maxSpeedKph = 50, maxHdop = 3.0, maxAccuracyM = 15,
   gridDeg = 0.002, topN = 15, paddingFactor = 0.15,
+  maxZoneSqMi = 25, minZoneSqMi = 0.3, distPeakKm = 5,
 } = {}) {
   const params = new URLSearchParams({
     max_speed_kph:  maxSpeedKph,
@@ -257,12 +258,34 @@ export async function analyzeCoverage({
     grid_deg:       gridDeg,
     top_n:          topN,
     padding_factor: paddingFactor,
+    max_zone_sq_mi: maxZoneSqMi,
+    min_zone_sq_mi: minZoneSqMi,
+    dist_peak_km:   distPeakKm,
   });
   const r = await fetch(`${API_BASE}/explorer/analyze-coverage?${params}`, { method: 'POST' });
   if (!r.ok) {
     const msg = await r.text().catch(() => r.status);
     throw new Error(`coverage analysis failed: ${msg}`);
   }
+  return r.json();
+}
+
+export async function fetchLatestAnalysis() {
+  const r = await fetch(`${API_BASE}/explorer/analyses/latest`);
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`fetch latest analysis: ${r.status}`);
+  return r.json();
+}
+
+export async function fetchZoneCoverage({ minLat, maxLat, minLng, maxLng, gridDeg = 0.002,
+  maxSpeedKph = 50, maxHdop = 3.0, maxAccuracyM = 15 } = {}) {
+  const params = new URLSearchParams({
+    min_lat: minLat, max_lat: maxLat, min_lng: minLng, max_lng: maxLng,
+    grid_deg: gridDeg, max_speed_kph: maxSpeedKph,
+    max_hdop: maxHdop, max_accuracy_m: maxAccuracyM,
+  });
+  const r = await fetch(`${API_BASE}/explorer/zone-coverage?${params}`);
+  if (!r.ok) throw new Error(`zone-coverage ${r.status}`);
   return r.json();
 }
 

@@ -383,6 +383,7 @@ export default function App() {
   // Explorer mode state
   const [explorerSelectedZone, setExplorerSelectedZone] = useState(null); // GeoJSON Feature | null
   const [explorerAnalysisResult, setExplorerAnalysisResult] = useState(null); // FeatureCollection | null
+  const [explorerZoneCoverage, setExplorerZoneCoverage]   = useState(null); // {coveredCells, uncoveredCells, coveragePct} | null
   const [liveMission, setLiveMission] = useState(null); // mission object | null
   const [searchFilter, setSearchFilter] = useState('');
 
@@ -1255,16 +1256,18 @@ export default function App() {
           <ExplorerPanel
             onZoneSelect={zone => {
               setExplorerSelectedZone(zone);
-              setExplorerAnalysisResult(prev => prev); /* keep ref stable */
+              // Clear old coverage whenever a new zone is selected
+              if (!zone) setExplorerZoneCoverage(null);
             }}
             selectedZone={explorerSelectedZone}
             onAnalysisResult={result => setExplorerAnalysisResult(result)}
             onGoLive={mission => setLiveMission(mission)}
+            onZoneCoverageUpdate={cov => setExplorerZoneCoverage(cov)}
           />
           <div className="resize-handle" onMouseDown={startResize} />
         </aside>
 
-        {/* Map — shared MapContainer, shows gap zone + mission polygons */}
+        {/* Map — shows gap zones + covered/uncovered cells */}
         <main className="map-pane">
           <MapContainer center={[39.5, -98.35]} zoom={6} maxZoom={22} style={{ width: '100%', height: '100%' }}>
             <TileLayer
@@ -1273,12 +1276,24 @@ export default function App() {
               maxZoom={22}
               maxNativeZoom={tile.maxNativeZoom ?? 19}
             />
+            {/* Auto-fit map to selected zone bbox */}
+            {explorerSelectedZone && (() => {
+              const bbox = explorerSelectedZone.properties?.bbox;
+              if (!bbox) return null;
+              const [minLng, minLat, maxLng, maxLat] = bbox;
+              return <FitBoundsOnce
+                bounds={[[minLat, minLng], [maxLat, maxLng]]}
+                dep={explorerSelectedZone.properties.rank}
+              />;
+            })()}
+
             {/* Gap zone polygons from last analysis */}
             {explorerAnalysisResult && explorerAnalysisResult.features.map((f, i) => {
               const coords = f.geometry?.coordinates?.[0];
               if (!coords) return null;
               const positions = coords.map(([lng, lat]) => [lat, lng]);
               const isSelected = explorerSelectedZone?.properties?.rank === f.properties?.rank;
+              const sqMi = f.properties.areaSqMi ?? (f.properties.areaKm2 * 0.386102);
               return (
                 <Polygon
                   key={`gap-${i}`}
@@ -1288,15 +1303,25 @@ export default function App() {
                     weight: isSelected ? 2 : 1,
                     opacity: isSelected ? 1 : 0.7,
                     fillColor: isSelected ? '#ffea00' : '#29b6f6',
-                    fillOpacity: isSelected ? 0.2 : 0.07,
+                    fillOpacity: isSelected ? 0.15 : 0.07,
                   }}>
                   <Tooltip>
-                    Zone #{f.properties.rank} — {f.properties.areaKm2} km²
+                    Zone #{f.properties.rank} — {sqMi.toFixed(1)} sq mi
                     {' · '}score {f.properties.score.toFixed(2)}
                   </Tooltip>
                 </Polygon>
               );
             })}
+
+            {/* Zone coverage: green = already visited, orange = unvisited */}
+            {explorerZoneCoverage?.coveredCells?.map(([lat, lng], i) => (
+              <CircleMarker key={`cov-${i}`} center={[lat, lng]} radius={4}
+                pathOptions={{ color: 'transparent', fillColor: '#00e676', fillOpacity: 0.55, weight: 0 }} />
+            ))}
+            {explorerZoneCoverage?.uncoveredCells?.map(([lat, lng], i) => (
+              <CircleMarker key={`unc-${i}`} center={[lat, lng]} radius={4}
+                pathOptions={{ color: 'transparent', fillColor: '#ff7043', fillOpacity: 0.30, weight: 0 }} />
+            ))}
           </MapContainer>
         </main>
       </>)}
