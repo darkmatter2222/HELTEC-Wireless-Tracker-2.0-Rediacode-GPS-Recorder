@@ -246,7 +246,11 @@ The screenshots are embedded in `README.md` under the `## Web Viewer` section
 using GitHub raw-content URLs:
 
 ```
-https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screenshots/<filename>
+https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/<branch>/docs/screenshots/<filename>
+
+> **Note**: replace `<branch>` with the active git branch (e.g. `main` after merge, or the
+> session branch while screenshots are still on a feature branch). The README must use the
+> branch where the PNG files actually live, not always `main`.
 ```
 
 > **Note:** Raw URLs resolve from the `main` branch. Screenshots committed only
