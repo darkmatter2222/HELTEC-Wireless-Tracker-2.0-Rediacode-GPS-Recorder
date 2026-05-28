@@ -1,6 +1,10 @@
 """
 Build a 2×4 collage of web viewer screenshots for the README.
 
+Also auto-updates the capture metadata table in docs/screenshots/SCREENSHOTS.md
+with the current date, active git branch, and latest git commit hash so the
+manifest stays in sync without manual editing.
+
 Usage:
     python scripts/build_screenshot_collage.py
 
@@ -8,8 +12,46 @@ Outputs:  docs/screenshots/09_collage.png
 Requires: Pillow  (pip install Pillow)
 """
 
+import re
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
+
 from PIL import Image, ImageDraw, ImageFont
+
+
+def _git(args: list[str]) -> str:
+    """Run a git command and return stdout, or '' on error."""
+    try:
+        return subprocess.check_output(
+            ["git", *args], cwd=Path(__file__).parent.parent, text=True
+        ).strip()
+    except Exception:
+        return ""
+
+
+def _update_screenshots_md(manifest: Path) -> None:
+    """Patch the Capture Metadata table in SCREENSHOTS.md with live values."""
+    if not manifest.exists():
+        return
+
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    branch = _git(["branch", "--show-current"]) or "unknown"
+    commit = _git(["rev-parse", "--short", "HEAD"]) or "unknown"
+
+    text = manifest.read_text(encoding="utf-8")
+
+    # Replace the three metadata cells in the table row that follows "| Item |"
+    replacements = [
+        (r"(\|\s*Captured on date\s*\|)[^\|]+(\|)", rf"\g<1> {today} \g<2>"),
+        (r"(\|\s*Git branch\s*\|)[^\|]+(\|)", rf"\g<1> `{branch}` \g<2>"),
+        (r"(\|\s*Git commit\s*\|)[^\|]+(\|)", rf"\g<1> `{commit}` \g<2>"),
+    ]
+    for pattern, replacement in replacements:
+        text = re.sub(pattern, replacement, text)
+
+    manifest.write_text(text, encoding="utf-8")
+    print(f"Updated SCREENSHOTS.md  (branch={branch}, commit={commit}, date={today})")
 
 REPO_ROOT = Path(__file__).parent.parent
 SCREENSHOTS_DIR = REPO_ROOT / "docs" / "screenshots"
@@ -85,3 +127,5 @@ for idx, (filename, label) in enumerate(IMAGES):
 
 canvas.save(OUTPUT_PATH, "PNG", optimize=True)
 print(f"Saved: {OUTPUT_PATH}  ({OUTPUT_PATH.stat().st_size // 1024} KB)")
+
+_update_screenshots_md(SCREENSHOTS_DIR / "SCREENSHOTS.md")
