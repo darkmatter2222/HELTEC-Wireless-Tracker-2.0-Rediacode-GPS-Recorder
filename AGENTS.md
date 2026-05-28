@@ -79,7 +79,22 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 │   ├── session_store.{h,cpp}     # SD/SdFat CSV writer + LittleFS fallback
 │   ├── ui.{h,cpp}                # ST7735 TFT screens + button state machine
 │   └── wifi_uploader.{h,cpp}     # FreeRTOS uploader task (core 0)
+├── docs/
+│   ├── hero.png                  # hero image used in README header
+│   ├── screens/                  # TFT firmware screen mockups (render_screens.py)
+│   └── screenshots/              # web viewer screenshots (see docs/screenshots/SCREENSHOTS.md)
+│       ├── SCREENSHOTS.md        # manifest + full regeneration procedure
+│       ├── 01_explore_track.png
+│       ├── 02_explore_dots.png
+│       ├── 03_explore_hexbin.png
+│       ├── 04_explore_arrows.png
+│       ├── 05_stats_panel.png
+│       ├── 06_data_management.png
+│       ├── 07_render.png
+│       ├── 08_export.png
+│       └── 09_collage.png
 ├── scripts/                      # Python dev-tools (serial, data, mapping)
+│   ├── build_screenshot_collage.py # regenerate docs/screenshots/09_collage.png
 │   ├── drive.py                  # serial console wrapper: cmd/listen/auto-connect
 │   ├── download_sessions.py      # DUMPALL -> CSV files + optional wipe
 │   ├── plot_session_map.py       # interactive Folium map from CSV
@@ -768,6 +783,28 @@ points that would crash the live Leaflet map.
 - **Auto-ZIP**: when the export spans multiple calendar-day files, the API returns a ZIP; the panel handles `Content-Disposition` filename detection and triggers a browser download.
 - **Max file size guard**: 10 MB per file; multi-file exports always ZIP.
 - **GPS-only toggle**: strips non-GPS rows from export (useful for RadiaCode app import which requires lat/lng on every row).
+
+---
+
+## Web Viewer Screenshots
+
+See **[docs/screenshots/SCREENSHOTS.md](docs/screenshots/SCREENSHOTS.md)** for the full manifest,
+capture metadata, and step-by-step regeneration procedure.
+
+### How to regenerate all screenshots (quick reference)
+
+1. Confirm the viewer is running: `ssh -i ~/.ssh/id_rsa darkmatter2222@192.168.86.48 "curl -s -o /dev/null -w '%{http_code}' http://localhost:8031/tracker/"` → expect `200` or `401`
+2. Open a browser page to `http://darkmatter2222:liquimatter@192.168.86.48:8031/tracker/`
+3. Follow the capture procedure in `docs/screenshots/SCREENSHOTS.md` (Steps 1–13)
+4. Run `python scripts\build_screenshot_collage.py` — regenerates `09_collage.png` **and** updates the `Captured on date` / `Git branch` / `Git commit` fields in `SCREENSHOTS.md` automatically
+5. Commit: `git add docs/screenshots ; git commit -m "docs: refresh web viewer screenshots"`
+
+### Rules for screenshot captures
+
+- **ONE session at a time** — never click "All" or select more than one session; selecting many large sessions crashes the browser tab
+- Session to use: the most recent session that has a visually interesting route (a long drive or bike ride; multiple direction changes; visible dose variation)
+- Always validate each image with `view_image` before committing — confirm no private street addresses or personal names are visible; city/town names on the map tile are fine
+- Screenshot order matters — follow Steps 1–13 in `SCREENSHOTS.md` exactly; each step leaves the browser in the state the next step assumes
 
 ---
 
