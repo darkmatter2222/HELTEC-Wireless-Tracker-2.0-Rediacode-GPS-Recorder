@@ -92,6 +92,17 @@ function FitBoundsOnce({ bounds, dep }) {
   return null;
 }
 
+// Like FitBoundsOnce but accepts a plain [[minLat,minLng],[maxLat,maxLng]] array
+// (Leaflet fitBounds natively accepts that format, no LatLngBounds object required)
+function FitBboxOnce({ bbox, dep }) {
+  const map = useMap();
+  useEffect(() => {
+    if (bbox) map.fitBounds(bbox, { padding: [40, 40], animate: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dep]);
+  return null;
+}
+
 function boundsKey(b) {
   if (!b || !b.isValid()) return '';
   const sw = b.getSouthWest();
@@ -1277,12 +1288,10 @@ export default function App() {
               maxNativeZoom={tile.maxNativeZoom ?? 19}
             />
             {/* Auto-fit map to selected zone bbox */}
-            {explorerSelectedZone && (() => {
-              const bbox = explorerSelectedZone.properties?.bbox;
-              if (!bbox) return null;
-              const [minLng, minLat, maxLng, maxLat] = bbox;
-              return <FitBoundsOnce
-                bounds={[[minLat, minLng], [maxLat, maxLng]]}
+            {explorerSelectedZone?.properties?.bbox && (() => {
+              const [minLng, minLat, maxLng, maxLat] = explorerSelectedZone.properties.bbox;
+              return <FitBboxOnce
+                bbox={[[minLat, minLng], [maxLat, maxLng]]}
                 dep={explorerSelectedZone.properties.rank}
               />;
             })()}
