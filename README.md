@@ -82,6 +82,23 @@ and a full-featured web application — all in one repo. If any of these apply t
 
 ---
 
+## Web Viewer
+
+The self-hosted **Radiological Map Viewer** runs in your browser and gives you four fully
+independent modes for exploring and managing your personal radiation history.
+
+| Explore — Track | Explore — Dots | Explore — Hex Bin | Stats Panel |
+|:---:|:---:|:---:|:---:|
+| ![track](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screenshots/01_explore_track.png) | ![dots](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screenshots/02_explore_dots.png) | ![hexbin](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screenshots/03_explore_hexbin.png) | ![stats](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screenshots/05_stats_panel.png) |
+| Dose-rate coloured polyline with timeline scrubber | Per-sample dots — 6 colour channels | Hex-bin density map with sample counts | Dose/CPS/speed spark trends + session stats |
+
+| Data Management | Render (PNG output) | Export | Explore — Arrows |
+|:---:|:---:|:---:|:---:|
+| ![data](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screenshots/06_data_management.png) | ![render](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screenshots/07_render.png) | ![export](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screenshots/08_export.png) | ![arrows](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screenshots/04_explore_arrows.png) |
+| Rename, merge, delete/restore sessions; DB metrics; backup history | Offline PNG renderer — up to 16K UHD; 5 render modes; 12 palettes | Time-range export in 4 formats: RadiaCode .rctrk/.txt, CSV | Bearing arrows showing travel direction over dot/track underlay |
+
+---
+
 ## What It Does
 
 The **Heltec HTIT-Tracker V2** is a fully autonomous bridge between a RadiaCode Geiger counter
