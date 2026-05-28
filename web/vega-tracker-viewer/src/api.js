@@ -198,6 +198,83 @@ export async function deleteBackup(name) {
   return r.json();
 }
 
+// ---- Explorer: missions ----------------------------------------------------
+
+export async function fetchMissions(status = null) {
+  const params = status ? `?status=${encodeURIComponent(status)}` : '';
+  const r = await fetch(`${API_BASE}/missions${params}`);
+  if (!r.ok) throw new Error(`missions ${r.status}`);
+  return r.json();
+}
+
+export async function createMission({ name, polygon, centroid, areaKm2 = 0, score = 0, notes = '' }) {
+  const r = await fetch(`${API_BASE}/missions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, polygon, centroid, areaKm2, score, notes }),
+  });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`create mission failed: ${msg}`);
+  }
+  return r.json();
+}
+
+export async function updateMission(missionId, updates) {
+  const r = await fetch(`${API_BASE}/missions/${encodeURIComponent(missionId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`update mission failed: ${msg}`);
+  }
+  return r.json();
+}
+
+export async function deleteMission(missionId) {
+  const r = await fetch(`${API_BASE}/missions/${encodeURIComponent(missionId)}`, {
+    method: 'DELETE',
+  });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`delete mission failed: ${msg}`);
+  }
+  return r.json();
+}
+
+// ---- Explorer: coverage analysis -------------------------------------------
+
+export async function analyzeCoverage({
+  maxSpeedKph = 50, maxHdop = 3.0, maxAccuracyM = 15,
+  gridDeg = 0.002, topN = 15, paddingFactor = 0.15,
+} = {}) {
+  const params = new URLSearchParams({
+    max_speed_kph:  maxSpeedKph,
+    max_hdop:       maxHdop,
+    max_accuracy_m: maxAccuracyM,
+    grid_deg:       gridDeg,
+    top_n:          topN,
+    padding_factor: paddingFactor,
+  });
+  const r = await fetch(`${API_BASE}/explorer/analyze-coverage?${params}`, { method: 'POST' });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`coverage analysis failed: ${msg}`);
+  }
+  return r.json();
+}
+
+// ---- Explorer: live samples (real-time dose feed) --------------------------
+
+export async function fetchLiveSamples({ sinceMs = 0, limit = 20 } = {}) {
+  const params = new URLSearchParams({ since_ms: sinceMs, limit });
+  const r = await fetch(`${API_BASE}/explorer/live-samples?${params}`);
+  if (!r.ok) throw new Error(`live-samples ${r.status}`);
+  return r.json();
+}
+
 export async function restoreBackup(name) {
   const r = await fetch(
     `${API_BASE}/admin/restore/${encodeURIComponent(name)}?confirm=RESTORE_CONFIRMED`,

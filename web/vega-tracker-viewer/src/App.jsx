@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
-  MapContainer, TileLayer, Polyline, CircleMarker,
+  MapContainer, TileLayer, Polyline, CircleMarker, Polygon,
   Tooltip, useMap, useMapEvents, Marker,
 } from 'react-leaflet';
 import L from 'leaflet';
@@ -17,6 +17,8 @@ import { DualRangeSlider } from './DualRangeSlider.jsx';
 import RenderPanel from './RenderPanel.jsx';
 import { ExportPanel } from './ExportPanel.jsx';
 import { ThreeDView } from './ThreeDView.jsx';
+import { ExplorerPanel } from './ExplorerPanel.jsx';
+import { LiveTrackingPanel } from './LiveTrackingPanel.jsx';
 
 // ---- constants -------------------------------------------------------------
 
@@ -375,8 +377,13 @@ export default function App() {
   const playRef = useRef();
 
   // App mode and explore sidebar panel
-  const [appMode, setAppMode] = useState('explore'); // explore | manage | render | export
+  const [appMode, setAppMode] = useState('evaluate'); // evaluate | explorer | manage | render | export
   const [explorePanel, setExplorePanel] = useState('sessions'); // sessions | display | stats
+
+  // Explorer mode state
+  const [explorerSelectedZone, setExplorerSelectedZone] = useState(null); // GeoJSON Feature | null
+  const [explorerAnalysisResult, setExplorerAnalysisResult] = useState(null); // FeatureCollection | null
+  const [liveMission, setLiveMission] = useState(null); // mission object | null
   const [searchFilter, setSearchFilter] = useState('');
 
   // Resizable sidebar
@@ -682,9 +689,14 @@ export default function App() {
         </div>
         <div className="nav-modes">
           <button
-            className={`nav-mode-btn ${appMode === 'explore' ? 'active' : ''}`}
-            onClick={() => setAppMode('explore')}>
-            Explore
+            className={`nav-mode-btn ${appMode === 'evaluate' ? 'active' : ''}`}
+            onClick={() => setAppMode('evaluate')}>
+            Evaluate
+          </button>
+          <button
+            className={`nav-mode-btn ${appMode === 'explorer' ? 'active' : ''}`}
+            onClick={() => setAppMode('explorer')}>
+            Explorer
           </button>
           <button
             className={`nav-mode-btn ${appMode === 'manage' ? 'active' : ''}`}
@@ -710,8 +722,8 @@ export default function App() {
       {/* === APP BODY === */}
       <div className="app-body">
 
-      {/* === EXPLORE MODE === */}
-      {appMode === 'explore' && (<>
+      {/* === EVALUATE MODE (was Explore) === */}
+      {appMode === 'evaluate' && (<>
       {/* === SIDEBAR === */}
       <aside className="sidebar" ref={sidebarRef} style={{ width: sidebarWidth }}>
 
@@ -1236,6 +1248,60 @@ export default function App() {
       </>)}
       {/* end explore mode */}
 
+      {/* === EXPLORER MODE === */}
+      {appMode === 'explorer' && (<>
+        {/* Sidebar */}
+        <aside className="sidebar" ref={sidebarRef} style={{ width: sidebarWidth }}>
+          <ExplorerPanel
+            onZoneSelect={zone => {
+              setExplorerSelectedZone(zone);
+              setExplorerAnalysisResult(prev => prev); /* keep ref stable */
+            }}
+            selectedZone={explorerSelectedZone}
+            onAnalysisResult={result => setExplorerAnalysisResult(result)}
+            onGoLive={mission => setLiveMission(mission)}
+          />
+          <div className="resize-handle" onMouseDown={startResize} />
+        </aside>
+
+        {/* Map — shared MapContainer, shows gap zone + mission polygons */}
+        <main className="map-pane">
+          <MapContainer center={[39.5, -98.35]} zoom={6} maxZoom={22} style={{ width: '100%', height: '100%' }}>
+            <TileLayer
+              attribution={tile.attribution}
+              url={tile.url}
+              maxZoom={22}
+              maxNativeZoom={tile.maxNativeZoom ?? 19}
+            />
+            {/* Gap zone polygons from last analysis */}
+            {explorerAnalysisResult && explorerAnalysisResult.features.map((f, i) => {
+              const coords = f.geometry?.coordinates?.[0];
+              if (!coords) return null;
+              const positions = coords.map(([lng, lat]) => [lat, lng]);
+              const isSelected = explorerSelectedZone?.properties?.rank === f.properties?.rank;
+              return (
+                <Polygon
+                  key={`gap-${i}`}
+                  positions={positions}
+                  pathOptions={{
+                    color: isSelected ? '#ffea00' : '#29b6f6',
+                    weight: isSelected ? 2 : 1,
+                    opacity: isSelected ? 1 : 0.7,
+                    fillColor: isSelected ? '#ffea00' : '#29b6f6',
+                    fillOpacity: isSelected ? 0.2 : 0.07,
+                  }}>
+                  <Tooltip>
+                    Zone #{f.properties.rank} — {f.properties.areaKm2} km²
+                    {' · '}score {f.properties.score.toFixed(2)}
+                  </Tooltip>
+                </Polygon>
+              );
+            })}
+          </MapContainer>
+        </main>
+      </>)}
+      {/* end explorer mode */}
+
       {/* === DATA MANAGEMENT MODE === */}
       {appMode === 'manage' && (
         <div className="data-mgmt-view">
@@ -1278,6 +1344,17 @@ export default function App() {
       {/* === EXPORT MODE === */}
       {appMode === 'export' && (
         <ExportPanel />
+      )}
+
+      {/* === LIVE TRACKING OVERLAY === */}
+      {/* Renders on top of everything when a mission is active.           */}
+      {/* Closing it sets liveMission to null (the mission stays in DB).   */}
+      {liveMission && (
+        <LiveTrackingPanel
+          mission={liveMission}
+          allRows={[]}
+          onEnd={() => setLiveMission(null)}
+        />
       )}
 
       </div>{/* app-body */}
