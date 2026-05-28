@@ -19,6 +19,7 @@
 [![Forks](https://img.shields.io/github/forks/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder?style=flat&logo=github&label=forks)](https://github.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/network/members)
 [![Last Commit](https://img.shields.io/github/last-commit/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder?logo=git&logoColor=white)](https://github.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/commits/main)
 [![Repo Size](https://img.shields.io/github/repo-size/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder)](https://github.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder)
+[![Instructables](https://img.shields.io/badge/Instructables-step--by--step%20guide-E17B2D?logo=instructables&logoColor=white)](https://www.instructables.com/ESP32-S3-GPS-Radiation-Logger-With-Self-Hosted-Map/)
 
 **Your data. Your server. Your map. No cloud. No subscription. No compromise.**
 
@@ -31,6 +32,8 @@ Then explore, manage, render, and export your complete radiation history exactly
 [![Watch the demo on YouTube](https://img.youtube.com/vi/xzfiZ4xy9B8/maxresdefault.jpg)](https://www.youtube.com/watch?v=xzfiZ4xy9B8)
 
 *Click to watch the demo on YouTube*
+
+**[Step-by-step build guide on Instructables](https://www.instructables.com/ESP32-S3-GPS-Radiation-Logger-With-Self-Hosted-Map/)** · **[YouTube Demo](https://www.youtube.com/watch?v=xzfiZ4xy9B8)**
 
 </div>
 
