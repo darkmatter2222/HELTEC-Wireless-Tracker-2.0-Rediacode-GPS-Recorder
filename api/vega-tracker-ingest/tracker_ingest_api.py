@@ -1994,6 +1994,88 @@ def delete_mission(mission_id: str):
     return {"deleted": mission_id}
 
 
+@app.get("/missions/{mission_id}/coverage-grid")
+def mission_coverage_grid(
+    mission_id:    str,
+    grid_deg:      float = Query(default=0.002),   # ~200 m cells
+    max_speed_kph: float = Query(default=50.0),
+    max_hdop:      float = Query(default=3.0),
+    max_accuracy_m: float = Query(default=15.0),
+    max_cells:     int   = Query(default=2000),
+):
+    """Return a coarse grid of covered cells inside the mission polygon bbox.
+
+    Each cell has the lat/lng centroid, average dose rate, and sample count.
+    Used by the live-tracking map to show historical coverage without
+    streaming millions of individual sample points to the browser.
+    """
+    mission = app.state.missions.find_one({"missionId": mission_id}, projection={"_id": 0})
+    if not mission:
+        raise HTTPException(404, detail=f"mission {mission_id!r} not found")
+
+    coords = mission.get("polygon", {}).get("coordinates", [[]])[0]
+    if not coords:
+        return {"cells": [], "coveragePct": 0.0, "sampleCount": 0}
+
+    lngs = [c[0] for c in coords]
+    lats = [c[1] for c in coords]
+    min_lat, max_lat = min(lats), max(lats)
+    min_lng, max_lng = min(lngs), max(lngs)
+
+    quality_filter: dict = {
+        "latitude":  {"$exists": True, "$nin": [None, 0.0],
+                      "$gte": min_lat, "$lte": max_lat},
+        "longitude": {"$exists": True, "$nin": [None, 0.0],
+                      "$gte": min_lng, "$lte": max_lng},
+        "$and": [
+            {"$or": [{"speedKph":  {"$exists": False}}, {"speedKph":  None},
+                     {"speedKph":  {"$lte": max_speed_kph}}]},
+            {"$or": [{"hdop":      {"$exists": False}}, {"hdop":      None},
+                     {"hdop":      {"$lte": max_hdop}}]},
+            {"$or": [{"accuracyM": {"$exists": False}}, {"accuracyM": None},
+                     {"accuracyM": {"$lte": max_accuracy_m}}]},
+        ],
+    }
+
+    pipeline = [
+        {"$match": quality_filter},
+        {"$project": {
+            "lat_i": {"$toInt": {"$round": [{"$divide": ["$latitude",  grid_deg]}]}},
+            "lng_i": {"$toInt": {"$round": [{"$divide": ["$longitude", grid_deg]}]}},
+            "uSvPerHour": 1,
+        }},
+        {"$group": {
+            "_id":    {"lat_i": "$lat_i", "lng_i": "$lng_i"},
+            "count":  {"$sum": 1},
+            "avgDose": {"$avg": "$uSvPerHour"},
+        }},
+        {"$sort": {"count": -1}},
+        {"$limit": max_cells},
+        {"$project": {
+            "_id": 0,
+            "lat": {"$round": [{"$multiply": ["$_id.lat_i", grid_deg]}, 6]},
+            "lng": {"$round": [{"$multiply": ["$_id.lng_i", grid_deg]}, 6]},
+            "count": 1,
+            "avgDose": {"$ifNull": ["$avgDose", 0.0]},
+        }},
+    ]
+
+    cells = list(app.state.samples.aggregate(pipeline, allowDiskUse=True))
+
+    # coverage % vs total bbox cells
+    total_lat_cells = max(1, round((max_lat - min_lat) / grid_deg))
+    total_lng_cells = max(1, round((max_lng - min_lng) / grid_deg))
+    total_cells_count = total_lat_cells * total_lng_cells
+    coverage_pct = round(len(cells) / total_cells_count * 100, 1) if total_cells_count else 0.0
+
+    return {
+        "cells": cells,
+        "coveragePct": coverage_pct,
+        "sampleCount": sum(c["count"] for c in cells),
+        "gridDeg": grid_deg,
+    }
+
+
 # ===========================================================================
 # Explorer: Coverage Gap Analysis
 # ===========================================================================

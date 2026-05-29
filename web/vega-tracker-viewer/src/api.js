@@ -244,6 +244,16 @@ export async function deleteMission(missionId) {
   return r.json();
 }
 
+// Historical coverage grid for the live-tracking overlay.
+// Returns { cells: [{lat, lng, avgDose, count}], coveragePct, sampleCount }
+export async function fetchMissionCoverageGrid(missionId) {
+  const r = await fetch(
+    `${API_BASE}/missions/${encodeURIComponent(missionId)}/coverage-grid`
+  );
+  if (!r.ok) throw new Error(`mission coverage-grid ${r.status}`);
+  return r.json();
+}
+
 // ---- Explorer: coverage analysis -------------------------------------------
 
 export async function analyzeCoverage({

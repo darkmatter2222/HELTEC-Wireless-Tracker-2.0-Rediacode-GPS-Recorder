@@ -15,7 +15,7 @@ import {
   CircleMarker, MapContainer, Polygon, Polyline, TileLayer, Tooltip,
   useMap,
 } from 'react-leaflet';
-import { fetchLiveSamples } from './api.js';
+import { fetchLiveSamples, fetchMissionCoverageGrid } from './api.js';
 import { doseColor } from './colors.js';
 
 const POLL_INTERVAL_MS = 10_000;
@@ -54,8 +54,21 @@ export function LiveTrackingPanel({ mission, allRows, onEnd }) {
   const [liveReadings, setLive]   = useState([]);     // newest-first from API
   const [gpsError, setGpsError]   = useState(null);
   const [sinceMs, setSinceMs]     = useState(() => Date.now() - 300_000); // 5 min history
+  const [coverageGrid, setCoverageGrid] = useState([]); // historical grid cells
+  const [coveragePct, setCoveragePct]   = useState(null);
   const watchRef  = useRef(null);
   const timerRef  = useRef(null);
+
+  // Fetch historical coverage grid once on mount
+  useEffect(() => {
+    if (!mission?.missionId) return;
+    fetchMissionCoverageGrid(mission.missionId)
+      .then(data => {
+        setCoverageGrid(data.cells || []);
+        setCoveragePct(data.coveragePct ?? null);
+      })
+      .catch(() => {}); // non-fatal
+  }, [mission?.missionId]);
 
   // GPS watchPosition
   useEffect(() => {
@@ -107,22 +120,6 @@ export function LiveTrackingPanel({ mission, allRows, onEnd }) {
     timerRef.current = setInterval(pollSamples, POLL_INTERVAL_MS);
     return () => clearInterval(timerRef.current);
   }, [pollSamples]);
-
-  // Derive zone coverage % (how many live readings fall inside mission bbox)
-  const coveragePct = (() => {
-    if (!mission?.polygon || !liveReadings.length) return 0;
-    const coords = mission.polygon.coordinates?.[0];
-    if (!coords?.length) return 0;
-    const lngs = coords.map(c => c[0]);
-    const lats  = coords.map(c => c[1]);
-    const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
-    const minLat  = Math.min(...lats),  maxLat  = Math.max(...lats);
-    const inside = liveReadings.filter(r =>
-      r.latitude  >= minLat  && r.latitude  <= maxLat &&
-      r.longitude >= minLng && r.longitude <= maxLng
-    ).length;
-    return Math.min(100, Math.round((inside / liveReadings.length) * 100));
-  })();
 
   // Mission polygon for Leaflet (array of [lat, lng])
   const missionPolygon = (() => {
@@ -183,14 +180,16 @@ export function LiveTrackingPanel({ mission, allRows, onEnd }) {
             </Polygon>
           )}
 
-          {/* Historical coverage dots (thin) */}
-          {(allRows || []).slice(0, 5000).filter(r => r.lat && r.lng).map((r, i) => (
+          {/* Historical coverage grid — aggregated from DB, colored by avg dose */}
+          {coverageGrid.map((cell, i) => (
             <CircleMarker
-              key={i}
-              center={[r.lat, r.lng]}
-              radius={2}
+              key={`cov-${i}`}
+              center={[cell.lat, cell.lng]}
+              radius={5}
               pathOptions={{
-                color: doseColor(r.uSv, 0, 1), fillOpacity: 0.35, weight: 0,
+                color: doseColor(cell.avgDose, 0, 1),
+                fillOpacity: 0.30,
+                weight: 0,
               }} />
           ))}
 
@@ -269,8 +268,8 @@ export function LiveTrackingPanel({ mission, allRows, onEnd }) {
           </div>
         </div>
         <div className="live-hud-item">
-          <div className="live-hud-label">Zone coverage</div>
-          <div className="live-hud-value">{coveragePct}%</div>
+          <div className="live-hud-label">Historical cov.</div>
+          <div className="live-hud-value">{coveragePct != null ? `${coveragePct}%` : '…'}</div>
         </div>
         <div className="live-hud-item">
           <div className="live-hud-label">Live readings</div>
