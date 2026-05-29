@@ -184,7 +184,7 @@ SSH_HOST=192.168.86.48
 SSH_KEY_PATH=~/.ssh/id_rsa
 REMOTE_PATH=/home/darkmatter2222/vega-tracker-viewer
 WEB_PORT=8031
-API_BASE=http://192.168.86.48:8030
+API_BASE=/api
 ```
 
 `infra/duckdns/.env` (lives only on server at `~/docker/duckdns/.env` — never in repo):

@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
-  MapContainer, TileLayer, Polyline, CircleMarker,
+  MapContainer, TileLayer, Polyline, CircleMarker, Polygon,
   Tooltip, useMap, useMapEvents, Marker,
 } from 'react-leaflet';
 import L from 'leaflet';
@@ -17,6 +17,8 @@ import { DualRangeSlider } from './DualRangeSlider.jsx';
 import RenderPanel from './RenderPanel.jsx';
 import { ExportPanel } from './ExportPanel.jsx';
 import { ThreeDView } from './ThreeDView.jsx';
+import { ExplorerPanel } from './ExplorerPanel.jsx';
+import { LiveTrackingPanel } from './LiveTrackingPanel.jsx';
 
 // ---- constants -------------------------------------------------------------
 
@@ -85,6 +87,17 @@ function FitBoundsOnce({ bounds, dep }) {
     if (bounds && bounds.isValid()) {
       map.fitBounds(bounds.pad(0.1), { animate: true });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dep]);
+  return null;
+}
+
+// Like FitBoundsOnce but accepts a plain [[minLat,minLng],[maxLat,maxLng]] array
+// (Leaflet fitBounds natively accepts that format, no LatLngBounds object required)
+function FitBboxOnce({ bbox, dep }) {
+  const map = useMap();
+  useEffect(() => {
+    if (bbox) map.fitBounds(bbox, { padding: [40, 40], animate: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dep]);
   return null;
@@ -375,8 +388,14 @@ export default function App() {
   const playRef = useRef();
 
   // App mode and explore sidebar panel
-  const [appMode, setAppMode] = useState('explore'); // explore | manage | render | export
+  const [appMode, setAppMode] = useState('evaluate'); // evaluate | explorer | manage | render | export
   const [explorePanel, setExplorePanel] = useState('sessions'); // sessions | display | stats
+
+  // Explorer mode state
+  const [explorerSelectedZone, setExplorerSelectedZone] = useState(null); // GeoJSON Feature | null
+  const [explorerAnalysisResult, setExplorerAnalysisResult] = useState(null); // FeatureCollection | null
+  const [explorerZoneCoverage, setExplorerZoneCoverage]   = useState(null); // {coveredCells, uncoveredCells, coveragePct} | null
+  const [liveMission, setLiveMission] = useState(null); // mission object | null
   const [searchFilter, setSearchFilter] = useState('');
 
   // Resizable sidebar
@@ -682,9 +701,14 @@ export default function App() {
         </div>
         <div className="nav-modes">
           <button
-            className={`nav-mode-btn ${appMode === 'explore' ? 'active' : ''}`}
-            onClick={() => setAppMode('explore')}>
-            Explore
+            className={`nav-mode-btn ${appMode === 'evaluate' ? 'active' : ''}`}
+            onClick={() => setAppMode('evaluate')}>
+            Evaluate
+          </button>
+          <button
+            className={`nav-mode-btn ${appMode === 'explorer' ? 'active' : ''}`}
+            onClick={() => setAppMode('explorer')}>
+            Explorer
           </button>
           <button
             className={`nav-mode-btn ${appMode === 'manage' ? 'active' : ''}`}
@@ -710,8 +734,8 @@ export default function App() {
       {/* === APP BODY === */}
       <div className="app-body">
 
-      {/* === EXPLORE MODE === */}
-      {appMode === 'explore' && (<>
+      {/* === EVALUATE MODE (was Explore) === */}
+      {appMode === 'evaluate' && (<>
       {/* === SIDEBAR === */}
       <aside className="sidebar" ref={sidebarRef} style={{ width: sidebarWidth }}>
 
@@ -1236,6 +1260,82 @@ export default function App() {
       </>)}
       {/* end explore mode */}
 
+      {/* === EXPLORER MODE === */}
+      {appMode === 'explorer' && (<>
+        {/* Sidebar */}
+        <aside className="sidebar" ref={sidebarRef} style={{ width: sidebarWidth }}>
+          <ExplorerPanel
+            onZoneSelect={zone => {
+              setExplorerSelectedZone(zone);
+              // Clear old coverage whenever a new zone is selected
+              if (!zone) setExplorerZoneCoverage(null);
+            }}
+            selectedZone={explorerSelectedZone}
+            onAnalysisResult={result => setExplorerAnalysisResult(result)}
+            onGoLive={mission => setLiveMission(mission)}
+            onZoneCoverageUpdate={cov => setExplorerZoneCoverage(cov)}
+          />
+          <div className="resize-handle" onMouseDown={startResize} />
+        </aside>
+
+        {/* Map — shows gap zones + covered/uncovered cells */}
+        <main className="map-pane">
+          <MapContainer center={[39.5, -98.35]} zoom={6} maxZoom={22} style={{ width: '100%', height: '100%' }}>
+            <TileLayer
+              attribution={tile.attribution}
+              url={tile.url}
+              maxZoom={22}
+              maxNativeZoom={tile.maxNativeZoom ?? 19}
+            />
+            {/* Auto-fit map to selected zone bbox */}
+            {explorerSelectedZone?.properties?.bbox && (() => {
+              const [minLng, minLat, maxLng, maxLat] = explorerSelectedZone.properties.bbox;
+              return <FitBboxOnce
+                bbox={[[minLat, minLng], [maxLat, maxLng]]}
+                dep={explorerSelectedZone.properties.rank}
+              />;
+            })()}
+
+            {/* Gap zone polygons from last analysis */}
+            {explorerAnalysisResult && explorerAnalysisResult.features.map((f, i) => {
+              const coords = f.geometry?.coordinates?.[0];
+              if (!coords) return null;
+              const positions = coords.map(([lng, lat]) => [lat, lng]);
+              const isSelected = explorerSelectedZone?.properties?.rank === f.properties?.rank;
+              const sqMi = f.properties.areaSqMi ?? (f.properties.areaKm2 * 0.386102);
+              return (
+                <Polygon
+                  key={`gap-${i}`}
+                  positions={positions}
+                  pathOptions={{
+                    color: isSelected ? '#ffea00' : '#29b6f6',
+                    weight: isSelected ? 2 : 1,
+                    opacity: isSelected ? 1 : 0.7,
+                    fillColor: isSelected ? '#ffea00' : '#29b6f6',
+                    fillOpacity: isSelected ? 0.15 : 0.07,
+                  }}>
+                  <Tooltip>
+                    Zone #{f.properties.rank} — {sqMi.toFixed(1)} sq mi
+                    {' · '}score {f.properties.score.toFixed(2)}
+                  </Tooltip>
+                </Polygon>
+              );
+            })}
+
+            {/* Zone coverage: green = already visited, orange = unvisited */}
+            {explorerZoneCoverage?.coveredCells?.map(([lat, lng], i) => (
+              <CircleMarker key={`cov-${i}`} center={[lat, lng]} radius={4}
+                pathOptions={{ color: 'transparent', fillColor: '#00e676', fillOpacity: 0.55, weight: 0 }} />
+            ))}
+            {explorerZoneCoverage?.uncoveredCells?.map(([lat, lng], i) => (
+              <CircleMarker key={`unc-${i}`} center={[lat, lng]} radius={4}
+                pathOptions={{ color: 'transparent', fillColor: '#ff7043', fillOpacity: 0.30, weight: 0 }} />
+            ))}
+          </MapContainer>
+        </main>
+      </>)}
+      {/* end explorer mode */}
+
       {/* === DATA MANAGEMENT MODE === */}
       {appMode === 'manage' && (
         <div className="data-mgmt-view">
@@ -1278,6 +1378,17 @@ export default function App() {
       {/* === EXPORT MODE === */}
       {appMode === 'export' && (
         <ExportPanel />
+      )}
+
+      {/* === LIVE TRACKING OVERLAY === */}
+      {/* Renders on top of everything when a mission is active.           */}
+      {/* Closing it sets liveMission to null (the mission stays in DB).   */}
+      {liveMission && (
+        <LiveTrackingPanel
+          mission={liveMission}
+          allRows={[]}
+          onEnd={() => setLiveMission(null)}
+        />
       )}
 
       </div>{/* app-body */}

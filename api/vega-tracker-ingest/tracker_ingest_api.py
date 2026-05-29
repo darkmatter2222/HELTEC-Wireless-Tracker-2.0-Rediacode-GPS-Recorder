@@ -48,10 +48,12 @@ import csv
 import glob
 import io
 import logging
+import math as _math
 import os
 import shutil
 import subprocess
 import time
+import uuid
 import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -98,7 +100,9 @@ SAMPLES_COLL      = os.getenv("MONGO_SAMPLES_COLLECTION", "tracker_samples")
 SESSIONS_COLL     = os.getenv("MONGO_SESSIONS_COLLECTION", "tracker_sessions")
 BACKUPS_COLL      = "tracker_backups"    # telemetry: one doc per backup attempt
 UPLOADS_COLL      = "tracker_uploads"    # one doc per POST /ingest/csv call
-API_VERSION       = "0.9.1"
+MISSIONS_COLL     = "tracker_missions"   # Explorer: planned exploration zones
+ANALYSES_COLL    = "tracker_analyses"   # Explorer: stored analysis results (rolling 10)
+API_VERSION       = "0.9.2"
 MAX_BODY_BYTES    = int(os.getenv("MAX_BODY_BYTES", str(8 * 1024 * 1024)))   # 8 MB
 INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "1000"))
 BACKUP_DIR        = os.getenv("BACKUP_DIR", "/backups")  # host-mounted volume
@@ -153,14 +157,23 @@ async def lifespan(app: FastAPI):
     uploads = db[UPLOADS_COLL]
     uploads.create_index([("sessionId", 1), ("receivedAt", -1)], name="upload_session_ts")
 
+    missions_coll = db[MISSIONS_COLL]
+    missions_coll.create_index(
+        [("missionId", 1)], name="mission_id_unique", unique=True
+    )
+    missions_coll.create_index(
+        [("status", 1), ("createdAt", -1)], name="mission_status_ts"
+    )
+
     app.state.mongo    = client
     app.state.db       = db
     app.state.samples  = samples
     app.state.sessions = sessions
     app.state.backups  = backups
     app.state.uploads  = uploads
-    log.info("mongo ready; collections=%s,%s,%s,%s",
-             SAMPLES_COLL, SESSIONS_COLL, BACKUPS_COLL, UPLOADS_COLL)
+    app.state.missions = missions_coll
+    log.info("mongo ready; collections=%s,%s,%s,%s,%s",
+             SAMPLES_COLL, SESSIONS_COLL, BACKUPS_COLL, UPLOADS_COLL, MISSIONS_COLL)
     try:
         yield
     finally:
@@ -1879,3 +1892,547 @@ async def export_time_range(request: Request):
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
     )
+
+
+# ===========================================================================
+# Explorer: Missions CRUD
+# ===========================================================================
+
+class MissionCreate(BaseModel):
+    name: str
+    polygon: dict          # GeoJSON Polygon
+    centroid: list         # [lng, lat]
+    areaKm2: float = 0.0
+    score: float = 0.0
+    notes: str = ""
+
+
+class MissionUpdate(BaseModel):
+    name: str | None = None
+    status: str | None = None   # planning | active | complete | abandoned
+    notes: str | None = None
+    polygon: dict | None = None
+
+
+@app.get("/missions")
+def list_missions(status: str | None = Query(default=None)):
+    """List all exploration missions, newest first."""
+    filt: dict = {}
+    if status:
+        filt["status"] = status
+    cur = app.state.missions.find(filt, projection={"_id": 0},
+                                   sort=[("createdAt", -1)])
+    return list(cur)
+
+
+@app.post("/missions", status_code=201)
+def create_mission(body: MissionCreate):
+    """Create a new exploration mission from a committed zone."""
+    now_ms = int(time.time() * 1000)
+    doc = {
+        "missionId":   str(uuid.uuid4()),
+        "name":        body.name.strip() or "Untitled Mission",
+        "status":      "planning",
+        "polygon":     body.polygon,
+        "centroid":    body.centroid,
+        "areaKm2":     body.areaKm2,
+        "score":       body.score,
+        "notes":       body.notes,
+        "createdAt":   now_ms,
+        "activatedAt": None,
+        "completedAt": None,
+    }
+    app.state.missions.insert_one(doc)
+    doc.pop("_id", None)
+    log.info("mission created: %s [%s]", doc["missionId"], doc["name"])
+    return doc
+
+
+@app.patch("/missions/{mission_id}")
+def update_mission(mission_id: str, body: MissionUpdate):
+    """Update mission name, status, notes, or polygon."""
+    now_ms  = int(time.time() * 1000)
+    updates: dict = {}
+    if body.name is not None:
+        updates["name"] = body.name.strip()
+    if body.status is not None:
+        allowed = {"planning", "active", "complete", "abandoned"}
+        if body.status not in allowed:
+            raise HTTPException(400, detail=f"status must be one of {sorted(allowed)}")
+        updates["status"] = body.status
+        if body.status == "active":
+            updates["activatedAt"] = now_ms
+        elif body.status in ("complete", "abandoned"):
+            updates["completedAt"] = now_ms
+    if body.notes is not None:
+        updates["notes"] = body.notes
+    if body.polygon is not None:
+        updates["polygon"] = body.polygon
+        coords = body.polygon.get("coordinates", [[]])[0]
+        if coords:
+            lngs_c = [c[0] for c in coords]
+            lats_c = [c[1] for c in coords]
+            updates["centroid"] = [
+                round(sum(lngs_c) / len(lngs_c), 6),
+                round(sum(lats_c) / len(lats_c), 6),
+            ]
+    if not updates:
+        raise HTTPException(400, detail="no fields to update")
+    result = app.state.missions.update_one({"missionId": mission_id}, {"$set": updates})
+    if result.matched_count == 0:
+        raise HTTPException(404, detail=f"mission {mission_id!r} not found")
+    doc = app.state.missions.find_one({"missionId": mission_id}, projection={"_id": 0})
+    return doc
+
+
+@app.delete("/missions/{mission_id}")
+def delete_mission(mission_id: str):
+    """Permanently delete a mission."""
+    result = app.state.missions.delete_one({"missionId": mission_id})
+    if result.deleted_count == 0:
+        raise HTTPException(404, detail=f"mission {mission_id!r} not found")
+    return {"deleted": mission_id}
+
+
+@app.get("/missions/{mission_id}/coverage-grid")
+def mission_coverage_grid(
+    mission_id:    str,
+    grid_deg:      float = Query(default=0.0005),  # ~50 m cells
+    max_speed_kph: float = Query(default=50.0),
+    max_hdop:      float = Query(default=3.0),
+    max_accuracy_m: float = Query(default=15.0),
+    max_cells:     int   = Query(default=8000),
+):
+    """Return a coarse grid of covered cells inside the mission polygon bbox.
+
+    Each cell has the lat/lng centroid, average dose rate, and sample count.
+    Used by the live-tracking map to show historical coverage without
+    streaming millions of individual sample points to the browser.
+    """
+    mission = app.state.missions.find_one({"missionId": mission_id}, projection={"_id": 0})
+    if not mission:
+        raise HTTPException(404, detail=f"mission {mission_id!r} not found")
+
+    coords = mission.get("polygon", {}).get("coordinates", [[]])[0]
+    if not coords:
+        return {"cells": [], "coveragePct": 0.0, "sampleCount": 0}
+
+    lngs = [c[0] for c in coords]
+    lats = [c[1] for c in coords]
+    min_lat, max_lat = min(lats), max(lats)
+    min_lng, max_lng = min(lngs), max(lngs)
+
+    quality_filter: dict = {
+        "latitude":  {"$exists": True, "$nin": [None, 0.0],
+                      "$gte": min_lat, "$lte": max_lat},
+        "longitude": {"$exists": True, "$nin": [None, 0.0],
+                      "$gte": min_lng, "$lte": max_lng},
+        "$and": [
+            {"$or": [{"speedKph":  {"$exists": False}}, {"speedKph":  None},
+                     {"speedKph":  {"$lte": max_speed_kph}}]},
+            {"$or": [{"hdop":      {"$exists": False}}, {"hdop":      None},
+                     {"hdop":      {"$lte": max_hdop}}]},
+            {"$or": [{"accuracyM": {"$exists": False}}, {"accuracyM": None},
+                     {"accuracyM": {"$lte": max_accuracy_m}}]},
+        ],
+    }
+
+    pipeline = [
+        {"$match": quality_filter},
+        {"$project": {
+            "lat_i": {"$toInt": {"$round": [{"$divide": ["$latitude",  grid_deg]}]}},
+            "lng_i": {"$toInt": {"$round": [{"$divide": ["$longitude", grid_deg]}]}},
+            "uSvPerHour": 1,
+        }},
+        {"$group": {
+            "_id":    {"lat_i": "$lat_i", "lng_i": "$lng_i"},
+            "count":  {"$sum": 1},
+            "avgDose": {"$avg": "$uSvPerHour"},
+        }},
+        {"$sort": {"count": -1}},
+        {"$limit": max_cells},
+        {"$project": {
+            "_id": 0,
+            "lat": {"$round": [{"$multiply": ["$_id.lat_i", grid_deg]}, 6]},
+            "lng": {"$round": [{"$multiply": ["$_id.lng_i", grid_deg]}, 6]},
+            "count": 1,
+            "avgDose": {"$ifNull": ["$avgDose", 0.0]},
+        }},
+    ]
+
+    cells = list(app.state.samples.aggregate(pipeline, allowDiskUse=True))
+
+    # coverage % vs total bbox cells
+    total_lat_cells = max(1, round((max_lat - min_lat) / grid_deg))
+    total_lng_cells = max(1, round((max_lng - min_lng) / grid_deg))
+    total_cells_count = total_lat_cells * total_lng_cells
+    coverage_pct = round(len(cells) / total_cells_count * 100, 1) if total_cells_count else 0.0
+
+    return {
+        "cells": cells,
+        "coveragePct": coverage_pct,
+        "sampleCount": sum(c["count"] for c in cells),
+        "gridDeg": grid_deg,
+    }
+
+
+# ===========================================================================
+# Explorer: Coverage Gap Analysis
+# ===========================================================================
+
+@app.get("/explorer/analyses/latest")
+def get_latest_analysis():
+    """Return the most recently stored coverage analysis result (for recall on page load)."""
+    doc = app.state.db[ANALYSES_COLL].find_one({}, sort=[("runAt", -1)], projection={"_id": 0})
+    if not doc:
+        raise HTTPException(404, detail="no analyses found")
+    return doc
+
+
+@app.get("/explorer/zone-coverage")
+def zone_coverage(
+    min_lat:       float = Query(...),
+    max_lat:       float = Query(...),
+    min_lng:       float = Query(...),
+    max_lng:       float = Query(...),
+    grid_deg:      float = Query(default=0.0005),
+    max_speed_kph: float = Query(default=50.0),
+    max_hdop:      float = Query(default=3.0),
+    max_accuracy_m: float = Query(default=15.0),
+    max_return:    int   = Query(default=8000),
+):
+    """Return covered/uncovered grid cells within a zone bounding box.
+
+    Covered cells contain ≥1 quality-filtered sample.  Uncovered cells are
+    empty grid squares in the same bounding box.  Used by the Explorer map
+    to show exactly what still needs to be visited inside a selected zone.
+    """
+    samples = app.state.samples
+    quality_filter: dict = {
+        "latitude":  {"$exists": True, "$nin": [None, 0.0],
+                      "$gte": min_lat, "$lte": max_lat},
+        "longitude": {"$exists": True, "$nin": [None, 0.0],
+                      "$gte": min_lng, "$lte": max_lng},
+        "$and": [
+            {"$or": [{"speedKph":  {"$exists": False}}, {"speedKph":  None},
+                     {"speedKph":  {"$lte": max_speed_kph}}]},
+            {"$or": [{"hdop":      {"$exists": False}}, {"hdop":      None},
+                     {"hdop":      {"$lte": max_hdop}}]},
+            {"$or": [{"accuracyM": {"$exists": False}}, {"accuracyM": None},
+                     {"accuracyM": {"$lte": max_accuracy_m}}]},
+        ],
+    }
+    pipeline = [
+        {"$match": quality_filter},
+        {"$project": {
+            "lat_i": {"$toInt": {"$round": [{"$divide": ["$latitude",  grid_deg]}]}},
+            "lng_i": {"$toInt": {"$round": [{"$divide": ["$longitude", grid_deg]}]}},
+        }},
+        {"$group": {"_id": {"lat_i": "$lat_i", "lng_i": "$lng_i"},
+                    "count": {"$sum": 1}}},
+        {"$project": {"_id": 0, "lat_i": "$_id.lat_i",
+                      "lng_i": "$_id.lng_i", "count": 1}},
+    ]
+    covered_docs = list(samples.aggregate(pipeline, allowDiskUse=True))
+    covered_set = {(d["lat_i"], d["lng_i"]) for d in covered_docs}
+
+    box_min_lat_i = int(_math.floor(min_lat / grid_deg))
+    box_max_lat_i = int(_math.ceil( max_lat / grid_deg))
+    box_min_lng_i = int(_math.floor(min_lng / grid_deg))
+    box_max_lng_i = int(_math.ceil( max_lng / grid_deg))
+    total_cells = (box_max_lat_i - box_min_lat_i + 1) * (box_max_lng_i - box_min_lng_i + 1)
+
+    uncovered: list[tuple[int, int]] = []
+    for lat_i in range(box_min_lat_i, box_max_lat_i + 1):
+        for lng_i in range(box_min_lng_i, box_max_lng_i + 1):
+            if (lat_i, lng_i) not in covered_set:
+                uncovered.append((lat_i, lng_i))
+
+    coverage_pct = round(len(covered_set) / total_cells * 100, 1) if total_cells else 0.0
+
+    def cell_ll(lat_i, lng_i):
+        return [round(lat_i * grid_deg, 6), round(lng_i * grid_deg, 6)]
+
+    return {
+        "coveredCells":   [cell_ll(d["lat_i"], d["lng_i"]) for d in covered_docs[:max_return]],
+        "uncoveredCells": [cell_ll(li, gi) for li, gi in uncovered[:max_return]],
+        "coveragePct":    coverage_pct,
+        "coveredCount":   len(covered_set),
+        "uncoveredCount": len(uncovered),
+        "totalCells":     total_cells,
+        "sampleCount":    sum(d.get("count", 0) for d in covered_docs),
+        "gridDeg":        grid_deg,
+    }
+
+
+@app.post("/explorer/analyze-coverage")
+def analyze_coverage(
+    max_speed_kph:     float = Query(default=50.0),
+    max_hdop:          float = Query(default=3.0),
+    max_accuracy_m:    float = Query(default=15.0),
+    grid_deg:          float = Query(default=0.002),
+    top_n:             int   = Query(default=15),
+    padding_factor:    float = Query(default=0.15),
+    min_cluster_cells: int   = Query(default=5),
+    max_zone_sq_mi:    float = Query(default=25.0),
+    min_zone_sq_mi:    float = Query(default=0.3),
+    dist_peak_km:      float = Query(default=5.0),
+):
+    """Compute coverage gap analysis over the quality-filtered sample set.
+
+    Each qualifying sample must satisfy:
+      speedKph  <= max_speed_kph  (or missing/null)
+      hdop      <= max_hdop       (or missing/null)
+      accuracyM <= max_accuracy_m (or missing/null)
+
+    The world is divided into a lat/lng grid of grid_deg resolution.  Covered
+    cells are those containing at least one qualifying sample.  Gap cells in the
+    padded bounding box are flood-filled into contiguous regions and ranked by
+    a Gaussian score rewarding zones near dist_peak_km from the data centre-of-mass.
+
+    max_zone_sq_mi / min_zone_sq_mi filter out zones that are too large (spanning
+    the whole map) or too small (irrelevant noise).
+
+    Result is stored to tracker_analyses so it can be recalled on page load.
+
+    Returns a GeoJSON FeatureCollection with metadata about the run.
+    """
+    samples = app.state.samples
+
+    quality_filter: dict = {
+        "latitude":  {"$exists": True, "$nin": [None, 0.0]},
+        "longitude": {"$exists": True, "$nin": [None, 0.0]},
+        "$and": [
+            {"$or": [{"speedKph":  {"$exists": False}}, {"speedKph":  None},
+                     {"speedKph":  {"$lte": max_speed_kph}}]},
+            {"$or": [{"hdop":      {"$exists": False}}, {"hdop":      None},
+                     {"hdop":      {"$lte": max_hdop}}]},
+            {"$or": [{"accuracyM": {"$exists": False}}, {"accuracyM": None},
+                     {"accuracyM": {"$lte": max_accuracy_m}}]},
+        ],
+    }
+
+    pipeline = [
+        {"$match": quality_filter},
+        {"$project": {
+            "lat_i": {"$toInt": {"$round": [{"$divide": ["$latitude",  grid_deg]}]}},
+            "lng_i": {"$toInt": {"$round": [{"$divide": ["$longitude", grid_deg]}]}},
+        }},
+        {"$group": {"_id": {"lat_i": "$lat_i", "lng_i": "$lng_i"}}},
+        {"$project": {"_id": 0, "lat_i": "$_id.lat_i", "lng_i": "$_id.lng_i"}},
+    ]
+
+    t0 = time.monotonic()
+    try:
+        covered_docs = list(samples.aggregate(pipeline, allowDiskUse=True))
+    except Exception as exc:
+        raise HTTPException(500, detail=f"coverage aggregation failed: {exc}")
+
+    elapsed_agg = round(time.monotonic() - t0, 2)
+    log.info("analyze-coverage: %d covered cells in %.2fs", len(covered_docs), elapsed_agg)
+
+    if not covered_docs:
+        return {
+            "type": "FeatureCollection", "features": [],
+            "metadata": {"coveredCells": 0, "gapRegions": 0,
+                         "message": "no qualifying samples found"},
+        }
+
+    # Build covered set and compute bbox in integer cell indices
+    covered_set: set[tuple[int, int]] = {(d["lat_i"], d["lng_i"]) for d in covered_docs}
+    lat_is = [d["lat_i"] for d in covered_docs]
+    lng_is = [d["lng_i"] for d in covered_docs]
+    min_lat_i, max_lat_i = min(lat_is), max(lat_is)
+    min_lng_i, max_lng_i = min(lng_is), max(lng_is)
+    center_lat_i = sum(lat_is) / len(lat_is)
+    center_lng_i = sum(lng_is) / len(lng_is)
+
+    # Padded bbox
+    lat_pad = max(int((max_lat_i - min_lat_i) * padding_factor), 10)
+    lng_pad = max(int((max_lng_i - min_lng_i) * padding_factor), 10)
+    box_min_lat = min_lat_i - lat_pad
+    box_max_lat = max_lat_i + lat_pad
+    box_min_lng = min_lng_i - lng_pad
+    box_max_lng = max_lng_i + lng_pad
+
+    # Safety: clamp to 2M candidate cells
+    total_cells = (box_max_lat - box_min_lat + 1) * (box_max_lng - box_min_lng + 1)
+    if total_cells > 2_000_000:
+        lat_pad = lng_pad = 30
+        box_min_lat = min_lat_i - lat_pad; box_max_lat = max_lat_i + lat_pad
+        box_min_lng = min_lng_i - lng_pad; box_max_lng = max_lng_i + lng_pad
+        log.warning("analyze-coverage: bbox clamped (%d -> %d cells)", total_cells,
+                    (box_max_lat - box_min_lat + 1) * (box_max_lng - box_min_lng + 1))
+
+    # Collect gap cells
+    gap_cells: set[tuple[int, int]] = set()
+    for lat_i in range(box_min_lat, box_max_lat + 1):
+        for lng_i in range(box_min_lng, box_max_lng + 1):
+            if (lat_i, lng_i) not in covered_set:
+                gap_cells.add((lat_i, lng_i))
+
+    # Flood-fill into contiguous regions (BFS)
+    visited: set[tuple[int, int]] = set()
+    regions: list[list[tuple[int, int]]] = []
+    DIRS = ((-1, 0), (1, 0), (0, -1), (0, 1))
+    for start in gap_cells:
+        if start in visited:
+            continue
+        cluster: list[tuple[int, int]] = []
+        queue = [start]
+        visited.add(start)
+        while queue:
+            cell = queue.pop(0)
+            cluster.append(cell)
+            for dl, dg in DIRS:
+                nb = (cell[0] + dl, cell[1] + dg)
+                if nb in gap_cells and nb not in visited:
+                    visited.add(nb)
+                    queue.append(nb)
+        regions.append(cluster)
+
+    log.info("analyze-coverage: %d gap regions after BFS (%.2fs total)",
+             len(regions), round(time.monotonic() - t0, 2))
+
+    # Convert to GeoJSON Features with scoring
+    center_lat_deg = center_lat_i * grid_deg
+    cos_lat = _math.cos(_math.radians(center_lat_deg))
+    deg_to_km_lat = 111.0
+    deg_to_km_lng = 111.0 * cos_lat
+
+    features: list[dict] = []
+    for cluster in regions:
+        if len(cluster) < min_cluster_cells:
+            continue
+
+        cen_lat_i = sum(c[0] for c in cluster) / len(cluster)
+        cen_lng_i = sum(c[1] for c in cluster) / len(cluster)
+        d_lat_km = (cen_lat_i - center_lat_i) * grid_deg * deg_to_km_lat
+        d_lng_km = (cen_lng_i - center_lng_i) * grid_deg * deg_to_km_lng
+        dist_km  = _math.sqrt(d_lat_km ** 2 + d_lng_km ** 2)
+        area_km2 = len(cluster) * (grid_deg * 111.0) ** 2
+
+        # Gaussian: peak at dist_peak_km from center-of-mass, width 8 km
+        dist_factor = _math.exp(-((dist_km - dist_peak_km) ** 2) / (2 * 8.0 ** 2))
+        score = area_km2 * (0.3 + 0.7 * dist_factor)
+
+        blat = min(c[0] for c in cluster)
+        tlat = max(c[0] for c in cluster)
+        blng = min(c[1] for c in cluster)
+        tlng = max(c[1] for c in cluster)
+        g0 = (blat - 0.5) * grid_deg
+        g1 = (tlat + 0.5) * grid_deg
+        g2 = (blng - 0.5) * grid_deg
+        g3 = (tlng + 0.5) * grid_deg
+
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Polygon", "coordinates": [[
+                [g2, g0], [g3, g0], [g3, g1], [g2, g1], [g2, g0],
+            ]]},
+            "properties": {
+                "cellCount":        len(cluster),
+                "areaKm2":          round(area_km2, 3),
+                "areaSqMi":         round(area_km2 * 0.386102, 3),
+                "centroid":         [round(cen_lng_i * grid_deg, 6),
+                                     round(cen_lat_i * grid_deg, 6)],
+                "distFromCenterKm": round(dist_km, 2),
+                "score":            round(score, 4),
+                "bbox":             [round(g2, 6), round(g0, 6),
+                                     round(g3, 6), round(g1, 6)],
+            },
+        })
+
+    # --- Filter by zone size limits (sq mi) ---
+    KM2_PER_SQ_MI = 2.58999
+    features = [
+        f for f in features
+        if min_zone_sq_mi <= f["properties"]["areaSqMi"] <= max_zone_sq_mi
+    ]
+
+    features.sort(key=lambda f: f["properties"]["score"], reverse=True)
+    features = features[:top_n]
+    for i, f in enumerate(features):
+        f["properties"]["rank"] = i + 1
+
+    log.info("analyze-coverage: returning %d ranked zones (%.2fs total)",
+             len(features), round(time.monotonic() - t0, 2))
+
+    analysis_id = str(uuid.uuid4())
+    run_at_ms   = int(time.time() * 1000)
+
+    result = {
+        "type": "FeatureCollection",
+        "metadata": {
+            "analysisId":    analysis_id,
+            "runAt":         run_at_ms,
+            "gridDeg":       grid_deg,
+            "coveredCells":  len(covered_set),
+            "totalGapCells": len(gap_cells),
+            "gapRegions":    len(features),
+            "aggregationSec": elapsed_agg,
+            "totalSec":      round(time.monotonic() - t0, 2),
+            "centerOfMass":  [round(center_lng_i * grid_deg, 6),
+                              round(center_lat_i * grid_deg, 6)],
+            "boundingBox":   [min_lng_i * grid_deg, min_lat_i * grid_deg,
+                              max_lng_i * grid_deg, max_lat_i * grid_deg],
+            "params": {
+                "maxSpeedKph":   max_speed_kph,
+                "maxHdop":       max_hdop,
+                "maxAccuracyM":  max_accuracy_m,
+                "gridDeg":       grid_deg,
+                "topN":          top_n,
+                "maxZoneSqMi":  max_zone_sq_mi,
+                "minZoneSqMi":  min_zone_sq_mi,
+                "distPeakKm":   dist_peak_km,
+            },
+        },
+        "features": features,
+    }
+
+    # Persist for recall on page load (rolling 10)
+    try:
+        coll = app.state.db[ANALYSES_COLL]
+        coll.insert_one({"analysisId": analysis_id, "runAt": run_at_ms,
+                         **{k: v for k, v in result.items() if k != "_id"}})
+        all_ids = list(coll.find({}, {"_id": 1}, sort=[("runAt", -1)]))
+        if len(all_ids) > 10:
+            coll.delete_many({"_id": {"$in": [d["_id"] for d in all_ids[10:]]}})
+    except Exception as exc:
+        log.warning("analyze-coverage: failed to persist result: %s", exc)
+
+    return result
+
+
+# ===========================================================================
+# Explorer: Live Samples (real-time tracking feed)
+# ===========================================================================
+
+@app.get("/explorer/live-samples")
+def live_samples(
+    since_ms: int = Query(default=0),
+    limit:    int = Query(default=20, le=200),
+):
+    """Return the most recent radiation samples, newest-first.
+
+    Used by the live tracking panel to show new dose readings as the field
+    device uploads via its hotspot. The caller should poll every ~10s and
+    pass since_ms = previous latest timestampMs to get only new rows.
+    """
+    filt: dict = {
+        "latitude":    {"$exists": True, "$nin": [None, 0.0]},
+        "longitude":   {"$exists": True, "$nin": [None, 0.0]},
+        "uSvPerHour":  {"$exists": True, "$ne": None},
+    }
+    if since_ms:
+        filt["timestampMs"] = {"$gte": since_ms}
+
+    cur = app.state.samples.find(
+        filt,
+        projection={"_id": 0, "timestampMs": 1, "uSvPerHour": 1, "cps": 1,
+                    "latitude": 1, "longitude": 1, "speedKph": 1,
+                    "sessionId": 1, "accuracyM": 1},
+        sort=[("timestampMs", -1)],
+        limit=limit,
+    )
+    return list(cur)
