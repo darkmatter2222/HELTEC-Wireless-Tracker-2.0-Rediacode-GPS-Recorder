@@ -56,7 +56,7 @@ function AnalysisTab({ onZoneSelect, selectedZone, analysisResult, setAnalysisRe
     maxSpeedKph:   50,
     maxHdop:       3.0,
     maxAccuracyM:  15.0,
-    gridDeg:       0.0005,
+    gridDeg:       0.002,   // coarse grid for full-DB zone discovery (fine = slow timeout)
     topN:          15,
     paddingFactor: 0.15,
     maxZoneSqMi:   25,
@@ -123,7 +123,7 @@ function AnalysisTab({ onZoneSelect, selectedZone, analysisResult, setAnalysisRe
     setZoneCoverage(null);
     fetchZoneCoverage({
       minLat, maxLat, minLng, maxLng,
-      gridDeg:      params.gridDeg,
+      gridDeg:      0.0005,  // always fine for per-zone dot detail (~50m cells)
       maxSpeedKph:  params.maxSpeedKph,
       maxHdop:      params.maxHdop,
       maxAccuracyM: params.maxAccuracyM,
