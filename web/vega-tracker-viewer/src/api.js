@@ -287,7 +287,7 @@ export async function fetchLatestAnalysis() {
   return r.json();
 }
 
-export async function fetchZoneCoverage({ minLat, maxLat, minLng, maxLng, gridDeg = 0.002,
+export async function fetchZoneCoverage({ minLat, maxLat, minLng, maxLng, gridDeg = 0.0005,
   maxSpeedKph = 50, maxHdop = 3.0, maxAccuracyM = 15 } = {}) {
   const params = new URLSearchParams({
     min_lat: minLat, max_lat: maxLat, min_lng: minLng, max_lng: maxLng,
