@@ -56,7 +56,7 @@ function AnalysisTab({ onZoneSelect, selectedZone, analysisResult, setAnalysisRe
     maxSpeedKph:   50,
     maxHdop:       3.0,
     maxAccuracyM:  15.0,
-    gridDeg:       0.002,
+    gridDeg:       0.0005,
     topN:          15,
     paddingFactor: 0.15,
     maxZoneSqMi:   25,

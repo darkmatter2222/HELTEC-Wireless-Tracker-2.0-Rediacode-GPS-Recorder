@@ -1997,11 +1997,11 @@ def delete_mission(mission_id: str):
 @app.get("/missions/{mission_id}/coverage-grid")
 def mission_coverage_grid(
     mission_id:    str,
-    grid_deg:      float = Query(default=0.002),   # ~200 m cells
+    grid_deg:      float = Query(default=0.0005),  # ~50 m cells
     max_speed_kph: float = Query(default=50.0),
     max_hdop:      float = Query(default=3.0),
     max_accuracy_m: float = Query(default=15.0),
-    max_cells:     int   = Query(default=2000),
+    max_cells:     int   = Query(default=8000),
 ):
     """Return a coarse grid of covered cells inside the mission polygon bbox.
 
@@ -2095,11 +2095,11 @@ def zone_coverage(
     max_lat:       float = Query(...),
     min_lng:       float = Query(...),
     max_lng:       float = Query(...),
-    grid_deg:      float = Query(default=0.002),
+    grid_deg:      float = Query(default=0.0005),
     max_speed_kph: float = Query(default=50.0),
     max_hdop:      float = Query(default=3.0),
     max_accuracy_m: float = Query(default=15.0),
-    max_return:    int   = Query(default=2000),
+    max_return:    int   = Query(default=8000),
 ):
     """Return covered/uncovered grid cells within a zone bounding box.
 
