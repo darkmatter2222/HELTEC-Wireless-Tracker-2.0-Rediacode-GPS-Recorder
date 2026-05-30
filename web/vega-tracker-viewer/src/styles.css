@@ -2816,3 +2816,94 @@ canvas {
 }
 .live-hud-warn { color: #ef5350; font-size: 11px; font-weight: 400; }
 .live-hud-dose { color: var(--accent); }
+
+/* ============================================================
+   Hex Bin Flyout -- right-side details panel (Hex map mode)
+   ============================================================ */
+
+.hex-flyout {
+  position: absolute;
+  top: 70px;
+  right: 16px;
+  width: 240px;
+  background: rgba(17, 20, 24, 0.97);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.65);
+  z-index: 800;
+  backdrop-filter: blur(10px);
+  overflow: hidden;
+}
+.hex-flyout-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+}
+.hex-flyout-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.hex-flyout-close {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+  font-size: 15px;
+  line-height: 1;
+  padding: 0;
+}
+.hex-flyout-close:hover { color: #fff; }
+.hex-flyout-loc {
+  font-family: monospace;
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.45);
+  padding: 6px 14px;
+  border-bottom: 1px solid var(--border);
+}
+.hex-flyout-body {
+  padding: 8px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.hex-flyout-row {
+  display: flex;
+  justify-content: space-between;
+  font-size: 11px;
+}
+.hex-flyout-label { color: rgba(255, 255, 255, 0.45); }
+.hex-flyout-val   { color: #fff; font-weight: 600; }
+.hex-flyout-section { margin-top: 4px; }
+.hex-flyout-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: rgba(255, 255, 255, 0.35);
+  margin-bottom: 4px;
+}
+.hex-flyout-stat-row {
+  display: flex;
+  gap: 4px;
+}
+.hex-flyout-stat {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 4px;
+  padding: 4px 5px;
+  text-align: center;
+}
+.hex-flyout-stat span   { display: block; font-size: 9px; color: rgba(255, 255, 255, 0.38); }
+.hex-flyout-stat strong { display: block; font-size: 11px; color: #fff; font-weight: 600; }
+.hex-flyout-sessions {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.3);
+  word-break: break-all;
+  line-height: 1.5;
+}

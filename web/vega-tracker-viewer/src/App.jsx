@@ -146,23 +146,33 @@ function MapZoomSync({ onZoomChange }) {
 // The pixel scale factor 2^(mapZoom-binZoom) converts bin pixel coords from
 // binZoom space to the current screen space on every draw, so geography is
 // always correct regardless of the zoom mismatch.
-function HexLayer({ points, field, binZoom }) {
+function HexLayer({ traces, field, binZoom, onBinClick }) {
   const map = useMap();
 
   useEffect(() => {
-    if (!points || points.length === 0) return;
+    // Flatten all traces into one point list; skip traces with no data.
+    const allPoints = [];
+    if (traces) {
+      for (const t of traces) {
+        for (const p of t.filtered) {
+          if (p.lat != null && p.lng != null) allPoints.push({ ...p, _sid: t.id });
+        }
+      }
+    }
+    if (allPoints.length === 0) return;
 
     const HEX_R = 36;          // circumradius in pixels at binZoom — flat-top
     const S3    = Math.sqrt(3);
 
     const canvas = document.createElement('canvas');
-    canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:400;background:transparent;';
+    // Enable pointer events so clicks register when onBinClick is provided.
+    canvas.style.cssText = `position:absolute;top:0;left:0;pointer-events:${onBinClick ? 'auto' : 'none'};z-index:400;background:transparent;`;
     map.getContainer().appendChild(canvas);
 
     // Bin all points at binZoom resolution once per effect run.
-    // Rebinning is cheap here; it only triggers when binZoom/points/field change.
+    // Each bin stores aggregate stats for the flyout panel.
     const bins = new Map();
-    for (const p of points) {
+    for (const p of allPoints) {
       const gp  = map.project([p.lat, p.lng], binZoom);
       const q_f = ( 2 / 3 * gp.x) / HEX_R;
       const r_f = (-1 / 3 * gp.x + S3 / 3 * gp.y) / HEX_R;
@@ -173,19 +183,36 @@ function HexLayer({ points, field, binZoom }) {
       else if (dr > ds)            r = -q - s;
       const val = field === 'cps'   ? (p.cps ?? 0)
                 : field === 'speed' ? (p.spd ?? 0)
+                : field === 'alt'   ? (p.alt ?? 0)
                 :                     (p.uSv ?? 0);
       const key = `${q},${r}`;
-      if (bins.has(key)) { const b = bins.get(key); b.sum += val; b.count++; }
-      else bins.set(key, { q, r, sum: val, count: 1 });
+      if (bins.has(key)) {
+        const b = bins.get(key);
+        b.sum += val; b.count++;
+        b.latSum += p.lat; b.lngSum += p.lng;
+        if (p.uSv != null) { b.uSvSum += p.uSv; b.uSvN++; if (p.uSv < b.uSvMin) b.uSvMin = p.uSv; if (p.uSv > b.uSvMax) b.uSvMax = p.uSv; }
+        if (p.cps != null) { b.cpsSum += p.cps; b.cpsN++; if (p.cps < b.cpsMin) b.cpsMin = p.cps; if (p.cps > b.cpsMax) b.cpsMax = p.cps; }
+        if (p.spd != null) { b.spdSum += p.spd; b.spdN++; if (p.spd < b.spdMin) b.spdMin = p.spd; if (p.spd > b.spdMax) b.spdMax = p.spd; }
+        if (p.alt != null) { b.altSum += p.alt; b.altN++; if (p.alt < b.altMin) b.altMin = p.alt; if (p.alt > b.altMax) b.altMax = p.alt; }
+        if (p._sid) b.sessionIds.add(p._sid);
+      } else {
+        bins.set(key, {
+          q, r, sum: val, count: 1,
+          latSum: p.lat, lngSum: p.lng,
+          uSvSum: p.uSv ?? 0, uSvN: p.uSv != null ? 1 : 0, uSvMin: p.uSv ?? Infinity, uSvMax: p.uSv ?? -Infinity,
+          cpsSum: p.cps ?? 0, cpsN: p.cps != null ? 1 : 0, cpsMin: p.cps ?? Infinity, cpsMax: p.cps ?? -Infinity,
+          spdSum: p.spd ?? 0, spdN: p.spd != null ? 1 : 0, spdMin: p.spd ?? Infinity, spdMax: p.spd ?? -Infinity,
+          altSum: p.alt ?? 0, altN: p.alt != null ? 1 : 0, altMin: p.alt ?? Infinity, altMax: p.alt ?? -Infinity,
+          sessionIds: new Set(p._sid ? [p._sid] : []),
+        });
+      }
     }
 
     function draw() {
       const mapZoom = map.getZoom();
       // Scale bin pixel coords from binZoom space → current mapZoom screen space.
-      // scale > 1: zoomed in past binZoom → hexes appear larger on screen.
-      // scale < 1: zoomed out past binZoom → hexes appear smaller (denser).
       const scale  = Math.pow(2, mapZoom - binZoom);
-      const visR   = HEX_R * scale;   // visual circumradius in screen pixels
+      const visR   = HEX_R * scale;
 
       const size   = map.getSize();
       canvas.width  = size.x;
@@ -248,14 +275,52 @@ function HexLayer({ points, field, binZoom }) {
       }
     }
 
+    // Click handler: convert screen pixel → hex cube coord → bin lookup → flyout.
+    function handleClick(e) {
+      if (!onBinClick) return;
+      const rect     = canvas.getBoundingClientRect();
+      const ex       = e.clientX - rect.left;
+      const ey       = e.clientY - rect.top;
+      const mapZoom  = map.getZoom();
+      const scale    = Math.pow(2, mapZoom - binZoom);
+      const origin   = map.project(map.getBounds().getNorthWest(), mapZoom);
+      // Convert screen pixel → global pixel at binZoom
+      const gx = (ex + origin.x) / scale;
+      const gy = (ey + origin.y) / scale;
+      // Inverse flat-top hex cube coord
+      const q_f = ( 2 / 3 * gx) / HEX_R;
+      const r_f = (-1 / 3 * gx + S3 / 3 * gy) / HEX_R;
+      const s_f = -q_f - r_f;
+      let q = Math.round(q_f), r = Math.round(r_f), s = Math.round(s_f);
+      const dq = Math.abs(q - q_f), dr = Math.abs(r - r_f), ds = Math.abs(s - s_f);
+      if      (dq > dr && dq > ds) q = -r - s;
+      else if (dr > ds)            r = -q - s;
+      const b = bins.get(`${q},${r}`);
+      if (!b) return;
+      const fmt1 = v => v != null && isFinite(v) ? v.toFixed(1) : '—';
+      const fmt3 = v => v != null && isFinite(v) ? v.toFixed(3) : '—';
+      onBinClick({
+        lat: b.latSum / b.count,
+        lng: b.lngSum / b.count,
+        count: b.count,
+        sessionIds: [...b.sessionIds],
+        uSv:  { avg: b.uSvN ? b.uSvSum / b.uSvN : null, min: b.uSvN ? b.uSvMin : null, max: b.uSvN ? b.uSvMax : null },
+        cps:  { avg: b.cpsN ? b.cpsSum / b.cpsN : null, min: b.cpsN ? b.cpsMin : null, max: b.cpsN ? b.cpsMax : null },
+        spd:  { avg: b.spdN ? b.spdSum / b.spdN : null, min: b.spdN ? b.spdMin : null, max: b.spdN ? b.spdMax : null },
+        alt:  { avg: b.altN ? b.altSum / b.altN : null, min: b.altN ? b.altMin : null, max: b.altN ? b.altMax : null },
+      });
+    }
+
+    if (onBinClick) canvas.addEventListener('click', handleClick);
     map.on('move zoom viewreset', draw);
     draw();
 
     return () => {
       map.off('move zoom viewreset', draw);
+      if (onBinClick) canvas.removeEventListener('click', handleClick);
       canvas.remove();
     };
-  }, [points, field, binZoom, map]);
+  }, [traces, field, binZoom, map, onBinClick]);
 
   return null;
 }
@@ -773,6 +838,7 @@ export default function App() {
   const [arrowEvery, setArrowEvery]         = useState(5);    // show 1-in-N arrows
   const [hexBinZoom, setHexBinZoom]         = useState(6);    // bin resolution (default = initial map zoom)
   const [hexBinAuto, setHexBinAuto]         = useState(true); // auto-follow map zoom
+  const [hexFlyout,  setHexFlyout]          = useState(null); // clicked hex bin stats | null
   const [trackShowDots, setTrackShowDots]   = useState(false);
   const [trackDotOpacity, setTrackDotOpacity] = useState(0.5);
   const [arrowDotOpacity, setArrowDotOpacity] = useState(0.12);
@@ -1337,7 +1403,7 @@ export default function App() {
             <div className="mode-grid">
               {MAP_MODES.map(m => (
                 <button key={m} className={`mode-btn ${mapMode === m ? 'active' : ''}`}
-                  onClick={() => setMapMode(m)}>
+                  onClick={() => { setMapMode(m); if (m !== 'Hex') setHexFlyout(null); }}>
                   {modeIcon(m)} {m}
                 </button>
               ))}
@@ -1619,11 +1685,14 @@ export default function App() {
           <MapZoomSync onZoomChange={z => { if (hexBinAuto) setHexBinZoom(z); }} />
           {fitBounds && <FitBoundsOnce bounds={fitBounds} dep={fitTrigger} />}
 
-          {/* Hex binning mode */}
-          {mapMode === 'Hex' && areaFilteredTraces.map(t =>
-            t.filtered.length > 0
-              ? <HexLayer key={t.id} points={t.filtered} field={colorChannel} binZoom={hexBinZoom} />
-              : null
+          {/* Hex binning mode — single canvas merges all sessions; enables click → flyout */}
+          {mapMode === 'Hex' && (
+            <HexLayer
+              traces={areaFilteredTraces}
+              field={colorChannel}
+              binZoom={hexBinZoom}
+              onBinClick={bin => setHexFlyout(bin)}
+            />
           )}
 
           {/* Track mode — canvas polyline (no per-segment DOM nodes) */}
@@ -1735,6 +1804,106 @@ export default function App() {
             selected={selected}
             onToggle={id => toggleSession(id)}
           />
+        )}
+
+        {/* Hex bin flyout — right-side details panel shown on hex click */}
+        {hexFlyout && mapMode === 'Hex' && (
+          <div className="hex-flyout">
+            <div className="hex-flyout-header">
+              <span className="hex-flyout-title">Hex Bin Details</span>
+              <button className="hex-flyout-close" onClick={() => setHexFlyout(null)}>✕</button>
+            </div>
+            <div className="hex-flyout-loc">
+              {hexFlyout.lat.toFixed(5)}, {hexFlyout.lng.toFixed(5)}
+            </div>
+            <div className="hex-flyout-body">
+              <div className="hex-flyout-row">
+                <span className="hex-flyout-label">Samples</span>
+                <span className="hex-flyout-val">{hexFlyout.count.toLocaleString()}</span>
+              </div>
+              {hexFlyout.sessionIds.length > 0 && (
+                <div className="hex-flyout-row">
+                  <span className="hex-flyout-label">Sessions</span>
+                  <span className="hex-flyout-val">{hexFlyout.sessionIds.length}</span>
+                </div>
+              )}
+
+              {hexFlyout.uSv.avg != null && (
+                <div className="hex-flyout-section">
+                  <div className="hex-flyout-section-label">Dose Rate (µSv/h)</div>
+                  <div className="hex-flyout-stat-row">
+                    <div className="hex-flyout-stat">
+                      <span>avg</span><strong>{hexFlyout.uSv.avg.toFixed(3)}</strong>
+                    </div>
+                    <div className="hex-flyout-stat">
+                      <span>min</span><strong>{hexFlyout.uSv.min.toFixed(3)}</strong>
+                    </div>
+                    <div className="hex-flyout-stat">
+                      <span>max</span><strong>{hexFlyout.uSv.max.toFixed(3)}</strong>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {hexFlyout.cps.avg != null && (
+                <div className="hex-flyout-section">
+                  <div className="hex-flyout-section-label">CPS</div>
+                  <div className="hex-flyout-stat-row">
+                    <div className="hex-flyout-stat">
+                      <span>avg</span><strong>{hexFlyout.cps.avg.toFixed(1)}</strong>
+                    </div>
+                    <div className="hex-flyout-stat">
+                      <span>min</span><strong>{hexFlyout.cps.min.toFixed(1)}</strong>
+                    </div>
+                    <div className="hex-flyout-stat">
+                      <span>max</span><strong>{hexFlyout.cps.max.toFixed(1)}</strong>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {hexFlyout.spd.avg != null && (
+                <div className="hex-flyout-section">
+                  <div className="hex-flyout-section-label">Speed (km/h)</div>
+                  <div className="hex-flyout-stat-row">
+                    <div className="hex-flyout-stat">
+                      <span>avg</span><strong>{hexFlyout.spd.avg.toFixed(1)}</strong>
+                    </div>
+                    <div className="hex-flyout-stat">
+                      <span>min</span><strong>{hexFlyout.spd.min.toFixed(1)}</strong>
+                    </div>
+                    <div className="hex-flyout-stat">
+                      <span>max</span><strong>{hexFlyout.spd.max.toFixed(1)}</strong>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {hexFlyout.alt.avg != null && (
+                <div className="hex-flyout-section">
+                  <div className="hex-flyout-section-label">Altitude (m)</div>
+                  <div className="hex-flyout-stat-row">
+                    <div className="hex-flyout-stat">
+                      <span>avg</span><strong>{hexFlyout.alt.avg.toFixed(0)}</strong>
+                    </div>
+                    <div className="hex-flyout-stat">
+                      <span>min</span><strong>{hexFlyout.alt.min.toFixed(0)}</strong>
+                    </div>
+                    <div className="hex-flyout-stat">
+                      <span>max</span><strong>{hexFlyout.alt.max.toFixed(0)}</strong>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {hexFlyout.sessionIds.length > 0 && (
+                <div className="hex-flyout-section">
+                  <div className="hex-flyout-section-label">Session IDs</div>
+                  <div className="hex-flyout-sessions">{hexFlyout.sessionIds.join(', ')}</div>
+                </div>
+              )}
+            </div>
+          </div>
         )}
       </main>
       </>)}
