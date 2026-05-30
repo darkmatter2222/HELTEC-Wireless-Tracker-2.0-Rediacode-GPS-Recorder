@@ -260,6 +260,342 @@ function HexLayer({ points, field, binZoom }) {
   return null;
 }
 
+// ============================================================
+// CANVAS TRACK LAYER
+// Replaces per-segment <Polyline> React elements. All track
+// segments for all sessions are drawn onto one raw <canvas>
+// that overlays the Leaflet map.  Zero DOM nodes per point.
+// Consecutive segments sharing the same color are batched into
+// one beginPath/stroke call.  GPS gaps (gapBefore) break the
+// path so no phantom line is drawn across missing track data.
+// ============================================================
+function CanvasTrackLayer({ filteredTraces, colorChannel, ranges, weight, opacity = 0.9 }) {
+  const map = useMap();
+  const propsRef  = useRef({});
+  const drawFnRef = useRef(null);
+
+  // Keep propsRef always current so the draw closure reads fresh values.
+  propsRef.current = { filteredTraces, colorChannel, ranges, weight, opacity };
+
+  // Re-draw whenever any rendering-relevant prop changes.
+  useEffect(() => { drawFnRef.current?.(); },
+    [filteredTraces, colorChannel, ranges, weight, opacity]); // eslint-disable-line
+
+  // Mount the canvas once per map instance; attach Leaflet event listeners.
+  useEffect(() => {
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:400;background:transparent;';
+    map.getContainer().appendChild(canvas);
+
+    function draw() {
+      const { filteredTraces, colorChannel, ranges, weight, opacity } = propsRef.current;
+      const size = map.getSize();
+      canvas.width  = size.x;
+      canvas.height = size.y;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, size.x, size.y);
+      ctx.lineWidth   = weight;
+      ctx.lineJoin    = 'round';
+      ctx.lineCap     = 'round';
+      ctx.globalAlpha = opacity;
+
+      for (const t of filteredTraces) {
+        if (!t.filtered || t.filtered.length < 2) continue;
+        let currentColor = null;
+        let pathOpen     = false;
+        let prevPt       = null;
+
+        for (let i = 0; i < t.filtered.length; i++) {
+          const p = t.filtered[i];
+          if (p.lat == null || p.lng == null) {
+            if (pathOpen) { ctx.stroke(); pathOpen = false; }
+            continue;
+          }
+          const pt = map.latLngToContainerPoint([p.lat, p.lng]);
+
+          // GPS gap or first point: close current path, start fresh.
+          if (i === 0 || p.gapBefore) {
+            if (pathOpen) { ctx.stroke(); pathOpen = false; }
+            prevPt = pt;
+            currentColor = getPointColor(p, colorChannel, t.idx, ranges);
+            continue;
+          }
+
+          const color = getPointColor(p, colorChannel, t.idx, ranges);
+
+          // Color changed: close current path, start new one from prevPt.
+          if (!pathOpen || color !== currentColor) {
+            if (pathOpen) ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(prevPt.x, prevPt.y);
+            ctx.strokeStyle = color;
+            currentColor    = color;
+            pathOpen        = true;
+          }
+
+          ctx.lineTo(pt.x, pt.y);
+          prevPt = pt;
+        }
+
+        if (pathOpen) ctx.stroke();
+      }
+
+      ctx.globalAlpha = 1;
+    }
+
+    drawFnRef.current = draw;
+    map.on('move zoom viewreset resize', draw);
+    draw();
+
+    return () => {
+      map.off('move zoom viewreset resize', draw);
+      drawFnRef.current = null;
+      canvas.remove();
+    };
+  }, [map]); // eslint-disable-line
+
+  return null;
+}
+
+// ============================================================
+// CANVAS DOTS LAYER
+// Replaces per-point <CircleMarker> React elements.
+// Viewport-culls points outside the map bounds, then batches
+// all dots sharing the same fill color into a single
+// beginPath/fill call (≤ ~256 fill() calls regardless of N).
+// ============================================================
+function CanvasDotsLayer({ filteredTraces, colorChannel, ranges, radius, opacity = 0.9 }) {
+  const map = useMap();
+  const propsRef  = useRef({});
+  const drawFnRef = useRef(null);
+
+  propsRef.current = { filteredTraces, colorChannel, ranges, radius, opacity };
+
+  useEffect(() => { drawFnRef.current?.(); },
+    [filteredTraces, colorChannel, ranges, radius, opacity]); // eslint-disable-line
+
+  useEffect(() => {
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:401;background:transparent;';
+    map.getContainer().appendChild(canvas);
+
+    function draw() {
+      const { filteredTraces, colorChannel, ranges, radius, opacity } = propsRef.current;
+      const size = map.getSize();
+      canvas.width  = size.x;
+      canvas.height = size.y;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, size.x, size.y);
+
+      const bounds = map.getBounds().pad(0.05);
+
+      // Group projected points by color for batch-fill.
+      const byColor = new Map();
+      for (const t of filteredTraces) {
+        if (!t.filtered) continue;
+        for (const p of t.filtered) {
+          if (p.lat == null || p.lng == null) continue;
+          if (!bounds.contains([p.lat, p.lng])) continue; // viewport cull
+          const color = getPointColor(p, colorChannel, t.idx, ranges);
+          if (!byColor.has(color)) byColor.set(color, []);
+          byColor.get(color).push(map.latLngToContainerPoint([p.lat, p.lng]));
+        }
+      }
+
+      ctx.globalAlpha = opacity;
+      for (const [color, pts] of byColor) {
+        ctx.beginPath();
+        for (const pt of pts) {
+          // moveTo before arc avoids implicit lineTo connecting circles.
+          ctx.moveTo(pt.x + radius, pt.y);
+          ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+        }
+        ctx.fillStyle = color;
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+    }
+
+    drawFnRef.current = draw;
+    map.on('move zoom viewreset resize', draw);
+    draw();
+
+    return () => {
+      map.off('move zoom viewreset resize', draw);
+      drawFnRef.current = null;
+      canvas.remove();
+    };
+  }, [map]); // eslint-disable-line
+
+  return null;
+}
+
+// ============================================================
+// CANVAS ARROWS LAYER
+// Replaces the Arrows-mode SVG elements (dots + arrow heads +
+// optional track underlay).  Everything is drawn on one canvas:
+// 1. Optional track underlay (same batched-color path as track layer)
+// 2. All dots batched by color (same technique as dots layer)
+// 3. Every-N arrow heads drawn as canvas triangles with rotation
+// ============================================================
+function CanvasArrowsLayer({
+  filteredTraces, colorChannel, ranges,
+  dotRadius, dotOpacity, arrowEvery,
+  showTrack, trackWeight, trackOpacity,
+}) {
+  const map = useMap();
+  const propsRef  = useRef({});
+  const drawFnRef = useRef(null);
+
+  propsRef.current = {
+    filteredTraces, colorChannel, ranges,
+    dotRadius, dotOpacity, arrowEvery,
+    showTrack, trackWeight, trackOpacity,
+  };
+
+  useEffect(() => { drawFnRef.current?.(); },
+    [filteredTraces, colorChannel, ranges, dotRadius, dotOpacity, // eslint-disable-line
+     arrowEvery, showTrack, trackWeight, trackOpacity]);           // eslint-disable-line
+
+  useEffect(() => {
+    const canvas = document.createElement('canvas');
+    canvas.style.cssText = 'position:absolute;top:0;left:0;pointer-events:none;z-index:400;background:transparent;';
+    map.getContainer().appendChild(canvas);
+
+    function draw() {
+      const {
+        filteredTraces, colorChannel, ranges,
+        dotRadius, dotOpacity, arrowEvery,
+        showTrack, trackWeight, trackOpacity,
+      } = propsRef.current;
+
+      const size = map.getSize();
+      canvas.width  = size.x;
+      canvas.height = size.y;
+      const ctx = canvas.getContext('2d');
+      ctx.clearRect(0, 0, size.x, size.y);
+
+      const bounds = map.getBounds().pad(0.05);
+
+      // 1. Optional track underlay
+      if (showTrack) {
+        ctx.lineJoin    = 'round';
+        ctx.lineCap     = 'round';
+        ctx.globalAlpha = trackOpacity;
+
+        for (const t of filteredTraces) {
+          if (!t.filtered || t.filtered.length < 2) continue;
+          let currentColor = null;
+          let pathOpen     = false;
+          let prevPt       = null;
+
+          for (let i = 0; i < t.filtered.length; i++) {
+            const p = t.filtered[i];
+            if (p.lat == null || p.lng == null) {
+              if (pathOpen) { ctx.stroke(); pathOpen = false; }
+              continue;
+            }
+            const pt = map.latLngToContainerPoint([p.lat, p.lng]);
+
+            if (i === 0 || p.gapBefore) {
+              if (pathOpen) { ctx.stroke(); pathOpen = false; }
+              prevPt = pt;
+              currentColor = getPointColor(p, colorChannel, t.idx, ranges);
+              continue;
+            }
+
+            const color = getPointColor(p, colorChannel, t.idx, ranges);
+            if (!pathOpen || color !== currentColor) {
+              if (pathOpen) ctx.stroke();
+              ctx.beginPath();
+              ctx.moveTo(prevPt.x, prevPt.y);
+              ctx.strokeStyle = color;
+              ctx.lineWidth   = trackWeight;
+              currentColor    = color;
+              pathOpen        = true;
+            }
+            ctx.lineTo(pt.x, pt.y);
+            prevPt = pt;
+          }
+          if (pathOpen) ctx.stroke();
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      // 2. Dots — viewport-culled, batched by color
+      const byColor = new Map();
+      for (const t of filteredTraces) {
+        if (!t.filtered) continue;
+        for (const p of t.filtered) {
+          if (p.lat == null || p.lng == null) continue;
+          if (!bounds.contains([p.lat, p.lng])) continue;
+          const color = getPointColor(p, colorChannel, t.idx, ranges);
+          if (!byColor.has(color)) byColor.set(color, []);
+          byColor.get(color).push(map.latLngToContainerPoint([p.lat, p.lng]));
+        }
+      }
+      ctx.globalAlpha = dotOpacity;
+      for (const [color, pts] of byColor) {
+        ctx.beginPath();
+        for (const pt of pts) {
+          ctx.moveTo(pt.x + dotRadius, pt.y);
+          ctx.arc(pt.x, pt.y, dotRadius, 0, Math.PI * 2);
+        }
+        ctx.fillStyle = color;
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
+      // 3. Arrow heads — canvas triangles (same shape as arrowIcon SVG polygon)
+      //    Original SVG polygon points "10,2 14,16 10,13 6,16" in 20×20 viewBox.
+      //    Normalised to center=(0,0), unit circumradius=8:
+      //    tip=(0,-6.4), right=(3.2,4.8), notch=(0,2.4), left=(-3.2,4.8)
+      ctx.globalAlpha = 1;
+      for (const t of filteredTraces) {
+        if (!t.filtered) continue;
+        for (let i = 0; i < t.filtered.length; i++) {
+          if (i % arrowEvery !== 0) continue;
+          const p = t.filtered[i];
+          if (p.lat == null || p.lng == null || p.brg == null) continue;
+          if (!bounds.contains([p.lat, p.lng])) continue;
+
+          const pt    = map.latLngToContainerPoint([p.lat, p.lng]);
+          const color = getPointColor(p, colorChannel, t.idx, ranges);
+          const s     = (8 + Math.min((p.spd ?? 0) / 10, 5)) / 8; // size scale
+
+          ctx.save();
+          ctx.translate(pt.x, pt.y);
+          ctx.rotate((p.brg * Math.PI) / 180);
+          ctx.beginPath();
+          ctx.moveTo(0,        -6.4 * s);
+          ctx.lineTo( 3.2 * s,  4.8 * s);
+          ctx.lineTo(0,          2.4 * s);
+          ctx.lineTo(-3.2 * s,  4.8 * s);
+          ctx.closePath();
+          ctx.fillStyle   = color;
+          ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+          ctx.lineWidth   = 0.8;
+          ctx.fill();
+          ctx.stroke();
+          ctx.restore();
+        }
+      }
+    }
+
+    drawFnRef.current = draw;
+    map.on('move zoom viewreset resize', draw);
+    draw();
+
+    return () => {
+      map.off('move zoom viewreset resize', draw);
+      drawFnRef.current = null;
+      canvas.remove();
+    };
+  }, [map]); // eslint-disable-line
+
+  return null;
+}
+
 // Draws a rubber-band rectangle while the user drags on the map.
 // `active=true` disables map panning and enables crosshair interaction.
 // Calls `onBboxDrawn({ minLat, maxLat, minLng, maxLng })` on mouse-up.
@@ -432,7 +768,7 @@ export default function App() {
   const [tileIdx, setTileIdx]           = useState(1);       // default CartoDB Dark
   const [trackWeight, setTrackWeight]   = useState(4);
   const [pointRadius, setPointRadius]   = useState(5);
-  const [showTooltips, setShowTooltips] = useState(true);
+  const [showTooltips, setShowTooltips] = useState(false);
   const [threeDMode,   setThreeDMode]   = useState(false);
   const [arrowEvery, setArrowEvery]         = useState(5);    // show 1-in-N arrows
   const [hexBinZoom, setHexBinZoom]         = useState(6);    // bin resolution (default = initial map zoom)
@@ -528,7 +864,11 @@ export default function App() {
       next.add(id);
       if (!rowsBySession[id]) {
         try {
-          const raw = await fetchSessionRows(id);
+          const session = sessions.find(s => s.sessionId === id);
+          const raw = await fetchSessionRows(id, {
+            totalHint:  session?.samples,
+            lastTsHint: session?.lastTsMs,
+          });
           setRows(prev => ({ ...prev, [id]: compactRows(raw) }));
         } catch (e) {
           setError(String(e));
@@ -537,16 +877,16 @@ export default function App() {
     }
     setSelected(next);
     setFitTrigger(t => t + 1);
-  }, [selected, rowsBySession]);
+  }, [selected, rowsBySession, sessions]);
 
   function selectAll() {
     const next = new Set(sessions.map(s => s.sessionId));
     setSelected(next);
-    for (const id of next) {
-      if (!rowsBySession[id]) {
-        fetchSessionRows(id).then(raw => {
-          setRows(prev => ({ ...prev, [id]: compactRows(raw) }));
-        }).catch(e => setError(String(e)));
+    for (const s of sessions) {
+      if (!rowsBySession[s.sessionId]) {
+        fetchSessionRows(s.sessionId, { totalHint: s.samples, lastTsHint: s.lastTsMs })
+          .then(raw => setRows(prev => ({ ...prev, [s.sessionId]: compactRows(raw) })))
+          .catch(e => setError(String(e)));
       }
     }
   }
@@ -776,7 +1116,11 @@ export default function App() {
   const tile = TILES[tileIdx];
 
   // ---- color fn shortcut
-  const ranges = { doseMin, doseMax, cpsMin, cpsMax, spdMin, spdMax, altMin, altMax, hdopMin, hdopMax, accMin, accMax };
+  // Memoized so canvas layers only redraw when a scale value actually changes,
+  // not on every unrelated render (e.g. sidebar resize, tab switch).
+  const ranges = useMemo(() => ({
+    doseMin, doseMax, cpsMin, cpsMax, spdMin, spdMax, altMin, altMax, hdopMin, hdopMax, accMin, accMax,
+  }), [doseMin, doseMax, cpsMin, cpsMax, spdMin, spdMax, altMin, altMax, hdopMin, hdopMax, accMin, accMax]); // eslint-disable-line
   function getColor(p, traceIdx) {
     return getPointColor(p, colorChannel, traceIdx, ranges);
   }
@@ -912,7 +1256,7 @@ export default function App() {
                     const dur = (firstOk && lastOk) ? fmtDuration(s.lastTsMs - s.firstTsMs) : null;
                     const rows = rowsBySession[s.sessionId];
                     const maxDoseInSession = rows && rows.length
-                      ? Math.max(...rows.map(r => r.uSv ?? 0)).toFixed(3)
+                      ? rows.reduce((m, r) => Math.max(m, r.uSv ?? 0), 0).toFixed(3)
                       : null;
                     // Area filter indicator: true = loaded + has pts in area, false = loaded + not in area, null = not loaded
                     const inArea = areaBbox
@@ -1245,104 +1589,54 @@ export default function App() {
               : null
           )}
 
-          {/* Track mode */}
-          {mapMode === 'Track' && areaFilteredTraces.map(t => {
-            if (!t.filtered || t.filtered.length === 0) return null;
-            const segs = [];
-            for (let i = 1; i < t.filtered.length; i++) {
-              const a = t.filtered[i - 1], b = t.filtered[i];
-              // GPS gap: firmware logged GPS_LOST between a and b. Don't draw
-              // a phantom straight line across the missing track segment.
-              if (b.gapBefore) continue;
-              segs.push(
-                <Polyline key={`${t.id}-${i}`}
-                  positions={[[a.lat, a.lng], [b.lat, b.lng]]}
-                  pathOptions={{
-                    color: getColor(b, t.idx),
-                    weight: trackWeight,
-                    opacity: 0.9,
-                  }}
-                />
-              );
-            }
-            return <React.Fragment key={t.id}>{segs}</React.Fragment>;
-          })}
+          {/* Track mode — canvas polyline (no per-segment DOM nodes) */}
+          {mapMode === 'Track' && (
+            <CanvasTrackLayer
+              filteredTraces={areaFilteredTraces}
+              colorChannel={colorChannel}
+              ranges={ranges}
+              weight={trackWeight}
+            />
+          )}
 
-          {/* Track mode — optional dot overlay */}
-          {mapMode === 'Track' && trackShowDots && areaFilteredTraces.map(t => (
-            <React.Fragment key={`${t.id}-tdots`}>
-              {t.filtered.map((p, i) => (
-                <CircleMarker key={i} center={[p.lat, p.lng]} radius={pointRadius}
-                  pathOptions={{
-                    color: 'transparent',
-                    fillColor: getColor(p, t.idx),
-                    fillOpacity: trackDotOpacity,
-                    weight: 0,
-                  }} />
-              ))}
-            </React.Fragment>
-          ))}
+          {/* Track mode — optional dot overlay — canvas */}
+          {mapMode === 'Track' && trackShowDots && (
+            <CanvasDotsLayer
+              filteredTraces={areaFilteredTraces}
+              colorChannel={colorChannel}
+              ranges={ranges}
+              radius={pointRadius}
+              opacity={trackDotOpacity}
+            />
+          )}
 
-          {/* Dots mode */}
-          {mapMode === 'Dots' && areaFilteredTraces.map(t => (
-            <React.Fragment key={t.id}>
-              {t.filtered.map((p, i) => (
-                <CircleMarker key={i} center={[p.lat, p.lng]} radius={pointRadius}
-                  pathOptions={{
-                    color: getColor(p, t.idx),
-                    fillColor: getColor(p, t.idx),
-                    fillOpacity: 0.9,
-                    weight: 1,
-                  }}>
-                  {showTooltips && <SampleTooltip p={p} sessionId={t.id} nanoMode={nanoMode} />}
-                </CircleMarker>
-              ))}
-            </React.Fragment>
-          ))}
+          {/* Dots mode — canvas (viewport-culled, color-batched) */}
+          {mapMode === 'Dots' && (
+            <CanvasDotsLayer
+              filteredTraces={areaFilteredTraces}
+              colorChannel={colorChannel}
+              ranges={ranges}
+              radius={pointRadius}
+              opacity={0.9}
+            />
+          )}
 
-          {/* Arrows mode — optional track underlay */}
-          {mapMode === 'Arrows' && arrowShowTrack && areaFilteredTraces.map(t => {
-            if (!t.filtered || t.filtered.length === 0) return null;
-            const segs = [];
-            for (let i = 1; i < t.filtered.length; i++) {
-              const a = t.filtered[i - 1], b = t.filtered[i];
-              if (b.gapBefore) continue;
-              segs.push(
-                <Polyline key={`${t.id}-${i}`}
-                  positions={[[a.lat, a.lng], [b.lat, b.lng]]}
-                  pathOptions={{
-                    color: getColor(b, t.idx),
-                    weight: trackWeight,
-                    opacity: arrowTrackOpacity,
-                  }}
-                />
-              );
-            }
-            return <React.Fragment key={`${t.id}-atrack`}>{segs}</React.Fragment>;
-          })}
+          {/* Arrows mode — canvas (track underlay + dots + arrow heads) */}
+          {mapMode === 'Arrows' && (
+            <CanvasArrowsLayer
+              filteredTraces={areaFilteredTraces}
+              colorChannel={colorChannel}
+              ranges={ranges}
+              dotRadius={pointRadius - 1}
+              dotOpacity={arrowDotOpacity}
+              arrowEvery={arrowEvery}
+              showTrack={arrowShowTrack}
+              trackWeight={trackWeight}
+              trackOpacity={arrowTrackOpacity}
+            />
+          )}
 
-          {/* Arrows mode — shows dot + bearing arrow */}
-          {mapMode === 'Arrows' && areaFilteredTraces.map(t => (
-            <React.Fragment key={t.id}>
-              {t.filtered.map((p, i) => {
-                const col = getColor(p, t.idx);
-                return (
-                  <React.Fragment key={i}>
-                    <CircleMarker center={[p.lat, p.lng]} radius={pointRadius - 1}
-                      pathOptions={{ color: col, fillColor: col, fillOpacity: arrowDotOpacity, weight: 0 }}>
-                      {showTooltips && <SampleTooltip p={p} sessionId={t.id} nanoMode={nanoMode} />}
-                    </CircleMarker>
-                    {/* Arrow every N points, only when bearing is available */}
-                    {i % arrowEvery === 0 && p.brg != null && (
-                      <ArrowMarker key={`arrow-${i}`} p={p} color={col} size={16 + Math.min((p.spd ?? 0) / 10, 10)} />
-                    )}
-                  </React.Fragment>
-                );
-              })}
-            </React.Fragment>
-          ))}
-
-          {/* Track + Dots overlay: end markers */}
+          {/* End-of-track session ID markers — kept as SVG (interactive, 1 per session) */}
           {(mapMode === 'Track' || mapMode === 'Dots') && areaFilteredTraces.map(t => {
             if (!t.filtered || t.filtered.length === 0) return null;
             const last = t.filtered[t.filtered.length - 1];

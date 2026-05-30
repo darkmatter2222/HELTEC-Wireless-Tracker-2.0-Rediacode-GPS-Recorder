@@ -8,6 +8,52 @@ export const API_BASE =
   import.meta.env.VITE_API_URL ||
   '/api';
 
+// ---- IndexedDB session-row cache -------------------------------------------
+// Cache key = sessionId + ":" + lastTsMs.  Auto-invalidates whenever the
+// session receives new uploads (lastTsMs advances).  Falls back silently if
+// IndexedDB is unavailable (private-browsing, quota exceeded, etc.).
+
+const IDB_DB    = 'vega-tracker-cache';
+const IDB_STORE = 'session-rows';
+const IDB_VER   = 1;
+
+let _idbPromise = null;
+function _openIdb() {
+  if (!_idbPromise) {
+    _idbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_DB, IDB_VER);
+      req.onupgradeneeded = e => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(IDB_STORE))
+          db.createObjectStore(IDB_STORE, { keyPath: 'k' });
+      };
+      req.onsuccess = e => resolve(e.target.result);
+      req.onerror   = e => reject(e.target.error);
+    });
+  }
+  return _idbPromise;
+}
+async function _idbGet(key) {
+  try {
+    const db = await _openIdb();
+    return new Promise(resolve => {
+      const req = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).get(key);
+      req.onsuccess = e => resolve(e.target.result?.v ?? null);
+      req.onerror   = ()  => resolve(null);
+    });
+  } catch { return null; }
+}
+async function _idbPut(key, value) {
+  try {
+    const db = await _openIdb();
+    return new Promise(resolve => {
+      const req = db.transaction(IDB_STORE, 'readwrite').objectStore(IDB_STORE).put({ k: key, v: value });
+      req.onsuccess = () => resolve();
+      req.onerror   = () => resolve();
+    });
+  } catch { /* ignore cache-write failures */ }
+}
+
 // ---- read ------------------------------------------------------------------
 
 export async function fetchSessions({ includeDeleted = false } = {}) {
@@ -18,23 +64,55 @@ export async function fetchSessions({ includeDeleted = false } = {}) {
   return r.json();
 }
 
-// Pull all rows for a session; the API pages at 5000/page so we walk it.
-export async function fetchSessionRows(sessionId, { pageSize = 5000 } = {}) {
-  let skip = 0;
-  const out = [];
-  for (;;) {
-    const r = await fetch(
-      `${API_BASE}/sessions/${encodeURIComponent(sessionId)}?limit=${pageSize}&skip=${skip}`
-    );
-    if (!r.ok) throw new Error(`session ${sessionId} ${r.status}`);
-    const j = await r.json();
-    if (!j.rows || j.rows.length === 0) break;
-    for (const row of j.rows) out.push(row);
-    if (j.rows.length < pageSize) break;
-    skip += j.rows.length;
-    if (skip > 200000) break; // safety cap
+// Pull all rows for a session.  Improvements over the original sequential loop:
+//   • IndexedDB cache: returns instantly on repeat loads (key = sessionId:lastTsMs).
+//   • Parallel fetch: when totalHint is provided all pages are fetched simultaneously
+//     via Promise.all, cutting a 14-round-trip sequential load to 1 round trip.
+//   • Falls back to sequential pagination when neither hint is available.
+export async function fetchSessionRows(sessionId, { pageSize = 5000, totalHint = null, lastTsHint = null } = {}) {
+  // Check cache first.  Key includes lastTsMs so stale entries are bypassed
+  // automatically when new data arrives (lastTsMs advances after each upload).
+  const cacheKey = lastTsHint ? `${sessionId}:${lastTsHint}` : null;
+  if (cacheKey) {
+    const cached = await _idbGet(cacheKey);
+    if (cached) return cached;
   }
-  return out;
+
+  let rows;
+
+  if (totalHint && totalHint > pageSize) {
+    // Parallel: fire all page requests at once, reassemble in order.
+    const numPages = Math.ceil(totalHint / pageSize);
+    const pages = await Promise.all(
+      Array.from({ length: numPages }, (_, i) =>
+        fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}?limit=${pageSize}&skip=${i * pageSize}`)
+          .then(r => r.ok ? r.json() : Promise.reject(new Error(`session ${sessionId} ${r.status}`)))
+          .then(j => j.rows || [])
+      )
+    );
+    rows = pages.flat();
+  } else {
+    // Sequential fallback (unknown count or single page).
+    let skip = 0;
+    rows = [];
+    for (;;) {
+      const r = await fetch(
+        `${API_BASE}/sessions/${encodeURIComponent(sessionId)}?limit=${pageSize}&skip=${skip}`
+      );
+      if (!r.ok) throw new Error(`session ${sessionId} ${r.status}`);
+      const j = await r.json();
+      if (!j.rows || j.rows.length === 0) break;
+      for (const row of j.rows) rows.push(row);
+      if (j.rows.length < pageSize) break;
+      skip += j.rows.length;
+      if (skip > 200000) break; // safety cap
+    }
+  }
+
+  // Persist to IndexedDB for subsequent page loads (fire-and-forget).
+  if (cacheKey) _idbPut(cacheKey, rows);
+
+  return rows;
 }
 
 /** Return the upload history for a session, newest first.
