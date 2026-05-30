@@ -2721,3 +2721,133 @@ canvas {
 }
 .live-hud-warn { color: #ef5350; font-size: 11px; font-weight: 400; }
 .live-hud-dose { color: var(--accent); }
+
+/* ============================================================
+   Hex Bin Flyout — right-side details panel (Hex map mode)
+   ============================================================ */
+
+.hex-flyout {
+  position: absolute;
+  top: 70px;
+  right: 16px;
+  width: 240px;
+  background: rgba(17, 20, 24, 0.97);
+  border: 1px solid var(--border2);
+  border-radius: 8px;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.65);
+  z-index: 800;
+  backdrop-filter: blur(10px);
+  overflow: hidden;
+}
+
+.hex-flyout-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px 8px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.hex-flyout-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.hex-flyout-close {
+  background: transparent;
+  border: none;
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.hex-flyout-close:hover { color: var(--text); }
+
+.hex-flyout-loc {
+  padding: 6px 14px;
+  font-size: 10px;
+  font-family: "Fira Mono", monospace;
+  color: var(--muted);
+  border-bottom: 1px solid var(--border);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.hex-flyout-body {
+  padding: 6px 0 8px;
+  max-height: calc(100vh - 220px);
+  overflow-y: auto;
+}
+
+.hex-flyout-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 3px 14px;
+  font-size: 12px;
+}
+
+.hex-flyout-label { color: var(--muted); }
+
+.hex-flyout-val {
+  color: var(--text);
+  font-family: "Fira Mono", monospace;
+}
+
+.hex-flyout-sessions {
+  font-size: 10px;
+  max-width: 145px;
+  text-align: right;
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+.hex-flyout-section {
+  padding: 7px 14px 4px;
+  border-top: 1px solid var(--border);
+  margin-top: 5px;
+}
+
+.hex-flyout-section-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.hex-flyout-stat-row {
+  display: flex;
+  gap: 5px;
+}
+
+.hex-flyout-stat {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 5px;
+  padding: 4px 4px 5px;
+}
+
+.hex-flyout-stat span {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  margin-bottom: 3px;
+}
+
+.hex-flyout-stat strong {
+  font-size: 12px;
+  font-family: "Fira Mono", monospace;
+  color: var(--accent);
+  font-weight: 600;
+}

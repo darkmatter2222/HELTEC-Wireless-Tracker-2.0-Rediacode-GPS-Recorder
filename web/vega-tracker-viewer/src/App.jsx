@@ -782,8 +782,12 @@ export default function App() {
                     const maxDoseInSession = rows && rows.length
                       ? Math.max(...rows.map(r => r.uSv ?? 0)).toFixed(3)
                       : null;
+                    // Area filter indicator: true = loaded + has pts in area, false = loaded + not in area, null = not loaded
+                    const inArea = areaBbox
+                      ? (sessionsInArea.has(s.sessionId) ? true : (rows ? false : null))
+                      : null;
                     return (
-                      <li key={s.sessionId} className={`session-item ${isSel ? 'sel' : ''}`}>
+                      <li key={s.sessionId} className={`session-item ${isSel ? 'sel' : ''}${inArea === false && areaBbox ? ' area-dim' : ''}`}>
                         <label className="session-label">
                           <input type="checkbox" checked={isSel} onChange={() => toggleSession(s.sessionId)} />
                           <span className="swatch" style={{ background: c }} />
@@ -797,6 +801,8 @@ export default function App() {
                             <span className="badge">{fmtBytes(s.sizeBytes)}</span>
                           )}
                           {maxDoseInSession && <span className="badge dose-badge">{maxDoseInSession} µSv/h max</span>}
+                          {inArea === true  && <span className="badge area-badge">in area</span>}
+                          {inArea === null && areaBbox && <span className="badge area-badge-unknown">?</span>}
                         </div>
                         {s.displayName && <div className="session-sub">{s.sessionId}</div>}
                         {s.trackerId && (
