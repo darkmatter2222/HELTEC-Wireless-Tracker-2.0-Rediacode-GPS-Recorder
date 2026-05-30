@@ -115,6 +115,20 @@ export async function fetchSessionRows(sessionId, { pageSize = 5000, totalHint =
   return rows;
 }
 
+/** Query MongoDB's 2dsphere index for all GPS samples inside a bounding box.
+ *  Returns { sessions: [{sessionId, meta, rows}], totalSamples } instantly —
+ *  the server does the spatial query, no per-session loading needed.
+ *  @param {{ minLat, maxLat, minLng, maxLng }} bbox */
+export async function fetchAreaSessions({ minLat, maxLat, minLng, maxLng }) {
+  const params = new URLSearchParams({
+    min_lat: minLat, max_lat: maxLat,
+    min_lng: minLng, max_lng: maxLng,
+  });
+  const r = await fetch(`${API_BASE}/sessions/area?${params}`);
+  if (!r.ok) throw new Error(`area-search ${r.status}`);
+  return r.json();
+}
+
 /** Return the upload history for a session, newest first.
  *  Each entry: receivedAt, payloadBytes, rowsSeen/Accepted/Rejected/Inserted/Duplicate,
  *  clientIp, username, firmware, trackerId, durationMs, httpStatus. */

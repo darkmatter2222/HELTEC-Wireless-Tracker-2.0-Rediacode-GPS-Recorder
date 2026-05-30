@@ -454,6 +454,103 @@ def list_sessions(limit: int = 200, include_deleted: bool = Query(default=False)
     return result
 
 
+@app.get("/sessions/area")
+def sessions_in_area(
+    min_lat: float = Query(..., description="South boundary (decimal degrees)"),
+    max_lat: float = Query(..., description="North boundary (decimal degrees)"),
+    min_lng: float = Query(..., description="West boundary (decimal degrees)"),
+    max_lng: float = Query(..., description="East boundary (decimal degrees)"),
+):
+    """Return all GPS samples inside a bounding box, grouped by session.
+
+    Uses the 2dsphere index on `loc` so this runs in sub-second time regardless
+    of total collection size.  Only returns samples that have a valid GPS fix
+    (loc field present); event rows without coordinates are excluded.
+
+    Response: { sessions: [{sessionId, meta, rows}], totalSamples }
+    Each row has the same fields as the /sessions/{id} endpoint so the viewer
+    can pass them straight through compactRows().
+    """
+    # GeoJSON polygon for the bbox.  For 2dsphere $geoWithin MongoDB picks the
+    # smaller interior automatically so winding order doesn't matter for small areas.
+    bbox_polygon = {
+        "type": "Polygon",
+        "coordinates": [[
+            [min_lng, min_lat],
+            [min_lng, max_lat],
+            [max_lng, max_lat],
+            [max_lng, min_lat],
+            [min_lng, min_lat],
+        ]],
+    }
+
+    # Only pull the fields compactRows() and the viewer need — keeps the
+    # response small and the 2dsphere index hot.
+    projection = {
+        "_id": 0,
+        "sessionId": 1,
+        "timestampMs": 1,
+        "latitude": 1,
+        "longitude": 1,
+        "uSvPerHour": 1,
+        "cps": 1,
+        "speedKph": 1,
+        "bearingDeg": 1,
+        "altitudeM": 1,
+        "hdop": 1,
+        "accuracyM": 1,
+    }
+
+    cursor = app.state.samples.find(
+        {"loc": {"$geoWithin": {"$geometry": bbox_polygon}}},
+        projection=projection,
+        sort=[("sessionId", 1), ("timestampMs", 1)],
+    )
+
+    # Group rows by sessionId.
+    by_session: dict[str, list] = {}
+    total = 0
+    for doc in cursor:
+        sid = doc.get("sessionId", "")
+        if sid not in by_session:
+            by_session[sid] = []
+        by_session[sid].append(doc)
+        total += 1
+
+    if not by_session:
+        return {"sessions": [], "totalSamples": 0,
+                "bbox": {"minLat": min_lat, "maxLat": max_lat,
+                         "minLng": min_lng, "maxLng": max_lng}}
+
+    # Fetch session metadata for every matched session in one query.
+    session_ids = list(by_session.keys())
+    session_metas: dict[str, dict] = {}
+    for sm in app.state.sessions.find(
+        {"sessionId": {"$in": session_ids}},
+        projection={"_id": 0},
+    ):
+        sm_id = sm.get("sessionId")
+        if sm_id:
+            session_metas[sm_id] = sm
+
+    # Build response, ordered by earliest sample in each session.
+    result_sessions = []
+    for sid, rows in by_session.items():
+        result_sessions.append({
+            "sessionId": sid,
+            "meta": session_metas.get(sid, {"sessionId": sid}),
+            "rows": rows,
+        })
+    result_sessions.sort(key=lambda x: x["rows"][0]["timestampMs"] if x["rows"] else 0)
+
+    return {
+        "sessions": result_sessions,
+        "totalSamples": total,
+        "bbox": {"minLat": min_lat, "maxLat": max_lat,
+                 "minLng": min_lng, "maxLng": max_lng},
+    }
+
+
 @app.get("/sessions/{session_id}")
 def session_detail(session_id: str, limit: int = 5000, skip: int = 0):
     """Return raw samples for a session (paged).  Default page size raised to

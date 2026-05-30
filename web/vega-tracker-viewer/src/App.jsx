@@ -4,7 +4,7 @@ import {
   Tooltip, useMap, useMapEvents, Marker,
 } from 'react-leaflet';
 import L from 'leaflet';
-import { fetchSessions, fetchSessionRows } from './api.js';
+import { fetchSessions, fetchSessionRows, fetchAreaSessions } from './api.js';
 import {
   doseColor, cpsColor, speedColor, altColor, hdopColor, accColor,
   sessionColor, fmtTs, fmtDose,
@@ -870,18 +870,20 @@ export default function App() {
   // Area bounding-box selection
   const [areaBboxActive, setAreaBboxActive] = useState(false);
   const [areaBbox, setAreaBbox] = useState(null); // { minLat, maxLat, minLng, maxLng } | null
+  const [areaData, setAreaData] = useState(null);    // API result: { sessions, totalSamples }
+  const [areaLoading, setAreaLoading] = useState(false);
+
   const handleBboxDrawn = useCallback((bbox) => {
     setAreaBbox(bbox);
     setAreaBboxActive(false);
-    // Load ALL sessions so the bbox can scan every file, not just selected ones.
-    for (const s of sessions) {
-      if (!rowsBySession[s.sessionId]) {
-        fetchSessionRows(s.sessionId, { totalHint: s.samples, lastTsHint: s.lastTsMs })
-          .then(raw => setRows(prev => ({ ...prev, [s.sessionId]: compactRows(raw) })))
-          .catch(e => setError(String(e)));
-      }
-    }
-  }, [sessions, rowsBySession]);
+    setAreaData(null);
+    setAreaLoading(true);
+    // One server-side geospatial query using MongoDB's 2dsphere index.
+    // Returns only the matching points — no per-session bulk loading needed.
+    fetchAreaSessions(bbox)
+      .then(data => { setAreaData(data); setAreaLoading(false); })
+      .catch(e => { setError(String(e)); setAreaLoading(false); });
+  }, []);   // fetchAreaSessions is a module-level function, no deps needed
 
   function startResize(e) {
     e.preventDefault();
@@ -1104,37 +1106,35 @@ export default function App() {
   }, [traces, tBounds, timeFrac, windowFrac]);
 
   // ---- area bbox filter
-  // When no bbox: return the normal time-window-filtered selected-sessions traces.
-  // When bbox is active: scan ALL sessions in rowsBySession (regardless of selection
-  // or time window) so the user sees every data point in that area.
+  // No bbox: return normal time-window filtered selected-session traces.
+  // Bbox active + loading: return [] (spinner shown in sidebar).
+  // Bbox active + loaded: convert server result (areaData) to the same trace
+  //   format as filteredTraces so all map renderers work unchanged.
   const areaFilteredTraces = useMemo(() => {
     if (!areaBbox) return filteredTraces;
-    const { minLat, maxLat, minLng, maxLng } = areaBbox;
-    const out = [];
-    for (let idx = 0; idx < sessions.length; idx++) {
-      const s = sessions[idx];
-      const rows = rowsBySession[s.sessionId];
-      if (!rows) continue; // not loaded yet — will re-run when fetch completes
-      const filtered = [];
-      let pendingGap = false;
-      for (const r of rows) {
-        if (r.event === 'GPS_LOST') { pendingGap = true; continue; }
-        if (r.event) continue;
-        if (r.lat == null || r.lng == null || (r.lat === 0 && r.lng === 0)) continue;
-        if (r.lat < minLat || r.lat > maxLat || r.lng < minLng || r.lng > maxLng) {
-          pendingGap = false;
-          continue;
-        }
-        const p = { ...r };
-        if (pendingGap) { p.gapBefore = true; pendingGap = false; }
-        filtered.push(p);
-      }
-      if (filtered.length > 0) {
-        out.push({ id: s.sessionId, color: sessionColor(idx), points: filtered, filtered, rows, meta: s, idx });
-      }
-    }
-    return out;
-  }, [areaBbox, filteredTraces, sessions, rowsBySession]);
+    if (!areaData) return [];  // still fetching from server
+    return areaData.sessions
+      .map(({ sessionId, rows: rawRows, meta }) => {
+        // rawRows have the same field names as the /sessions/{id} endpoint;
+        // compactRows() normalises them to the {ts, lat, lng, uSv, ...} shape.
+        const compact = compactRows(rawRows);
+        const points  = compact.filter(
+          r => r.lat != null && r.lng != null && !(r.lat === 0 && r.lng === 0) && !r.event
+        );
+        // Match the session's color index from the global sessions list.
+        const idx = sessions.findIndex(s => s.sessionId === sessionId);
+        return {
+          id:       sessionId,
+          color:    sessionColor(idx >= 0 ? idx : 0),
+          points,
+          filtered: points,
+          rows:     compact,
+          meta:     meta || { sessionId },
+          idx:      idx >= 0 ? idx : 0,
+        };
+      })
+      .filter(t => t.points.length > 0);
+  }, [areaBbox, areaData, filteredTraces, sessions]);
 
   // ---- set of session IDs that have at least one point inside the bbox
   const sessionsInArea = useMemo(() => {
@@ -1301,33 +1301,35 @@ export default function App() {
                 <button className="area-clear-btn" title="Clear area filter" onClick={() => {
                   setAreaBbox(null);
                   setAreaBboxActive(false);
+                  setAreaData(null);
+                  setAreaLoading(false);
                 }}>&#x2715;</button>
               )}
             </div>
 
             {/* ---- Area summary card ---- */}
             {areaBbox && (() => {
-              const ptCount    = areaFilteredTraces.reduce((s, t) => s + t.filtered.length, 0);
-              const sessCount  = areaFilteredTraces.filter(t => t.filtered.length > 0).length;
-              const totalSess  = sessions.length;
-              const loadedSess = sessions.filter(s => rowsBySession[s.sessionId]).length;
-              const stillLoading = loadedSess < totalSess;
+              const ptCount   = areaData ? areaData.totalSamples : 0;
+              const sessCount = areaFilteredTraces.length;
               return (
                 <div className="area-info-card">
-                  <div className="area-info-row">
-                    <span className="area-info-label">Points in area</span>
-                    <span className="area-info-value">{ptCount.toLocaleString()}</span>
-                  </div>
-                  <div className="area-info-row">
-                    <span className="area-info-label">Sessions with data</span>
-                    <span className="area-info-value">{sessCount}</span>
-                  </div>
-                  {stillLoading && (
-                    <div className="area-info-row" style={{ marginTop: 4 }}>
+                  {areaLoading ? (
+                    <div className="area-info-row">
                       <span className="area-info-label" style={{ color: '#ffc107' }}>
-                        ⏳ Scanning… {loadedSess}/{totalSess} loaded
+                        &#x23F3; Querying database…
                       </span>
                     </div>
+                  ) : (
+                    <>
+                      <div className="area-info-row">
+                        <span className="area-info-label">Points in area</span>
+                        <span className="area-info-value">{ptCount.toLocaleString()}</span>
+                      </div>
+                      <div className="area-info-row">
+                        <span className="area-info-label">Sessions with data</span>
+                        <span className="area-info-value">{sessCount}</span>
+                      </div>
+                    </>
                   )}
                   <div className="area-info-coords">
                     {areaBbox.minLat.toFixed(4)}&deg;,{areaBbox.minLng.toFixed(4)}&deg;
