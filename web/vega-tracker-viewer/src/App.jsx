@@ -629,7 +629,7 @@ function HexBinPanel({ data, onClose }) {
             </div>
           </Section>
           <Section label="Dose Rate over Time">
-            <canvas ref={doseRef} className="hex-chart" width={280} height={76} />
+            <canvas ref={doseRef} className="hex-chart" width={560} height={160} />
           </Section>
         </>)}
 
@@ -643,7 +643,7 @@ function HexBinPanel({ data, onClose }) {
             </div>
           </Section>
           <Section label="CPS over Time">
-            <canvas ref={cpsRef} className="hex-chart" width={280} height={68} />
+            <canvas ref={cpsRef} className="hex-chart" width={560} height={140} />
           </Section>
         </>)}
 
@@ -657,14 +657,14 @@ function HexBinPanel({ data, onClose }) {
             </div>
           </Section>
           <Section label="Dose/Count over Time">
-            <canvas ref={dpcRef} className="hex-chart" width={280} height={68} />
+            <canvas ref={dpcRef} className="hex-chart" width={560} height={140} />
           </Section>
         </>) }
 
         {/* ── Dose ↔ CPS correlation ── */}
         {uSv.avg != null && cps.avg != null && (
           <Section label="Dose ↔ CPS Correlation">
-            <canvas ref={corrRef} className="hex-scatter" width={280} height={140} />
+            <canvas ref={corrRef} className="hex-scatter" width={560} height={260} />
             <div className="hex-panel-chart-note">
               early → blue · late → amber · dashed line = linear fit
             </div>
@@ -681,7 +681,7 @@ function HexBinPanel({ data, onClose }) {
             </div>
           </Section>
           <Section label="Speed over Time">
-            <canvas ref={spdRef} className="hex-chart" width={280} height={60} />
+            <canvas ref={spdRef} className="hex-chart" width={560} height={120} />
           </Section>
         </>)}
 
@@ -695,11 +695,11 @@ function HexBinPanel({ data, onClose }) {
             </div>
           </Section>
           <Section label="Altitude over Time">
-            <canvas ref={altRef} className="hex-chart" width={280} height={60} />
+            <canvas ref={altRef} className="hex-chart" width={560} height={120} />
           </Section>
           {uSv.avg != null && (
             <Section label="Dose ↔ Altitude Correlation">
-              <canvas ref={altCorrRef} className="hex-scatter" width={280} height={120} />
+              <canvas ref={altCorrRef} className="hex-scatter" width={560} height={220} />
             </Section>
           )}
         </>)}

@@ -2825,7 +2825,7 @@ canvas {
 .hex-panel {
   position: fixed;
   top: 0; right: 0;
-  width: 320px;
+  width: 640px;
   height: 100vh;
   z-index: 1100;
   background: rgba(13, 16, 20, 0.98);
@@ -2839,7 +2839,7 @@ canvas {
 }
 
 @keyframes hexPanelIn {
-  from { transform: translateX(320px); opacity: 0; }
+  from { transform: translateX(640px); opacity: 0; }
   to   { transform: translateX(0);     opacity: 1; }
 }
 
