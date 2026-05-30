@@ -147,7 +147,7 @@ function MapZoomSync({ onZoomChange }) {
 // The pixel scale factor 2^(mapZoom-binZoom) converts bin pixel coords from
 // binZoom space to the current screen space on every draw, so geography is
 // always correct regardless of the zoom mismatch.
-function HexLayer({ traces, field, binZoom, onBinClick, ranges }) {
+function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges }) {
   const map = useMap();
 
   useEffect(() => {
@@ -166,8 +166,8 @@ function HexLayer({ traces, field, binZoom, onBinClick, ranges }) {
     const S3    = Math.sqrt(3);
 
     const canvas = document.createElement('canvas');
-    // Enable pointer events so clicks register when onBinClick is provided.
-    canvas.style.cssText = `position:absolute;top:0;left:0;pointer-events:${onBinClick ? 'auto' : 'none'};z-index:400;background:transparent;`;
+    // Enable pointer events when click or hover handlers are provided.
+    canvas.style.cssText = `position:absolute;top:0;left:0;pointer-events:${(onBinClick || onBinHover) ? 'auto' : 'none'};z-index:400;background:transparent;`;
     map.getContainer().appendChild(canvas);
 
     // Bin all points at binZoom resolution once per effect run.
@@ -334,18 +334,225 @@ function HexLayer({ traces, field, binZoom, onBinClick, ranges }) {
       });
     }
 
-    if (onBinClick) canvas.addEventListener('click', handleClick);
+    // Hover: resolve which bin the mouse is over, emit compact stats to onBinHover.
+    function resolveBin(e) {
+      const rect    = canvas.getBoundingClientRect();
+      const ex      = e.clientX - rect.left;
+      const ey      = e.clientY - rect.top;
+      const mapZoom = map.getZoom();
+      const scale   = Math.pow(2, mapZoom - binZoom);
+      const origin  = map.project(map.getBounds().getNorthWest(), mapZoom);
+      const gx = (ex + origin.x) / scale;
+      const gy = (ey + origin.y) / scale;
+      const q_f = ( 2 / 3 * gx) / HEX_R;
+      const r_f = (-1 / 3 * gx + S3 / 3 * gy) / HEX_R;
+      const s_f = -q_f - r_f;
+      let q = Math.round(q_f), r = Math.round(r_f), s = Math.round(s_f);
+      const dq = Math.abs(q - q_f), dr = Math.abs(r - r_f), ds = Math.abs(s - s_f);
+      if      (dq > dr && dq > ds) q = -r - s;
+      else if (dr > ds)            r = -q - s;
+      return bins.get(`${q},${r}`) || null;
+    }
+
+    function handleMouseMove(e) {
+      if (!onBinHover) return;
+      const b = resolveBin(e);
+      if (!b) { onBinHover(null); return; }
+      onBinHover({
+        clientX: e.clientX, clientY: e.clientY,
+        count: b.count,
+        sessionIds: [...b.sessionIds],
+        uSv: { avg: b.uSvN ? b.uSvSum / b.uSvN : null },
+        cps: { avg: b.cpsN ? b.cpsSum / b.cpsN : null },
+        spd: { avg: b.spdN ? b.spdSum / b.spdN : null },
+        alt: { avg: b.altN ? b.altSum / b.altN : null },
+        dpc: { avg: b.dpcN ? b.dpcSum / b.dpcN : null },
+      });
+    }
+    function handleMouseLeave() { if (onBinHover) onBinHover(null); }
+
+    if (onBinClick)  canvas.addEventListener('click',      handleClick);
+    if (onBinHover)  canvas.addEventListener('mousemove',  handleMouseMove);
+    if (onBinHover)  canvas.addEventListener('mouseleave', handleMouseLeave);
     map.on('move zoom viewreset', draw);
     draw();
 
     return () => {
       map.off('move zoom viewreset', draw);
-      if (onBinClick) canvas.removeEventListener('click', handleClick);
+      if (onBinClick)  canvas.removeEventListener('click',      handleClick);
+      if (onBinHover)  canvas.removeEventListener('mousemove',  handleMouseMove);
+      if (onBinHover)  canvas.removeEventListener('mouseleave', handleMouseLeave);
       canvas.remove();
     };
-  }, [traces, field, binZoom, map, onBinClick, ranges]); // eslint-disable-line
+  }, [traces, field, binZoom, map, onBinClick, onBinHover, ranges]); // eslint-disable-line
 
   return null;
+}
+
+// ============================================================
+// HEX BIN HOVER TOOLTIP — floating label on mouseover.
+// ============================================================
+
+/** Floating tooltip shown when hovering over a hex bin on the map. */
+function HexTooltip({ data }) {
+  if (!data) return null;
+  const { clientX, clientY, count, uSv, cps, spd, alt, dpc, sessionIds } = data;
+  return (
+    <div className="hex-tooltip" style={{ left: clientX + 14, top: clientY - 8 }}>
+      <div className="hex-tt-count">
+        {count.toLocaleString()} pts · {sessionIds.length} session{sessionIds.length !== 1 ? 's' : ''}
+      </div>
+      {uSv?.avg != null && <div className="hex-tt-row"><span>Dose rate</span><strong>{uSv.avg.toFixed(3)} µSv/h</strong></div>}
+      {cps?.avg != null && <div className="hex-tt-row"><span>CPS</span><strong>{cps.avg.toFixed(1)}</strong></div>}
+      {dpc?.avg != null && <div className="hex-tt-row"><span>Dose/Count</span><strong>{dpc.avg.toFixed(4)} µSv/c</strong></div>}
+      {spd?.avg != null && <div className="hex-tt-row"><span>Speed</span><strong>{spd.avg.toFixed(1)} km/h</strong></div>}
+      {alt?.avg != null && <div className="hex-tt-row"><span>Altitude</span><strong>{alt.avg.toFixed(0)} m</strong></div>}
+    </div>
+  );
+}
+
+// ============================================================
+// HEX CHART MODAL — full-screen interactive chart expansion.
+// Opened when user clicks ⤢ on a chart section in HexBinPanel.
+// Supports interactive hover crosshair + data point tooltip.
+// ============================================================
+
+function HexChartModal({ data, onClose }) {
+  const canvasRef = useRef(null);
+  const savedRef  = useRef(null); // saved base ImageData for hover restore
+
+  useEffect(() => {
+    if (!data || !canvasRef.current) return;
+    const c = canvasRef.current;
+    if (data.type === 'line') {
+      _drawHexLine(c, data.pts, data.getVal, data.strokeColor);
+    } else {
+      _drawHexScatter(c, data.pts, data.getX, data.getY, data.xLabel, data.yLabel);
+    }
+    savedRef.current = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+  }, [data]);
+
+  const handleMouseMove = useCallback((e) => {
+    if (!data || !canvasRef.current || !savedRef.current) return;
+    const c   = canvasRef.current;
+    const ctx = c.getContext('2d');
+    const rect = c.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (c.width  / rect.width);
+    const my = (e.clientY - rect.top)  * (c.height / rect.height);
+
+    ctx.putImageData(savedRef.current, 0, 0);
+
+    const pts = data.pts;
+    const W = c.width, H = c.height;
+
+    if (data.type === 'line') {
+      const PL = 40, PR = 6, PT = 6, PB = 18;
+      const cw = W - PL - PR, ch = H - PT - PB;
+      const valid = pts.filter(p => { const v = data.getVal(p); return v != null && isFinite(v); });
+      if (valid.length < 2) return;
+      const minT = valid[0].ts, maxT = valid[valid.length - 1].ts;
+      const vals = valid.map(p => data.getVal(p));
+      const minV = Math.min(...vals), maxV = Math.max(...vals);
+      const rangeV = maxV - minV || 0.001, rangeT = maxT - minT || 1;
+
+      const frac    = Math.max(0, Math.min(1, (mx - PL) / cw));
+      const targetT = minT + frac * rangeT;
+      let best = valid[0], bestDt = Infinity;
+      for (const p of valid) { const dt = Math.abs(p.ts - targetT); if (dt < bestDt) { best = p; bestDt = dt; } }
+      const pv = data.getVal(best);
+      const px = PL + (best.ts - minT) / rangeT * cw;
+      const py = PT + (1 - (pv - minV) / rangeV) * ch;
+
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(px, PT); ctx.lineTo(px, PT + ch); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(PL, py); ctx.lineTo(PL + cw, py); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2);
+      ctx.fillStyle = data.strokeColor; ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+
+      const d = new Date(best.ts);
+      const ts = `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+      const absV = Math.abs(pv);
+      const vs = absV < 0.1 ? pv.toFixed(4) : absV < 10 ? pv.toFixed(3) : pv.toFixed(1);
+      const tipText = `${ts}   ${vs}`;
+      ctx.font = 'bold 12px monospace';
+      const tw = ctx.measureText(tipText).width + 14, th = 22;
+      let tx = px + 10; if (tx + tw > W - 4) tx = px - tw - 10;
+      const ty = Math.max(PT + 2, py - th / 2);
+      ctx.fillStyle = 'rgba(10,14,20,0.9)'; ctx.fillRect(tx - 2, ty - 2, tw + 4, th + 4);
+      ctx.fillStyle = '#eee'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(tipText, tx + 5, ty + th / 2);
+      ctx.restore();
+
+    } else {
+      const PL = 40, PR = 6, PT = 8, PB = 20;
+      const cw = W - PL - PR, ch = H - PT - PB;
+      const valid = pts.filter(p => {
+        const xv = data.getX(p), yv = data.getY(p);
+        return xv != null && isFinite(xv) && yv != null && isFinite(yv);
+      });
+      if (!valid.length) return;
+      const xs = valid.map(data.getX), ys = valid.map(data.getY);
+      const minX = Math.min(...xs), maxX = Math.max(...xs);
+      const minY = Math.min(...ys), maxY = Math.max(...ys);
+      const rx = maxX - minX || 0.001, ry = maxY - minY || 0.001;
+
+      let bestPt = valid[0], bestDist = Infinity;
+      for (const p of valid) {
+        const px = PL + (data.getX(p) - minX) / rx * cw;
+        const py = PT + (1 - (data.getY(p) - minY) / ry) * ch;
+        const dist = Math.hypot(px - mx, py - my);
+        if (dist < bestDist) { bestPt = p; bestDist = dist; }
+      }
+      if (bestDist > 50) return;
+      const bx = PL + (data.getX(bestPt) - minX) / rx * cw;
+      const by = PT + (1 - (data.getY(bestPt) - minY) / ry) * ch;
+      const xv = data.getX(bestPt), yv = data.getY(bestPt);
+
+      ctx.save();
+      ctx.beginPath(); ctx.arc(bx, by, 6, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.strokeStyle = '#222'; ctx.lineWidth = 1; ctx.stroke();
+      const tipText = `${data.xLabel}: ${_hexFmtVal(xv)}   ${data.yLabel}: ${_hexFmtVal(yv)}`;
+      ctx.font = 'bold 12px monospace';
+      const tw = ctx.measureText(tipText).width + 14, th = 22;
+      let tx = bx + 10; if (tx + tw > W - 4) tx = bx - tw - 10;
+      const ty = Math.max(PT + 2, by - th / 2);
+      ctx.fillStyle = 'rgba(10,14,20,0.9)'; ctx.fillRect(tx - 2, ty - 2, tw + 4, th + 4);
+      ctx.fillStyle = '#eee'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(tipText, tx + 5, ty + th / 2);
+      ctx.restore();
+    }
+  }, [data]);
+
+  const handleMouseLeave = useCallback(() => {
+    if (!canvasRef.current || !savedRef.current) return;
+    canvasRef.current.getContext('2d').putImageData(savedRef.current, 0, 0);
+  }, []);
+
+  if (!data) return null;
+  const isScatter = data.type === 'scatter';
+  return (
+    <div className="hex-chart-modal-overlay" onClick={onClose}>
+      <div className="hex-chart-modal" onClick={e => e.stopPropagation()}>
+        <div className="hex-chart-modal-header">
+          <span className="hex-chart-modal-title">{data.label}</span>
+          <button className="hex-chart-modal-close" onClick={onClose}>✕</button>
+        </div>
+        <div className="hex-chart-modal-hint">Hover to inspect data points · click outside to close</div>
+        <canvas
+          ref={canvasRef}
+          className="hex-chart-modal-canvas"
+          width={isScatter ? 900 : 1100}
+          height={isScatter ? 560 : 380}
+          onMouseMove={handleMouseMove}
+          onMouseLeave={handleMouseLeave}
+        />
+      </div>
+    </div>
+  );
 }
 
 // ============================================================
@@ -549,6 +756,7 @@ function HexBinPanel({ data, onClose }) {
   const spdRef     = useRef(null), altRef   = useRef(null);
   const corrRef    = useRef(null), altCorrRef = useRef(null);
   const dpcRef     = useRef(null);
+  const [chartModal, setChartModal] = useState(null);
 
   useEffect(() => {
     if (!data?.points?.length) return;
@@ -585,14 +793,18 @@ function HexBinPanel({ data, onClose }) {
     </div>
   );
 
-  const Section = ({ label, children }) => (
+  const Section = ({ label, children, onExpand }) => (
     <div className="hex-panel-section">
-      <div className="hex-panel-section-label">{label}</div>
+      <div className="hex-panel-section-label">
+        {label}
+        {onExpand && <button className="hex-section-expand" onClick={onExpand} title="Expand chart">⤢</button>}
+      </div>
       {children}
     </div>
   );
 
   return (
+    <>
     <div className="hex-panel">
       <div className="hex-panel-header">
         <div>
@@ -628,7 +840,8 @@ function HexBinPanel({ data, onClose }) {
               <StatCard label="max" val={uSv.max.toFixed(3)} />
             </div>
           </Section>
-          <Section label="Dose Rate over Time">
+          <Section label="Dose Rate over Time"
+            onExpand={() => setChartModal({ type: 'line', label: 'Dose Rate over Time', pts: points, getVal: p => p.uSv, strokeColor: '#00E676' })}>
             <canvas ref={doseRef} className="hex-chart" width={560} height={160} />
           </Section>
         </>)}
@@ -642,7 +855,8 @@ function HexBinPanel({ data, onClose }) {
               <StatCard label="max" val={cps.max.toFixed(1)} />
             </div>
           </Section>
-          <Section label="CPS over Time">
+          <Section label="CPS over Time"
+            onExpand={() => setChartModal({ type: 'line', label: 'CPS over Time', pts: points, getVal: p => p.cps, strokeColor: '#4FC3F7' })}>
             <canvas ref={cpsRef} className="hex-chart" width={560} height={140} />
           </Section>
         </>)}
@@ -656,14 +870,16 @@ function HexBinPanel({ data, onClose }) {
               <StatCard label="max" val={dpc.max.toFixed(4)} />
             </div>
           </Section>
-          <Section label="Dose/Count over Time">
+          <Section label="Dose/Count over Time"
+            onExpand={() => setChartModal({ type: 'line', label: 'Dose/Count over Time', pts: points, getVal: p => p.dpc, strokeColor: '#E040FB' })}>
             <canvas ref={dpcRef} className="hex-chart" width={560} height={140} />
           </Section>
         </>) }
 
         {/* ── Dose ↔ CPS correlation ── */}
         {uSv.avg != null && cps.avg != null && (
-          <Section label="Dose ↔ CPS Correlation">
+          <Section label="Dose ↔ CPS Correlation"
+            onExpand={() => setChartModal({ type: 'scatter', label: 'Dose ↔ CPS Correlation', pts: points, getX: p => p.cps, getY: p => p.uSv, xLabel: 'CPS', yLabel: 'µSv/h' })}>
             <canvas ref={corrRef} className="hex-scatter" width={560} height={260} />
             <div className="hex-panel-chart-note">
               early → blue · late → amber · dashed line = linear fit
@@ -680,7 +896,8 @@ function HexBinPanel({ data, onClose }) {
               <StatCard label="max" val={spd.max.toFixed(1)} />
             </div>
           </Section>
-          <Section label="Speed over Time">
+          <Section label="Speed over Time"
+            onExpand={() => setChartModal({ type: 'line', label: 'Speed over Time', pts: points, getVal: p => p.spd, strokeColor: '#FFB74D' })}>
             <canvas ref={spdRef} className="hex-chart" width={560} height={120} />
           </Section>
         </>)}
@@ -694,11 +911,13 @@ function HexBinPanel({ data, onClose }) {
               <StatCard label="max" val={alt.max.toFixed(0)} />
             </div>
           </Section>
-          <Section label="Altitude over Time">
+          <Section label="Altitude over Time"
+            onExpand={() => setChartModal({ type: 'line', label: 'Altitude over Time', pts: points, getVal: p => p.alt, strokeColor: '#CE93D8' })}>
             <canvas ref={altRef} className="hex-chart" width={560} height={120} />
           </Section>
           {uSv.avg != null && (
-            <Section label="Dose ↔ Altitude Correlation">
+            <Section label="Dose ↔ Altitude Correlation"
+              onExpand={() => setChartModal({ type: 'scatter', label: 'Dose ↔ Altitude Correlation', pts: points, getX: p => p.alt, getY: p => p.uSv, xLabel: 'Alt (m)', yLabel: 'µSv/h' })}>
               <canvas ref={altCorrRef} className="hex-scatter" width={560} height={220} />
             </Section>
           )}
@@ -712,6 +931,8 @@ function HexBinPanel({ data, onClose }) {
         )}
       </div>
     </div>
+    {chartModal && <HexChartModal data={chartModal} onClose={() => setChartModal(null)} />}
+    </>
   );
 }
 
@@ -1234,6 +1455,7 @@ export default function App() {
   const [hexBinZoom, setHexBinZoom]         = useState(6);    // bin resolution (default = initial map zoom)
   const [hexBinAuto, setHexBinAuto]         = useState(true); // auto-follow map zoom
   const [hexFlyout,  setHexFlyout]          = useState(null); // clicked hex bin stats | null
+  const [hexHover,   setHexHover]           = useState(null); // hovered hex bin stats | null
   const [trackShowDots, setTrackShowDots]   = useState(false);
   const [trackDotOpacity, setTrackDotOpacity] = useState(0.5);
   const [arrowDotOpacity, setArrowDotOpacity] = useState(0.12);
@@ -2103,6 +2325,7 @@ export default function App() {
               field={colorChannel}
               binZoom={hexBinZoom}
               onBinClick={bin => setHexFlyout(bin)}
+              onBinHover={h => setHexHover(h)}
               ranges={ranges}
             />
           )}
@@ -2217,6 +2440,9 @@ export default function App() {
             onToggle={id => toggleSession(id)}
           />
         )}
+
+        {/* Hex bin hover tooltip */}
+        {mapMode === 'Hex' && <HexTooltip data={hexHover} />}
 
         {/* Hex bin analysis panel — full-height right flyout on hex click */}
         {hexFlyout && mapMode === 'Hex' && (
