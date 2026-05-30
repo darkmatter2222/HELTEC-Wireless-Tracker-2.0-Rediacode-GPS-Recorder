@@ -6,7 +6,7 @@ import {
 import L from 'leaflet';
 import { fetchSessions, fetchSessionRows, fetchAreaSessions } from './api.js';
 import {
-  doseColor, cpsColor, speedColor, altColor, hdopColor, accColor,
+  doseColor, cpsColor, speedColor, altColor, hdopColor, accColor, dosePerCountColor,
   sessionColor, fmtTs, fmtDose,
 } from './colors.js';
 import { SparkChart } from './SparkChart.jsx';
@@ -29,12 +29,13 @@ const MAP_MODES = ['Track', 'Dots', 'Hex', 'Arrows'];
 
 // Color channel options
 const COLOR_CHANNELS = [
-  { key: 'dose',  label: 'Dose rate' },
-  { key: 'cps',   label: 'CPS' },
-  { key: 'speed', label: 'Speed' },
-  { key: 'alt',   label: 'Altitude' },
-  { key: 'hdop',  label: 'HDOP' },
-  { key: 'accM',  label: 'Accuracy (m)' },
+  { key: 'dose',    label: 'Dose rate' },
+  { key: 'cps',     label: 'CPS' },
+  { key: 'speed',   label: 'Speed' },
+  { key: 'alt',     label: 'Altitude' },
+  { key: 'hdop',    label: 'HDOP' },
+  { key: 'accM',    label: 'Accuracy (m)' },
+  { key: 'dpc',     label: 'Dose/Count' },
   { key: 'session', label: 'Session' },
 ];
 
@@ -184,6 +185,7 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
       const val = field === 'cps'   ? (p.cps ?? 0)
                 : field === 'speed' ? (p.spd ?? 0)
                 : field === 'alt'   ? (p.alt ?? 0)
+                : field === 'dpc'   ? (p.dpc ?? 0)
                 :                     (p.uSv ?? 0);
       const key = `${q},${r}`;
       if (bins.has(key)) {
@@ -194,6 +196,7 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
         if (p.cps != null) { b.cpsSum += p.cps; b.cpsN++; if (p.cps < b.cpsMin) b.cpsMin = p.cps; if (p.cps > b.cpsMax) b.cpsMax = p.cps; }
         if (p.spd != null) { b.spdSum += p.spd; b.spdN++; if (p.spd < b.spdMin) b.spdMin = p.spd; if (p.spd > b.spdMax) b.spdMax = p.spd; }
         if (p.alt != null) { b.altSum += p.alt; b.altN++; if (p.alt < b.altMin) b.altMin = p.alt; if (p.alt > b.altMax) b.altMax = p.alt; }
+        if (p.dpc != null) { b.dpcSum += p.dpc; b.dpcN++; if (p.dpc < b.dpcMin) b.dpcMin = p.dpc; if (p.dpc > b.dpcMax) b.dpcMax = p.dpc; }
         if (p._sid) b.sessionIds.add(p._sid);
         b.pts.push(p);
       } else {
@@ -204,6 +207,7 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
           cpsSum: p.cps ?? 0, cpsN: p.cps != null ? 1 : 0, cpsMin: p.cps ?? Infinity, cpsMax: p.cps ?? -Infinity,
           spdSum: p.spd ?? 0, spdN: p.spd != null ? 1 : 0, spdMin: p.spd ?? Infinity, spdMax: p.spd ?? -Infinity,
           altSum: p.alt ?? 0, altN: p.alt != null ? 1 : 0, altMin: p.alt ?? Infinity, altMax: p.alt ?? -Infinity,
+          dpcSum: p.dpc ?? 0, dpcN: p.dpc != null ? 1 : 0, dpcMin: p.dpc ?? Infinity, dpcMax: p.dpc ?? -Infinity,
           sessionIds: new Set(p._sid ? [p._sid] : []),
           pts: [p],
         });
@@ -317,6 +321,7 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
         cps:  { avg: b.cpsN ? b.cpsSum / b.cpsN : null, min: b.cpsN ? b.cpsMin : null, max: b.cpsN ? b.cpsMax : null },
         spd:  { avg: b.spdN ? b.spdSum / b.spdN : null, min: b.spdN ? b.spdMin : null, max: b.spdN ? b.spdMax : null },
         alt:  { avg: b.altN ? b.altSum / b.altN : null, min: b.altN ? b.altMin : null, max: b.altN ? b.altMax : null },
+        dpc:  { avg: b.dpcN ? b.dpcSum / b.dpcN : null, min: b.dpcN ? b.dpcMin : null, max: b.dpcN ? b.dpcMax : null },
         points: chartPts,
       });
     }
@@ -535,12 +540,14 @@ function HexBinPanel({ data, onClose }) {
   const doseRef    = useRef(null), cpsRef   = useRef(null);
   const spdRef     = useRef(null), altRef   = useRef(null);
   const corrRef    = useRef(null), altCorrRef = useRef(null);
+  const dpcRef     = useRef(null);
 
   useEffect(() => {
     if (!data?.points?.length) return;
     const pts = data.points;            // already sorted by ts, downsampled
     _drawHexLine(doseRef.current,  pts, p => p.uSv, '#00E676');
     _drawHexLine(cpsRef.current,   pts, p => p.cps, '#4FC3F7');
+    if (pts.some(p => p.dpc != null)) _drawHexLine(dpcRef.current,  pts, p => p.dpc, '#E040FB');
     if (pts.some(p => p.spd != null)) _drawHexLine(spdRef.current, pts, p => p.spd, '#FFB74D');
     if (pts.some(p => p.alt != null)) _drawHexLine(altRef.current, pts, p => p.alt, '#CE93D8');
     if (data.uSv.avg != null && data.cps.avg != null)
@@ -550,7 +557,7 @@ function HexBinPanel({ data, onClose }) {
   }, [data]);
 
   if (!data) return null;
-  const { lat, lng, count, sessionIds, uSv, cps, spd, alt, points } = data;
+  const { lat, lng, count, sessionIds, uSv, cps, spd, alt, dpc, points } = data;
 
   // Date range header from raw points
   let dateRange = null;
@@ -631,6 +638,20 @@ function HexBinPanel({ data, onClose }) {
             <canvas ref={cpsRef} className="hex-chart" width={280} height={68} />
           </Section>
         </>)}
+
+        {/* ── Dose per Count ── */}
+        {dpc?.avg != null && (<>
+          <Section label="Dose/Count (µSv/c)">
+            <div className="hex-panel-stat-row">
+              <StatCard label="avg" val={dpc.avg.toFixed(4)} />
+              <StatCard label="min" val={dpc.min.toFixed(4)} />
+              <StatCard label="max" val={dpc.max.toFixed(4)} />
+            </div>
+          </Section>
+          <Section label="Dose/Count over Time">
+            <canvas ref={dpcRef} className="hex-chart" width={280} height={68} />
+          </Section>
+        </>) }
 
         {/* ── Dose ↔ CPS correlation ── */}
         {uSv.avg != null && cps.avg != null && (
@@ -1108,6 +1129,7 @@ function getPointColor(p, channel, idx, ranges) {
     case 'alt':     return altColor(p.alt,   ranges.altMin,  ranges.altMax);
     case 'hdop':    return hdopColor(p.hdop, ranges.hdopMin, ranges.hdopMax);
     case 'accM':    return accColor(p.accM, ranges.accMin, ranges.accMax);
+    case 'dpc':     return dosePerCountColor(p.dpc, ranges.dpcMin, ranges.dpcMax);
     case 'session': return sessionColor(idx);
     default:        return doseColor(p.uSv,  ranges.doseMin, ranges.doseMax);
   }
@@ -1130,6 +1152,8 @@ function compactRows(raw) {
       // measured (RadiaCode track imports) or derived from hdop via
       // /admin/backfill-accuracy (UERE=5.0). Both fields can coexist.
       accM: r.accuracyM  ?? null,
+      // dose per count = µSv/h ÷ CPS; null when either is missing or CPS is zero
+      dpc:  (r.uSvPerHour != null && r.cps != null && r.cps > 0) ? r.uSvPerHour / r.cps : null,
       // GPS_LOST / GPS_REGAINED transition marker (firmware 0.7.0+).
       // Event rows have no lat/lng so they're filtered out of `points`,
       // but their timestamps are used to break track polylines.
@@ -1178,11 +1202,13 @@ export default function App() {
   const [altMin,  setAltMin]    = useState(0);    const [altMax,  setAltMax]    = useState(500);   const [altManual,  setAltManual]    = useState(false);
   const [hdopMin, setHdopMin]   = useState(0);    const [hdopMax, setHdopMax]   = useState(5);     const [hdopManual, setHdopManual]   = useState(false);
   const [accMin,  setAccMin]    = useState(0);    const [accMax,  setAccMax]    = useState(25);    const [accManual,  setAccManual]    = useState(false);
+  const [dpcMin,  setDpcMin]    = useState(0);    const [dpcMax,  setDpcMax]    = useState(0.05);  const [dpcManual,  setDpcManual]    = useState(false);
   // stable track bounds for sliders — derived from raw data, never from the scale handles
   const [doseDataMax, setDoseDataMax] = useState(2.0);
   const [cpsDataMax,  setCpsDataMax]  = useState(100);
   const [spdDataMax,  setSpdDataMax]  = useState(120);
   const [altDataMax,  setAltDataMax]  = useState(1000);
+  const [dpcDataMax,  setDpcDataMax]  = useState(0.1);
   // legacy alias kept for existing references
   const doseScaleManual = doseManual;
   const setDoseScaleManual = setDoseManual;
@@ -1424,6 +1450,7 @@ export default function App() {
     if (!altManual)  autoScaleChannel('alt',  false, setAltMin,  setAltMax,  0);
     if (!hdopManual) autoScaleChannel('hdop', false, setHdopMin, setHdopMax, 2);
     if (!accManual)  autoScaleChannel('accM', false, setAccMin,  setAccMax,  0);
+    if (!dpcManual)  autoScaleChannel('dpc',  false, setDpcMin,  setDpcMax,  4);
     // always update stable track bounds from raw data max
     const rawMax = (field, fallback) => {
       let m = fallback;
@@ -1441,7 +1468,8 @@ export default function App() {
     setCpsDataMax (Math.max(rawMax('cps',  0) * 1.2, 10));
     setSpdDataMax (Math.max(rawMax('spd',  0) * 1.2, 20));
     setAltDataMax (Math.max(rawMax('alt',  0) * 1.2, 100));
-  }, [rowsBySession, selected, doseManual, cpsManual, spdManual, altManual, hdopManual, accManual]); // eslint-disable-line
+    setDpcDataMax (Math.max(rawMax('dpc',  0) * 1.2, 0.01));
+  }, [rowsBySession, selected, doseManual, cpsManual, spdManual, altManual, hdopManual, accManual, dpcManual]); // eslint-disable-line
 
   // ---- play
   useEffect(() => {
@@ -1573,8 +1601,8 @@ export default function App() {
   // Memoized so canvas layers only redraw when a scale value actually changes,
   // not on every unrelated render (e.g. sidebar resize, tab switch).
   const ranges = useMemo(() => ({
-    doseMin, doseMax, cpsMin, cpsMax, spdMin, spdMax, altMin, altMax, hdopMin, hdopMax, accMin, accMax,
-  }), [doseMin, doseMax, cpsMin, cpsMax, spdMin, spdMax, altMin, altMax, hdopMin, hdopMax, accMin, accMax]); // eslint-disable-line
+    doseMin, doseMax, cpsMin, cpsMax, spdMin, spdMax, altMin, altMax, hdopMin, hdopMax, accMin, accMax, dpcMin, dpcMax,
+  }), [doseMin, doseMax, cpsMin, cpsMax, spdMin, spdMax, altMin, altMax, hdopMin, hdopMax, accMin, accMax, dpcMin, dpcMax]); // eslint-disable-line
   function getColor(p, traceIdx) {
     return getPointColor(p, colorChannel, traceIdx, ranges);
   }
@@ -1853,6 +1881,18 @@ export default function App() {
                 label="Accuracy scale (m)"
                 fmtVal={v => v.toFixed(0) + ' m'}
                 onAuto={() => setAccManual(false)}
+              />
+            )}
+            {colorChannel === 'dpc' && (
+              <DualRangeSlider
+                lo={0} hi={dpcDataMax}
+                low={dpcMin} high={dpcMax}
+                onLowChange={v  => { setDpcManual(true); setDpcMin(parseFloat(v.toFixed(4))); }}
+                onHighChange={v => { setDpcManual(true); setDpcMax(parseFloat(v.toFixed(4))); }}
+                colorFn={t => dosePerCountColor(t, 0, 1)}
+                label="Dose/Count scale (µSv/c)"
+                fmtVal={v => v.toFixed(4) + ' µSv/c'}
+                onAuto={() => setDpcManual(false)}
               />
             )}
 

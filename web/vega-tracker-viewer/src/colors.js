@@ -95,6 +95,18 @@ export function accColor(accM, lo, hi) {
   ]);
 }
 
+// ---- dose per count: violet (low) -> magenta -> amber (high) -----------
+//  µSv/h divided by CPS; lower = more efficient / lower energy per count
+export function dosePerCountColor(dpc, lo, hi) {
+  const t = norm(dpc, lo, hi);
+  if (t === null) return '#555';
+  return gradientHsl(t, [
+    [0.00, 270, 70, 55],  // violet
+    [0.50, 320, 80, 55],  // magenta/pink
+    [1.00,  35, 95, 52],  // amber
+  ]);
+}
+
 // ---- session: rotating hue wheel ---------------------------------------
 export function sessionColor(idx) {
   const hue = (idx * 47) % 360;

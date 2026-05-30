@@ -93,6 +93,7 @@ const COLOR_CHANNELS = [
   { key: 'alt',     label: 'Altitude (m)' },
   { key: 'hdop',    label: 'HDOP' },
   { key: 'accM',    label: 'Accuracy (m)' },
+  { key: 'dpc',     label: 'Dose/Count (µSv/c)' },
   { key: 'time',    label: 'Time (early→late)' },
   { key: 'session', label: 'Session' },
 ];
@@ -286,6 +287,7 @@ function pickValue(p, channel, traceIdx, tFrac) {
     case 'alt':     return p.alt;
     case 'hdop':    return p.hdop;
     case 'accM':    return p.accM;
+    case 'dpc':     return p.dpc;
     case 'time':    return tFrac;
     case 'session': return traceIdx;
     default:        return p.uSv;
@@ -301,6 +303,7 @@ function autoRange(points, channel) {
            : channel === 'alt' ? p.alt
            : channel === 'hdop' ? p.hdop
            : channel === 'accM' ? p.accM
+           : channel === 'dpc' ? p.dpc
            : p.uSv;
     if (typeof v === 'number' && isFinite(v)) vals.push(v);
   }
@@ -774,6 +777,7 @@ function formatScale(v, ch) {
   if (ch === 'alt')   return v.toFixed(0) + 'm';
   if (ch === 'hdop')  return v.toFixed(1);
   if (ch === 'accM')  return v.toFixed(0) + 'm';
+  if (ch === 'dpc')   return v.toFixed(4) + 'µSv/c';
   return String(v);
 }
 
@@ -1183,6 +1187,7 @@ export default function RenderPanel({ sessions, rowsBySession, onRowsLoaded }) {
               spd: r.speedKph ?? null, brg: r.bearingDeg ?? null,
               alt: r.altitudeM ?? null, hdop: r.hdop ?? null,
               accM: r.accuracyM ?? null, event: r.event ?? null,
+              dpc: (r.uSvPerHour != null && r.cps != null && r.cps > 0) ? r.uSvPerHour / r.cps : null,
             }));
           newRows[id] = rows;
         }
