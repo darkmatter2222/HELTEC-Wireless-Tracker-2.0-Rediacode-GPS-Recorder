@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import {
-  MapContainer, TileLayer, Polyline, CircleMarker, Polygon,
+  MapContainer, TileLayer, Polyline, CircleMarker, Polygon, Rectangle,
   Tooltip, useMap, useMapEvents, Marker,
 } from 'react-leaflet';
 import L from 'leaflet';
@@ -260,6 +260,69 @@ function HexLayer({ points, field, binZoom }) {
   return null;
 }
 
+// Draws a rubber-band rectangle while the user drags on the map.
+// `active=true` disables map panning and enables crosshair interaction.
+// Calls `onBboxDrawn({ minLat, maxLat, minLng, maxLng })` on mouse-up.
+function BBoxDrawLayer({ active, onBboxDrawn }) {
+  const map = useMap();
+  const startRef   = useRef(null);
+  const drawingRef = useRef(false);
+  const rectRef    = useRef(null);
+
+  useEffect(() => {
+    if (!active) {
+      if (rectRef.current) { rectRef.current.remove(); rectRef.current = null; }
+      map.dragging.enable();
+      drawingRef.current = false;
+      startRef.current   = null;
+      return;
+    }
+    function onMouseDown(e) {
+      drawingRef.current = true;
+      startRef.current   = e.latlng;
+      map.dragging.disable();
+      if (rectRef.current) { rectRef.current.remove(); rectRef.current = null; }
+      rectRef.current = L.rectangle(
+        [e.latlng, e.latlng],
+        { color: '#00e676', weight: 2, dashArray: '8,5', fillOpacity: 0.07, interactive: false }
+      ).addTo(map);
+    }
+    function onMouseMove(e) {
+      if (!drawingRef.current || !startRef.current || !rectRef.current) return;
+      rectRef.current.setBounds(L.latLngBounds(startRef.current, e.latlng));
+    }
+    function onMouseUp(e) {
+      if (!drawingRef.current || !startRef.current) return;
+      drawingRef.current = false;
+      map.dragging.enable();
+      const start = startRef.current;
+      startRef.current = null;
+      if (rectRef.current) { rectRef.current.remove(); rectRef.current = null; }
+      const sp = map.latLngToContainerPoint(start);
+      const ep = map.latLngToContainerPoint(e.latlng);
+      if (Math.abs(sp.x - ep.x) > 10 && Math.abs(sp.y - ep.y) > 10) {
+        onBboxDrawn({
+          minLat: Math.min(start.lat, e.latlng.lat),
+          maxLat: Math.max(start.lat, e.latlng.lat),
+          minLng: Math.min(start.lng, e.latlng.lng),
+          maxLng: Math.max(start.lng, e.latlng.lng),
+        });
+      }
+    }
+    map.on('mousedown', onMouseDown);
+    map.on('mousemove', onMouseMove);
+    map.on('mouseup',   onMouseUp);
+    return () => {
+      map.off('mousedown', onMouseDown);
+      map.off('mousemove', onMouseMove);
+      map.off('mouseup',   onMouseUp);
+      if (rectRef.current) { rectRef.current.remove(); rectRef.current = null; }
+      map.dragging.enable();
+    };
+  }, [active, map, onBboxDrawn]);
+  return null;
+}
+
 // Returns an SVG arrow icon for bearing display.
 function arrowIcon(bearing, color, size = 20) {
   const r = bearing ?? 0;
@@ -401,6 +464,14 @@ export default function App() {
   // Resizable sidebar
   const [sidebarWidth, setSidebarWidth] = useState(320);
   const sidebarRef = useRef(null);
+
+  // Area bounding-box selection
+  const [areaBboxActive, setAreaBboxActive] = useState(false);
+  const [areaBbox, setAreaBbox] = useState(null); // { minLat, maxLat, minLng, maxLng } | null
+  const handleBboxDrawn = useCallback((bbox) => {
+    setAreaBbox(bbox);
+    setAreaBboxActive(false);
+  }, []);
 
   function startResize(e) {
     e.preventDefault();
@@ -618,13 +689,33 @@ export default function App() {
     });
   }, [traces, tBounds, timeFrac, windowFrac]);
 
-  // ---- aggregate stats
+  // ---- area bbox filter applied on top of the time-window filter
+  const areaFilteredTraces = useMemo(() => {
+    if (!areaBbox) return filteredTraces;
+    const { minLat, maxLat, minLng, maxLng } = areaBbox;
+    return filteredTraces.map(t => ({
+      ...t,
+      filtered: t.filtered.filter(
+        p => p.lat != null && p.lng != null &&
+             p.lat >= minLat && p.lat <= maxLat &&
+             p.lng >= minLng && p.lng <= maxLng
+      ),
+    }));
+  }, [filteredTraces, areaBbox]);
+
+  // ---- set of session IDs that have at least one point inside the bbox
+  const sessionsInArea = useMemo(() => {
+    if (!areaBbox) return new Set();
+    return new Set(areaFilteredTraces.filter(t => t.filtered.length > 0).map(t => t.id));
+  }, [areaFilteredTraces, areaBbox]);
+
+  // ---- aggregate stats (from area-filtered data)
   const stats = useMemo(() => {
     let n = 0, sumDose = 0, maxDose = -Infinity, minDose = Infinity;
     let sumCps = 0, cpsN = 0, maxCps = -Infinity;
     let sumSpd = 0, spdN = 0, maxSpd = -Infinity;
     let maxBrg = null, lastBrg = null;
-    for (const t of filteredTraces) {
+    for (const t of areaFilteredTraces) {
       for (const p of t.filtered) {
         if (p.uSv != null) { n++; sumDose += p.uSv; if (p.uSv > maxDose) maxDose = p.uSv; if (p.uSv < minDose) minDose = p.uSv; }
         if (p.cps != null) { cpsN++; sumCps += p.cps; if (p.cps > maxCps) maxCps = p.cps; }
@@ -643,15 +734,15 @@ export default function App() {
       maxSpd: maxSpd > -Infinity ? maxSpd : null,
       lastBrg,
     };
-  }, [filteredTraces]);
+  }, [areaFilteredTraces]);
 
-  // All filtered points flattened for sparkline
+  // All area-filtered points flattened for sparkline
   const allFilteredPoints = useMemo(() => {
     const arr = [];
-    for (const t of filteredTraces) for (const p of t.filtered) arr.push(p);
+    for (const t of areaFilteredTraces) for (const p of t.filtered) arr.push(p);
     arr.sort((a, b) => a.ts - b.ts);
     return arr;
-  }, [filteredTraces]);
+  }, [areaFilteredTraces]);
 
   // ---- date-grouped sessions for sessions sidebar panel
   const dateGroupedSessions = useMemo(() => {
@@ -759,12 +850,53 @@ export default function App() {
               <button onClick={selectNone}>None</button>
               <button onClick={() => setFitTrigger(x => x + 1)}>Fit</button>
             </div>
+
+            {/* ---- Area selection toolbar ---- */}
+            <div className="area-toolbar">
+              <button
+                className={`area-draw-btn${areaBboxActive ? ' active' : ''}`}
+                title="Drag a rectangle on the map to filter all data to that area"
+                onClick={() => setAreaBboxActive(v => !v)}
+              >
+                {areaBboxActive ? '✏ Drawing\u2026 drag map' : areaBbox ? '✏ Redraw area' : '\u25a1 Select area'}
+              </button>
+              {areaBbox && (
+                <button className="area-clear-btn" title="Clear area filter" onClick={() => {
+                  setAreaBbox(null);
+                  setAreaBboxActive(false);
+                }}>&#x2715;</button>
+              )}
+            </div>
+
+            {/* ---- Area summary card ---- */}
+            {areaBbox && (() => {
+              const ptCount = areaFilteredTraces.reduce((s, t) => s + t.filtered.length, 0);
+              const sessCount = areaFilteredTraces.filter(t => t.filtered.length > 0).length;
+              return (
+                <div className="area-info-card">
+                  <div className="area-info-row">
+                    <span className="area-info-label">Points in area</span>
+                    <span className="area-info-value">{ptCount.toLocaleString()}</span>
+                  </div>
+                  <div className="area-info-row">
+                    <span className="area-info-label">Sessions with data</span>
+                    <span className="area-info-value">{sessCount}</span>
+                  </div>
+                  <div className="area-info-coords">
+                    {areaBbox.minLat.toFixed(4)}&deg;,{areaBbox.minLng.toFixed(4)}&deg;
+                    {' \u2192 '}
+                    {areaBbox.maxLat.toFixed(4)}&deg;,{areaBbox.maxLng.toFixed(4)}&deg;
+                  </div>
+                </div>
+              );
+            })()}
+
             <div className="search-row">
               <input className="search-input" placeholder="Filter sessions..."
                 value={searchFilter} onChange={e => setSearchFilter(e.target.value)} />
               {searchFilter && (
                 <button className="btn-sm" onClick={() => setSearchFilter('')}
-                  style={{ flexShrink: 0 }}>✕</button>
+                  style={{ flexShrink: 0 }}>&#x2715;</button>
               )}
             </div>
             <ul className="sessions">
@@ -1081,7 +1213,7 @@ export default function App() {
       </aside>
 
       {/* === MAP / 3D VIEW === */}
-      <main className="map-pane">
+      <main className={`map-pane${areaBboxActive ? ' bbox-select-active' : ''}`}>
         {/* 3D overlay — floats above the Leaflet map; can be combined with any map mode. */}
         {threeDMode && (
           <ThreeDView
@@ -1107,14 +1239,14 @@ export default function App() {
           {fitBounds && <FitBoundsOnce bounds={fitBounds} dep={fitTrigger} />}
 
           {/* Hex binning mode */}
-          {mapMode === 'Hex' && filteredTraces.map(t =>
+          {mapMode === 'Hex' && areaFilteredTraces.map(t =>
             t.filtered.length > 0
               ? <HexLayer key={t.id} points={t.filtered} field={colorChannel} binZoom={hexBinZoom} />
               : null
           )}
 
           {/* Track mode */}
-          {mapMode === 'Track' && filteredTraces.map(t => {
+          {mapMode === 'Track' && areaFilteredTraces.map(t => {
             if (!t.filtered || t.filtered.length === 0) return null;
             const segs = [];
             for (let i = 1; i < t.filtered.length; i++) {
@@ -1137,7 +1269,7 @@ export default function App() {
           })}
 
           {/* Track mode — optional dot overlay */}
-          {mapMode === 'Track' && trackShowDots && filteredTraces.map(t => (
+          {mapMode === 'Track' && trackShowDots && areaFilteredTraces.map(t => (
             <React.Fragment key={`${t.id}-tdots`}>
               {t.filtered.map((p, i) => (
                 <CircleMarker key={i} center={[p.lat, p.lng]} radius={pointRadius}
@@ -1152,7 +1284,7 @@ export default function App() {
           ))}
 
           {/* Dots mode */}
-          {mapMode === 'Dots' && filteredTraces.map(t => (
+          {mapMode === 'Dots' && areaFilteredTraces.map(t => (
             <React.Fragment key={t.id}>
               {t.filtered.map((p, i) => (
                 <CircleMarker key={i} center={[p.lat, p.lng]} radius={pointRadius}
@@ -1169,7 +1301,7 @@ export default function App() {
           ))}
 
           {/* Arrows mode — optional track underlay */}
-          {mapMode === 'Arrows' && arrowShowTrack && filteredTraces.map(t => {
+          {mapMode === 'Arrows' && arrowShowTrack && areaFilteredTraces.map(t => {
             if (!t.filtered || t.filtered.length === 0) return null;
             const segs = [];
             for (let i = 1; i < t.filtered.length; i++) {
@@ -1190,7 +1322,7 @@ export default function App() {
           })}
 
           {/* Arrows mode — shows dot + bearing arrow */}
-          {mapMode === 'Arrows' && filteredTraces.map(t => (
+          {mapMode === 'Arrows' && areaFilteredTraces.map(t => (
             <React.Fragment key={t.id}>
               {t.filtered.map((p, i) => {
                 const col = getColor(p, t.idx);
@@ -1210,8 +1342,8 @@ export default function App() {
             </React.Fragment>
           ))}
 
-          {/* Track + Arrows overlay: end markers */}
-          {(mapMode === 'Track' || mapMode === 'Dots') && filteredTraces.map(t => {
+          {/* Track + Dots overlay: end markers */}
+          {(mapMode === 'Track' || mapMode === 'Dots') && areaFilteredTraces.map(t => {
             if (!t.filtered || t.filtered.length === 0) return null;
             const last = t.filtered[t.filtered.length - 1];
             return (
@@ -1222,6 +1354,17 @@ export default function App() {
               </CircleMarker>
             );
           })}
+
+          {/* Area bbox draw tool */}
+          <BBoxDrawLayer active={areaBboxActive} onBboxDrawn={handleBboxDrawn} />
+
+          {/* Persistent area bbox rectangle */}
+          {areaBbox && (
+            <Rectangle
+              bounds={[[areaBbox.minLat, areaBbox.minLng], [areaBbox.maxLat, areaBbox.maxLng]]}
+              pathOptions={{ color: '#00e676', weight: 2, dashArray: '8,5', fillOpacity: 0.05, interactive: false }}
+            />
+          )}
         </MapContainer>
         </div>{/* end 2D Leaflet map wrapper */}
 
