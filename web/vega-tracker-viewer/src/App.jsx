@@ -807,7 +807,15 @@ export default function App() {
   const handleBboxDrawn = useCallback((bbox) => {
     setAreaBbox(bbox);
     setAreaBboxActive(false);
-  }, []);
+    // Load ALL sessions so the bbox can scan every file, not just selected ones.
+    for (const s of sessions) {
+      if (!rowsBySession[s.sessionId]) {
+        fetchSessionRows(s.sessionId, { totalHint: s.samples, lastTsHint: s.lastTsMs })
+          .then(raw => setRows(prev => ({ ...prev, [s.sessionId]: compactRows(raw) })))
+          .catch(e => setError(String(e)));
+      }
+    }
+  }, [sessions, rowsBySession]);
 
   function startResize(e) {
     e.preventDefault();
@@ -1029,19 +1037,38 @@ export default function App() {
     });
   }, [traces, tBounds, timeFrac, windowFrac]);
 
-  // ---- area bbox filter applied on top of the time-window filter
+  // ---- area bbox filter
+  // When no bbox: return the normal time-window-filtered selected-sessions traces.
+  // When bbox is active: scan ALL sessions in rowsBySession (regardless of selection
+  // or time window) so the user sees every data point in that area.
   const areaFilteredTraces = useMemo(() => {
     if (!areaBbox) return filteredTraces;
     const { minLat, maxLat, minLng, maxLng } = areaBbox;
-    return filteredTraces.map(t => ({
-      ...t,
-      filtered: t.filtered.filter(
-        p => p.lat != null && p.lng != null &&
-             p.lat >= minLat && p.lat <= maxLat &&
-             p.lng >= minLng && p.lng <= maxLng
-      ),
-    }));
-  }, [filteredTraces, areaBbox]);
+    const out = [];
+    for (let idx = 0; idx < sessions.length; idx++) {
+      const s = sessions[idx];
+      const rows = rowsBySession[s.sessionId];
+      if (!rows) continue; // not loaded yet — will re-run when fetch completes
+      const filtered = [];
+      let pendingGap = false;
+      for (const r of rows) {
+        if (r.event === 'GPS_LOST') { pendingGap = true; continue; }
+        if (r.event) continue;
+        if (r.lat == null || r.lng == null || (r.lat === 0 && r.lng === 0)) continue;
+        if (r.lat < minLat || r.lat > maxLat || r.lng < minLng || r.lng > maxLng) {
+          pendingGap = false;
+          continue;
+        }
+        const p = { ...r };
+        if (pendingGap) { p.gapBefore = true; pendingGap = false; }
+        filtered.push(p);
+      }
+      if (filtered.length > 0) {
+        out.push({ id: s.sessionId, color: sessionColor(idx), points: filtered, filtered, rows, meta: s, idx });
+      }
+    }
+    return out;
+  }, [areaBbox, filteredTraces, sessions, rowsBySession]);
 
   // ---- set of session IDs that have at least one point inside the bbox
   const sessionsInArea = useMemo(() => {
@@ -1214,8 +1241,11 @@ export default function App() {
 
             {/* ---- Area summary card ---- */}
             {areaBbox && (() => {
-              const ptCount = areaFilteredTraces.reduce((s, t) => s + t.filtered.length, 0);
-              const sessCount = areaFilteredTraces.filter(t => t.filtered.length > 0).length;
+              const ptCount    = areaFilteredTraces.reduce((s, t) => s + t.filtered.length, 0);
+              const sessCount  = areaFilteredTraces.filter(t => t.filtered.length > 0).length;
+              const totalSess  = sessions.length;
+              const loadedSess = sessions.filter(s => rowsBySession[s.sessionId]).length;
+              const stillLoading = loadedSess < totalSess;
               return (
                 <div className="area-info-card">
                   <div className="area-info-row">
@@ -1226,6 +1256,13 @@ export default function App() {
                     <span className="area-info-label">Sessions with data</span>
                     <span className="area-info-value">{sessCount}</span>
                   </div>
+                  {stillLoading && (
+                    <div className="area-info-row" style={{ marginTop: 4 }}>
+                      <span className="area-info-label" style={{ color: '#ffc107' }}>
+                        ⏳ Scanning… {loadedSess}/{totalSess} loaded
+                      </span>
+                    </div>
+                  )}
                   <div className="area-info-coords">
                     {areaBbox.minLat.toFixed(4)}&deg;,{areaBbox.minLng.toFixed(4)}&deg;
                     {' \u2192 '}
