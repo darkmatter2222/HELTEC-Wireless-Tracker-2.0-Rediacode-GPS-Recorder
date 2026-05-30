@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import ReactDOM from 'react-dom';
 import {
   MapContainer, TileLayer, Polyline, CircleMarker, Polygon, Rectangle,
   Tooltip, useMap, useMapEvents, Marker,
@@ -534,7 +535,7 @@ function HexChartModal({ data, onClose }) {
 
   if (!data) return null;
   const isScatter = data.type === 'scatter';
-  return (
+  return ReactDOM.createPortal(
     <div className="hex-chart-modal-overlay" onClick={onClose}>
       <div className="hex-chart-modal" onClick={e => e.stopPropagation()}>
         <div className="hex-chart-modal-header">
@@ -551,7 +552,8 @@ function HexChartModal({ data, onClose }) {
           onMouseLeave={handleMouseLeave}
         />
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 
@@ -794,10 +796,16 @@ function HexBinPanel({ data, onClose }) {
   );
 
   const Section = ({ label, children, onExpand }) => (
-    <div className="hex-panel-section">
+    <div className="hex-panel-section"
+         onClick={onExpand}
+         style={onExpand ? { cursor: 'pointer' } : undefined}>
       <div className="hex-panel-section-label">
         {label}
-        {onExpand && <button className="hex-section-expand" onClick={onExpand} title="Expand chart">⤢</button>}
+        {onExpand && (
+          <button className="hex-section-expand"
+                  onClick={e => { e.stopPropagation(); onExpand(); }}
+                  title="Expand chart">⤢</button>
+        )}
       </div>
       {children}
     </div>
@@ -1501,6 +1509,12 @@ export default function App() {
       .then(data => { setAreaData(data); setAreaLoading(false); })
       .catch(e => { setError(String(e)); setAreaLoading(false); });
   }, []);   // fetchAreaSessions is a module-level function, no deps needed
+
+  // Stable refs for HexLayer props — prevents the canvas useEffect from
+  // re-running (and rebuilding bins) on every parent render just because
+  // the inline arrow functions change reference each time.
+  const handleBinClick = useCallback(bin => setHexFlyout(bin), []);
+  const handleBinHover = useCallback(h   => setHexHover(h),   []);
 
   function startResize(e) {
     e.preventDefault();
@@ -2324,8 +2338,8 @@ export default function App() {
               traces={areaFilteredTraces}
               field={colorChannel}
               binZoom={hexBinZoom}
-              onBinClick={bin => setHexFlyout(bin)}
-              onBinHover={h => setHexHover(h)}
+              onBinClick={handleBinClick}
+              onBinHover={handleBinHover}
               ranges={ranges}
             />
           )}
