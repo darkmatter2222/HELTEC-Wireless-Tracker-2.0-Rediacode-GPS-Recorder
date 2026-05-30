@@ -195,6 +195,7 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
         if (p.spd != null) { b.spdSum += p.spd; b.spdN++; if (p.spd < b.spdMin) b.spdMin = p.spd; if (p.spd > b.spdMax) b.spdMax = p.spd; }
         if (p.alt != null) { b.altSum += p.alt; b.altN++; if (p.alt < b.altMin) b.altMin = p.alt; if (p.alt > b.altMax) b.altMax = p.alt; }
         if (p._sid) b.sessionIds.add(p._sid);
+        b.pts.push(p);
       } else {
         bins.set(key, {
           q, r, sum: val, count: 1,
@@ -204,6 +205,7 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
           spdSum: p.spd ?? 0, spdN: p.spd != null ? 1 : 0, spdMin: p.spd ?? Infinity, spdMax: p.spd ?? -Infinity,
           altSum: p.alt ?? 0, altN: p.alt != null ? 1 : 0, altMin: p.alt ?? Infinity, altMax: p.alt ?? -Infinity,
           sessionIds: new Set(p._sid ? [p._sid] : []),
+          pts: [p],
         });
       }
     }
@@ -299,6 +301,13 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
       if (!b) return;
       const fmt1 = v => v != null && isFinite(v) ? v.toFixed(1) : '—';
       const fmt3 = v => v != null && isFinite(v) ? v.toFixed(3) : '—';
+      // Sort raw points by timestamp for temporal charts.
+      // Downsample to ≤1000 pts so chart drawing stays fast even for heavily
+      // visited bins (the visible chart resolution is ≤280 px wide).
+      const sortedPts = [...b.pts].sort((x, y) => x.ts - y.ts);
+      const maxChartPts = 1000;
+      const step = sortedPts.length > maxChartPts ? Math.ceil(sortedPts.length / maxChartPts) : 1;
+      const chartPts = step > 1 ? sortedPts.filter((_, i) => i % step === 0) : sortedPts;
       onBinClick({
         lat: b.latSum / b.count,
         lng: b.lngSum / b.count,
@@ -308,6 +317,7 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
         cps:  { avg: b.cpsN ? b.cpsSum / b.cpsN : null, min: b.cpsN ? b.cpsMin : null, max: b.cpsN ? b.cpsMax : null },
         spd:  { avg: b.spdN ? b.spdSum / b.spdN : null, min: b.spdN ? b.spdMin : null, max: b.spdN ? b.spdMax : null },
         alt:  { avg: b.altN ? b.altSum / b.altN : null, min: b.altN ? b.altMin : null, max: b.altN ? b.altMax : null },
+        points: chartPts,
       });
     }
 
@@ -323,6 +333,357 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
   }, [traces, field, binZoom, map, onBinClick]);
 
   return null;
+}
+
+// ============================================================
+// HEX BIN ANALYSIS PANEL — full-height right-side flyout.
+// Shown when user clicks a hexagon in Hex map mode.
+// Displays aggregated stat cards + temporal canvas charts:
+//   • Dose Rate over time   • CPS over time
+//   • Speed over time       • Altitude over time
+//   • Dose ↔ CPS correlation scatter (with R² regression)
+//   • Dose ↔ Altitude correlation scatter
+// Raw points are passed from HexLayer; up to 1000 pts after
+// downsampling so chart drawing stays fast on large bins.
+// ============================================================
+
+/** Format a Unix-ms timestamp as MM/DD HH:MM for chart axes. */
+function _hexFmtTime(ts) {
+  const d  = new Date(ts);
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const da = String(d.getDate()).padStart(2, '0');
+  const hr = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  return `${mo}/${da} ${hr}:${mi}`;
+}
+
+/** Format a number for a compact axis label. */
+function _hexFmtVal(v) {
+  if (v == null || !isFinite(v)) return '—';
+  if (Math.abs(v) >= 1000) return v.toFixed(0);
+  if (Math.abs(v) >= 10)   return v.toFixed(1);
+  return v.toFixed(3);
+}
+
+/**
+ * Draw a temporal line chart with gradient fill on a canvas.
+ * @param {HTMLCanvasElement} canvas
+ * @param {Array}  pts        – points sorted by ts
+ * @param {Function} getVal   – p => numeric value (null = skip)
+ * @param {string} strokeColor – CSS colour string
+ */
+function _drawHexLine(canvas, pts, getVal, strokeColor) {
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(255,255,255,0.03)'; ctx.fillRect(0, 0, W, H);
+
+  const valid = pts.filter(p => { const v = getVal(p); return v != null && isFinite(v); });
+  if (valid.length < 2) {
+    ctx.fillStyle = 'rgba(255,255,255,0.18)'; ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('no data', W / 2, H / 2); return;
+  }
+
+  const vals = valid.map(getVal);
+  const minV = Math.min(...vals), maxV = Math.max(...vals);
+  const rangeV = maxV - minV || 0.001;
+  const minT = valid[0].ts, maxT = valid[valid.length - 1].ts;
+  const rangeT = maxT - minT || 1;
+
+  const PL = 40, PR = 6, PT = 6, PB = 18;
+  const cw = W - PL - PR, ch = H - PT - PB;
+
+  // horizontal grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.07)'; ctx.lineWidth = 0.7;
+  for (let i = 0; i <= 3; i++) {
+    const y = PT + ch * (i / 3);
+    ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(PL + cw, y); ctx.stroke();
+  }
+
+  // Y-axis labels
+  ctx.fillStyle = 'rgba(255,255,255,0.38)'; ctx.font = '8px monospace';
+  ctx.textAlign = 'right'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(_hexFmtVal(maxV), PL - 3, PT + 6);
+  ctx.fillText(_hexFmtVal((maxV + minV) / 2), PL - 3, PT + ch / 2 + 4);
+  ctx.fillText(_hexFmtVal(minV), PL - 3, PT + ch + 4);
+
+  // gradient fill under line
+  const grad = ctx.createLinearGradient(0, PT, 0, PT + ch);
+  grad.addColorStop(0, strokeColor + 'aa');
+  grad.addColorStop(1, strokeColor + '08');
+
+  const toXY = p => [
+    PL + (p.ts - minT) / rangeT * cw,
+    PT + (1 - (getVal(p) - minV) / rangeV) * ch,
+  ];
+
+  ctx.beginPath();
+  let first = true;
+  for (const p of valid) {
+    const [x, y] = toXY(p); first ? ctx.moveTo(x, y) : ctx.lineTo(x, y); first = false;
+  }
+  const [lx] = toXY(valid[valid.length - 1]);
+  ctx.lineTo(lx, PT + ch); ctx.lineTo(PL, PT + ch); ctx.closePath();
+  ctx.fillStyle = grad; ctx.fill();
+
+  // line
+  ctx.beginPath(); first = true;
+  for (const p of valid) {
+    const [x, y] = toXY(p); first ? ctx.moveTo(x, y) : ctx.lineTo(x, y); first = false;
+  }
+  ctx.strokeStyle = strokeColor; ctx.lineWidth = 1.5; ctx.stroke();
+
+  // X-axis time labels
+  ctx.fillStyle = 'rgba(255,255,255,0.28)'; ctx.font = '8px monospace';
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';  ctx.fillText(_hexFmtTime(minT), PL,      H - 3);
+  ctx.textAlign = 'right'; ctx.fillText(_hexFmtTime(maxT), PL + cw, H - 3);
+}
+
+/**
+ * Draw a scatter plot with optional linear regression and R² label.
+ * Dots are colored early→blue, late→amber by timestamp.
+ */
+function _drawHexScatter(canvas, pts, getX, getY, xLabel, yLabel) {
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(255,255,255,0.03)'; ctx.fillRect(0, 0, W, H);
+
+  const valid = pts.filter(p => {
+    const x = getX(p), y = getY(p);
+    return x != null && isFinite(x) && y != null && isFinite(y);
+  });
+  if (valid.length < 3) {
+    ctx.fillStyle = 'rgba(255,255,255,0.18)'; ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('insufficient data', W / 2, H / 2); return;
+  }
+
+  const xs = valid.map(getX), ys = valid.map(getY);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  const rx = maxX - minX || 0.001, ry = maxY - minY || 0.001;
+
+  const PL = 40, PR = 6, PT = 8, PB = 20;
+  const cw = W - PL - PR, ch = H - PT - PB;
+
+  // grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.07)'; ctx.lineWidth = 0.7;
+  [0, 0.5, 1].forEach(f => {
+    const y = PT + ch * f; ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(PL + cw, y); ctx.stroke();
+    const x = PL + cw * f; ctx.beginPath(); ctx.moveTo(x, PT); ctx.lineTo(x, PT + ch); ctx.stroke();
+  });
+
+  // dots colored by time (early=blue, late=amber)
+  const minT = Math.min(...valid.map(p => p.ts)), maxT = Math.max(...valid.map(p => p.ts));
+  const rangeT = maxT - minT || 1;
+  for (const p of valid) {
+    const px = PL + (getX(p) - minX) / rx * cw;
+    const py = PT + (1 - (getY(p) - minY) / ry) * ch;
+    const t  = (p.ts - minT) / rangeT;
+    ctx.beginPath(); ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${Math.round(220*t)},${Math.round(160+60*(1-t))},${Math.round(230*(1-t))},0.65)`;
+    ctx.fill();
+  }
+
+  // linear regression
+  const n = valid.length;
+  const xm = xs.reduce((a, v) => a + v, 0) / n;
+  const ym = ys.reduce((a, v) => a + v, 0) / n;
+  const ss = xs.reduce((a, v) => a + (v - xm) ** 2, 0);
+  if (ss > 1e-12) {
+    const slope = xs.reduce((a, v, i) => a + (v - xm) * (ys[i] - ym), 0) / ss;
+    const icpt  = ym - slope * xm;
+    const y1 = slope * minX + icpt, y2 = slope * maxX + icpt;
+    ctx.beginPath();
+    ctx.moveTo(PL,      PT + (1 - (y1 - minY) / ry) * ch);
+    ctx.lineTo(PL + cw, PT + (1 - (y2 - minY) / ry) * ch);
+    ctx.strokeStyle = 'rgba(255,210,60,0.75)'; ctx.lineWidth = 1.5;
+    ctx.setLineDash([4, 3]); ctx.stroke(); ctx.setLineDash([]);
+
+    // R² label
+    const yPred = xs.map(x => slope * x + icpt);
+    const sst = ys.reduce((a, v) => a + (v - ym) ** 2, 0);
+    const sse = ys.reduce((a, v, i) => a + (v - yPred[i]) ** 2, 0);
+    const r2  = sst > 0 ? Math.max(0, 1 - sse / sst) : 0;
+    ctx.fillStyle = 'rgba(255,210,60,0.9)'; ctx.font = 'bold 9px monospace';
+    ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
+    ctx.fillText(`R² = ${r2.toFixed(3)}`, PL + 4, PT + 12);
+  }
+
+  // axis labels
+  ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.font = '8px monospace';
+  ctx.textBaseline = 'alphabetic';
+  ctx.textAlign = 'left';  ctx.fillText(_hexFmtVal(minX), PL,      H - 3);
+  ctx.textAlign = 'right'; ctx.fillText(_hexFmtVal(maxX), PL + cw, H - 3);
+  ctx.textAlign = 'right'; ctx.fillText(_hexFmtVal(maxY), PL - 3, PT + 6);
+                           ctx.fillText(_hexFmtVal(minY), PL - 3, PT + ch + 4);
+  // axis titles
+  ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.font = '8px monospace';
+  ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
+  ctx.fillText(xLabel, PL + cw / 2, H - 1);
+  ctx.save(); ctx.translate(9, PT + ch / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText(yLabel, 0, 0); ctx.restore();
+}
+
+/** Full-height right-side panel for hex bin analytics. */
+function HexBinPanel({ data, onClose }) {
+  const doseRef    = useRef(null), cpsRef   = useRef(null);
+  const spdRef     = useRef(null), altRef   = useRef(null);
+  const corrRef    = useRef(null), altCorrRef = useRef(null);
+
+  useEffect(() => {
+    if (!data?.points?.length) return;
+    const pts = data.points;            // already sorted by ts, downsampled
+    _drawHexLine(doseRef.current,  pts, p => p.uSv, '#00E676');
+    _drawHexLine(cpsRef.current,   pts, p => p.cps, '#4FC3F7');
+    if (pts.some(p => p.spd != null)) _drawHexLine(spdRef.current, pts, p => p.spd, '#FFB74D');
+    if (pts.some(p => p.alt != null)) _drawHexLine(altRef.current, pts, p => p.alt, '#CE93D8');
+    if (data.uSv.avg != null && data.cps.avg != null)
+      _drawHexScatter(corrRef.current,    pts, p => p.cps, p => p.uSv, 'CPS', 'µSv/h');
+    if (data.uSv.avg != null && data.alt.avg != null)
+      _drawHexScatter(altCorrRef.current, pts, p => p.alt, p => p.uSv, 'Alt (m)', 'µSv/h');
+  }, [data]);
+
+  if (!data) return null;
+  const { lat, lng, count, sessionIds, uSv, cps, spd, alt, points } = data;
+
+  // Date range header from raw points
+  let dateRange = null;
+  if (points?.length) {
+    const fmtDate = ts => {
+      const d = new Date(ts);
+      return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    };
+    const d0 = fmtDate(points[0].ts), d1 = fmtDate(points[points.length - 1].ts);
+    dateRange = d0 === d1 ? d0 : `${d0} → ${d1}`;
+  }
+
+  const StatCard = ({ label, val }) => (
+    <div className="hex-panel-stat">
+      <span>{label}</span>
+      <strong>{val ?? '—'}</strong>
+    </div>
+  );
+
+  const Section = ({ label, children }) => (
+    <div className="hex-panel-section">
+      <div className="hex-panel-section-label">{label}</div>
+      {children}
+    </div>
+  );
+
+  return (
+    <div className="hex-panel">
+      <div className="hex-panel-header">
+        <div>
+          <div className="hex-panel-title">⬡ Hex Bin Analysis</div>
+          <div className="hex-panel-loc">{lat.toFixed(5)}, {lng.toFixed(5)}</div>
+        </div>
+        <button className="hex-panel-close" onClick={onClose}>✕</button>
+      </div>
+
+      <div className="hex-panel-body">
+
+        {/* ── Summary chips ── */}
+        <div className="hex-panel-chips">
+          <div className="hex-panel-chip">
+            <span>Samples</span><strong>{count.toLocaleString()}</strong>
+          </div>
+          <div className="hex-panel-chip">
+            <span>Sessions</span><strong>{sessionIds.length}</strong>
+          </div>
+          {dateRange && (
+            <div className="hex-panel-chip hex-panel-chip-wide">
+              <span>Period</span><strong>{dateRange}</strong>
+            </div>
+          )}
+        </div>
+
+        {/* ── Dose Rate ── */}
+        {uSv.avg != null && (<>
+          <Section label="Dose Rate (µSv/h)">
+            <div className="hex-panel-stat-row">
+              <StatCard label="avg" val={uSv.avg.toFixed(3)} />
+              <StatCard label="min" val={uSv.min.toFixed(3)} />
+              <StatCard label="max" val={uSv.max.toFixed(3)} />
+            </div>
+          </Section>
+          <Section label="Dose Rate over Time">
+            <canvas ref={doseRef} className="hex-chart" width={280} height={76} />
+          </Section>
+        </>)}
+
+        {/* ── CPS ── */}
+        {cps.avg != null && (<>
+          <Section label="CPS">
+            <div className="hex-panel-stat-row">
+              <StatCard label="avg" val={cps.avg.toFixed(1)} />
+              <StatCard label="min" val={cps.min.toFixed(1)} />
+              <StatCard label="max" val={cps.max.toFixed(1)} />
+            </div>
+          </Section>
+          <Section label="CPS over Time">
+            <canvas ref={cpsRef} className="hex-chart" width={280} height={68} />
+          </Section>
+        </>)}
+
+        {/* ── Dose ↔ CPS correlation ── */}
+        {uSv.avg != null && cps.avg != null && (
+          <Section label="Dose ↔ CPS Correlation">
+            <canvas ref={corrRef} className="hex-scatter" width={280} height={140} />
+            <div className="hex-panel-chart-note">
+              early → blue · late → amber · dashed line = linear fit
+            </div>
+          </Section>
+        )}
+
+        {/* ── Speed ── */}
+        {spd.avg != null && (<>
+          <Section label="Speed (km/h)">
+            <div className="hex-panel-stat-row">
+              <StatCard label="avg" val={spd.avg.toFixed(1)} />
+              <StatCard label="min" val={spd.min.toFixed(1)} />
+              <StatCard label="max" val={spd.max.toFixed(1)} />
+            </div>
+          </Section>
+          <Section label="Speed over Time">
+            <canvas ref={spdRef} className="hex-chart" width={280} height={60} />
+          </Section>
+        </>)}
+
+        {/* ── Altitude ── */}
+        {alt.avg != null && (<>
+          <Section label="Altitude (m)">
+            <div className="hex-panel-stat-row">
+              <StatCard label="avg" val={alt.avg.toFixed(0)} />
+              <StatCard label="min" val={alt.min.toFixed(0)} />
+              <StatCard label="max" val={alt.max.toFixed(0)} />
+            </div>
+          </Section>
+          <Section label="Altitude over Time">
+            <canvas ref={altRef} className="hex-chart" width={280} height={60} />
+          </Section>
+          {uSv.avg != null && (
+            <Section label="Dose ↔ Altitude Correlation">
+              <canvas ref={altCorrRef} className="hex-scatter" width={280} height={120} />
+            </Section>
+          )}
+        </>)}
+
+        {/* ── Session IDs ── */}
+        {sessionIds.length > 0 && (
+          <Section label="Session IDs">
+            <div className="hex-panel-sessions">{sessionIds.join(' · ')}</div>
+          </Section>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // ============================================================
@@ -1808,104 +2169,9 @@ export default function App() {
           />
         )}
 
-        {/* Hex bin flyout — right-side details panel shown on hex click */}
+        {/* Hex bin analysis panel — full-height right flyout on hex click */}
         {hexFlyout && mapMode === 'Hex' && (
-          <div className="hex-flyout">
-            <div className="hex-flyout-header">
-              <span className="hex-flyout-title">Hex Bin Details</span>
-              <button className="hex-flyout-close" onClick={() => setHexFlyout(null)}>✕</button>
-            </div>
-            <div className="hex-flyout-loc">
-              {hexFlyout.lat.toFixed(5)}, {hexFlyout.lng.toFixed(5)}
-            </div>
-            <div className="hex-flyout-body">
-              <div className="hex-flyout-row">
-                <span className="hex-flyout-label">Samples</span>
-                <span className="hex-flyout-val">{hexFlyout.count.toLocaleString()}</span>
-              </div>
-              {hexFlyout.sessionIds.length > 0 && (
-                <div className="hex-flyout-row">
-                  <span className="hex-flyout-label">Sessions</span>
-                  <span className="hex-flyout-val">{hexFlyout.sessionIds.length}</span>
-                </div>
-              )}
-
-              {hexFlyout.uSv.avg != null && (
-                <div className="hex-flyout-section">
-                  <div className="hex-flyout-section-label">Dose Rate (µSv/h)</div>
-                  <div className="hex-flyout-stat-row">
-                    <div className="hex-flyout-stat">
-                      <span>avg</span><strong>{hexFlyout.uSv.avg.toFixed(3)}</strong>
-                    </div>
-                    <div className="hex-flyout-stat">
-                      <span>min</span><strong>{hexFlyout.uSv.min.toFixed(3)}</strong>
-                    </div>
-                    <div className="hex-flyout-stat">
-                      <span>max</span><strong>{hexFlyout.uSv.max.toFixed(3)}</strong>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {hexFlyout.cps.avg != null && (
-                <div className="hex-flyout-section">
-                  <div className="hex-flyout-section-label">CPS</div>
-                  <div className="hex-flyout-stat-row">
-                    <div className="hex-flyout-stat">
-                      <span>avg</span><strong>{hexFlyout.cps.avg.toFixed(1)}</strong>
-                    </div>
-                    <div className="hex-flyout-stat">
-                      <span>min</span><strong>{hexFlyout.cps.min.toFixed(1)}</strong>
-                    </div>
-                    <div className="hex-flyout-stat">
-                      <span>max</span><strong>{hexFlyout.cps.max.toFixed(1)}</strong>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {hexFlyout.spd.avg != null && (
-                <div className="hex-flyout-section">
-                  <div className="hex-flyout-section-label">Speed (km/h)</div>
-                  <div className="hex-flyout-stat-row">
-                    <div className="hex-flyout-stat">
-                      <span>avg</span><strong>{hexFlyout.spd.avg.toFixed(1)}</strong>
-                    </div>
-                    <div className="hex-flyout-stat">
-                      <span>min</span><strong>{hexFlyout.spd.min.toFixed(1)}</strong>
-                    </div>
-                    <div className="hex-flyout-stat">
-                      <span>max</span><strong>{hexFlyout.spd.max.toFixed(1)}</strong>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {hexFlyout.alt.avg != null && (
-                <div className="hex-flyout-section">
-                  <div className="hex-flyout-section-label">Altitude (m)</div>
-                  <div className="hex-flyout-stat-row">
-                    <div className="hex-flyout-stat">
-                      <span>avg</span><strong>{hexFlyout.alt.avg.toFixed(0)}</strong>
-                    </div>
-                    <div className="hex-flyout-stat">
-                      <span>min</span><strong>{hexFlyout.alt.min.toFixed(0)}</strong>
-                    </div>
-                    <div className="hex-flyout-stat">
-                      <span>max</span><strong>{hexFlyout.alt.max.toFixed(0)}</strong>
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              {hexFlyout.sessionIds.length > 0 && (
-                <div className="hex-flyout-section">
-                  <div className="hex-flyout-section-label">Session IDs</div>
-                  <div className="hex-flyout-sessions">{hexFlyout.sessionIds.join(', ')}</div>
-                </div>
-              )}
-            </div>
-          </div>
+          <HexBinPanel data={hexFlyout} onClose={() => setHexFlyout(null)} />
         )}
       </main>
       </>)}
