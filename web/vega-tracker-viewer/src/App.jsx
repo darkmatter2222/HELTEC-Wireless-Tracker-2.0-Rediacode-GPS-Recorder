@@ -147,7 +147,7 @@ function MapZoomSync({ onZoomChange }) {
 // The pixel scale factor 2^(mapZoom-binZoom) converts bin pixel coords from
 // binZoom space to the current screen space on every draw, so geography is
 // always correct regardless of the zoom mismatch.
-function HexLayer({ traces, field, binZoom, onBinClick }) {
+function HexLayer({ traces, field, binZoom, onBinClick, ranges }) {
   const map = useMap();
 
   useEffect(() => {
@@ -249,8 +249,16 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
         if (cx < -visR * 2 || cx > W + visR * 2 ||
             cy < -visR * 2 || cy > H + visR * 2) continue;
 
-        const t     = Math.min(1, (b.sum / b.count) / maxAvg);
-        const color = heatGradientColor(t);
+        const avg = b.sum / b.count;
+        let color;
+        if      (field === 'dpc')   color = dosePerCountColor(avg, ranges.dpcMin,  ranges.dpcMax);
+        else if (field === 'cps')   color = cpsColor(avg,          ranges.cpsMin,  ranges.cpsMax);
+        else if (field === 'speed') color = speedColor(avg,         ranges.spdMin,  ranges.spdMax);
+        else if (field === 'alt')   color = altColor(avg,           ranges.altMin,  ranges.altMax);
+        else if (field === 'hdop')  color = hdopColor(avg,          ranges.hdopMin, ranges.hdopMax);
+        else if (field === 'accM')  color = accColor(avg,           ranges.accMin,  ranges.accMax);
+        else if (field === 'dose' || field == null) color = doseColor(avg, ranges.doseMin, ranges.doseMax);
+        else                        color = heatGradientColor(Math.min(1, avg / maxAvg));
         const DR    = visR * 0.94;  // 94% — tight gap between neighbours
 
         ctx.beginPath();
@@ -335,7 +343,7 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
       if (onBinClick) canvas.removeEventListener('click', handleClick);
       canvas.remove();
     };
-  }, [traces, field, binZoom, map, onBinClick]);
+  }, [traces, field, binZoom, map, onBinClick, ranges]); // eslint-disable-line
 
   return null;
 }
@@ -2095,6 +2103,7 @@ export default function App() {
               field={colorChannel}
               binZoom={hexBinZoom}
               onBinClick={bin => setHexFlyout(bin)}
+              ranges={ranges}
             />
           )}
 
