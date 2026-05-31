@@ -421,6 +421,10 @@ function HexTooltip({ data }) {
 function HexChartModal({ data, onClose }) {
   const canvasRef = useRef(null);
   const savedRef  = useRef(null); // saved base ImageData for hover restore
+  const [zoom, setZoom] = useState(1);
+
+  // Reset zoom to 100% whenever a different chart is opened.
+  useEffect(() => { setZoom(1); }, [data?.label]);
 
   useEffect(() => {
     if (!data || !canvasRef.current) return;
@@ -447,7 +451,7 @@ function HexChartModal({ data, onClose }) {
     const W = c.width, H = c.height;
 
     if (data.type === 'line') {
-      const PL = 40, PR = 6, PT = 6, PB = 18;
+      const PL = 44, PR = 6, PT = 8, PB = 22;
       const cw = W - PL - PR, ch = H - PT - PB;
       const valid = pts.filter(p => { const v = data.getVal(p); return v != null && isFinite(v); });
       if (valid.length < 2) return;
@@ -488,7 +492,7 @@ function HexChartModal({ data, onClose }) {
       ctx.restore();
 
     } else {
-      const PL = 40, PR = 6, PT = 8, PB = 20;
+      const PL = 44, PR = 6, PT = 8, PB = 24;
       const cw = W - PL - PR, ch = H - PT - PB;
       const valid = pts.filter(p => {
         const xv = data.getX(p), yv = data.getY(p);
@@ -535,22 +539,48 @@ function HexChartModal({ data, onClose }) {
 
   if (!data) return null;
   const isScatter = data.type === 'scatter';
+  const baseW = isScatter ? 900 : 1100;
+  const baseH = isScatter ? 560 : 380;
+  const zBtnStyle = {
+    background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.18)',
+    color: '#fff', borderRadius: 4, width: 26, height: 26, cursor: 'pointer',
+    fontSize: 16, lineHeight: 1, display: 'inline-flex', alignItems: 'center',
+    justifyContent: 'center', flexShrink: 0,
+  };
   return ReactDOM.createPortal(
     <div className="hex-chart-modal-overlay" onClick={onClose}>
       <div className="hex-chart-modal" onClick={e => e.stopPropagation()}>
         <div className="hex-chart-modal-header">
           <span className="hex-chart-modal-title">{data.label}</span>
-          <button className="hex-chart-modal-close" onClick={onClose}>✕</button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
+            <button style={zBtnStyle} title="Zoom out"
+                    onClick={() => setZoom(z => Math.max(1, Math.round((z - 0.25) * 100) / 100))}>−</button>
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', minWidth: 34, textAlign: 'center' }}>
+              {Math.round(zoom * 100)}%
+            </span>
+            <button style={zBtnStyle} title="Zoom in"
+                    onClick={() => setZoom(z => Math.min(4, Math.round((z + 0.25) * 100) / 100))}>+</button>
+            <button className="hex-chart-modal-close" onClick={onClose}>✕</button>
+          </div>
         </div>
-        <div className="hex-chart-modal-hint">Hover to inspect data points · click outside to close</div>
-        <canvas
-          ref={canvasRef}
-          className="hex-chart-modal-canvas"
-          width={isScatter ? 900 : 1100}
-          height={isScatter ? 560 : 380}
-          onMouseMove={handleMouseMove}
-          onMouseLeave={handleMouseLeave}
-        />
+        <div className="hex-chart-modal-hint">Hover to inspect · click outside to close · ± to zoom</div>
+        <div style={{ overflow: 'auto', borderRadius: 6 }}>
+          <div style={{ position: 'relative', width: baseW * zoom, height: baseH * zoom, flexShrink: 0 }}>
+            <canvas
+              ref={canvasRef}
+              className="hex-chart-modal-canvas"
+              style={{
+                position: 'absolute', top: 0, left: 0,
+                transform: `scale(${zoom})`, transformOrigin: '0 0',
+                maxWidth: 'none',
+              }}
+              width={baseW}
+              height={baseH}
+              onMouseMove={handleMouseMove}
+              onMouseLeave={handleMouseLeave}
+            />
+          </div>
+        </div>
       </div>
     </div>,
     document.body
@@ -614,7 +644,7 @@ function _drawHexLine(canvas, pts, getVal, strokeColor) {
   const minT = valid[0].ts, maxT = valid[valid.length - 1].ts;
   const rangeT = maxT - minT || 1;
 
-  const PL = 40, PR = 6, PT = 6, PB = 18;
+  const PL = 44, PR = 6, PT = 8, PB = 22;
   const cw = W - PL - PR, ch = H - PT - PB;
 
   // horizontal grid lines
@@ -625,11 +655,11 @@ function _drawHexLine(canvas, pts, getVal, strokeColor) {
   }
 
   // Y-axis labels
-  ctx.fillStyle = 'rgba(255,255,255,0.38)'; ctx.font = '8px monospace';
+  ctx.fillStyle = 'rgba(255,255,255,0.38)'; ctx.font = '10px monospace';
   ctx.textAlign = 'right'; ctx.textBaseline = 'alphabetic';
-  ctx.fillText(_hexFmtVal(maxV), PL - 3, PT + 6);
-  ctx.fillText(_hexFmtVal((maxV + minV) / 2), PL - 3, PT + ch / 2 + 4);
-  ctx.fillText(_hexFmtVal(minV), PL - 3, PT + ch + 4);
+  ctx.fillText(_hexFmtVal(maxV), PL - 3, PT + 9);
+  ctx.fillText(_hexFmtVal((maxV + minV) / 2), PL - 3, PT + ch / 2 + 5);
+  ctx.fillText(_hexFmtVal(minV), PL - 3, PT + ch + 6);
 
   // gradient fill under line
   const grad = ctx.createLinearGradient(0, PT, 0, PT + ch);
@@ -658,10 +688,10 @@ function _drawHexLine(canvas, pts, getVal, strokeColor) {
   ctx.strokeStyle = strokeColor; ctx.lineWidth = 1.5; ctx.stroke();
 
   // X-axis time labels
-  ctx.fillStyle = 'rgba(255,255,255,0.28)'; ctx.font = '8px monospace';
+  ctx.fillStyle = 'rgba(255,255,255,0.28)'; ctx.font = '10px monospace';
   ctx.textBaseline = 'alphabetic';
-  ctx.textAlign = 'left';  ctx.fillText(_hexFmtTime(minT), PL,      H - 3);
-  ctx.textAlign = 'right'; ctx.fillText(_hexFmtTime(maxT), PL + cw, H - 3);
+  ctx.textAlign = 'left';  ctx.fillText(_hexFmtTime(minT), PL,      H - 5);
+  ctx.textAlign = 'right'; ctx.fillText(_hexFmtTime(maxT), PL + cw, H - 5);
 }
 
 /**
@@ -690,7 +720,7 @@ function _drawHexScatter(canvas, pts, getX, getY, xLabel, yLabel) {
   const minY = Math.min(...ys), maxY = Math.max(...ys);
   const rx = maxX - minX || 0.001, ry = maxY - minY || 0.001;
 
-  const PL = 40, PR = 6, PT = 8, PB = 20;
+  const PL = 44, PR = 6, PT = 8, PB = 24;
   const cw = W - PL - PR, ch = H - PT - PB;
 
   // grid
@@ -707,7 +737,7 @@ function _drawHexScatter(canvas, pts, getX, getY, xLabel, yLabel) {
     const px = PL + (getX(p) - minX) / rx * cw;
     const py = PT + (1 - (getY(p) - minY) / ry) * ch;
     const t  = (p.ts - minT) / rangeT;
-    ctx.beginPath(); ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+    ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI * 2);
     ctx.fillStyle = `rgba(${Math.round(220*t)},${Math.round(160+60*(1-t))},${Math.round(230*(1-t))},0.65)`;
     ctx.fill();
   }
@@ -732,25 +762,58 @@ function _drawHexScatter(canvas, pts, getX, getY, xLabel, yLabel) {
     const sst = ys.reduce((a, v) => a + (v - ym) ** 2, 0);
     const sse = ys.reduce((a, v, i) => a + (v - yPred[i]) ** 2, 0);
     const r2  = sst > 0 ? Math.max(0, 1 - sse / sst) : 0;
-    ctx.fillStyle = 'rgba(255,210,60,0.9)'; ctx.font = 'bold 9px monospace';
+    ctx.fillStyle = 'rgba(255,210,60,0.9)'; ctx.font = 'bold 11px monospace';
     ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
-    ctx.fillText(`R² = ${r2.toFixed(3)}`, PL + 4, PT + 12);
+    ctx.fillText(`R² = ${r2.toFixed(3)}`, PL + 4, PT + 14);
   }
 
   // axis labels
-  ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.font = '8px monospace';
+  ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.font = '10px monospace';
   ctx.textBaseline = 'alphabetic';
-  ctx.textAlign = 'left';  ctx.fillText(_hexFmtVal(minX), PL,      H - 3);
-  ctx.textAlign = 'right'; ctx.fillText(_hexFmtVal(maxX), PL + cw, H - 3);
-  ctx.textAlign = 'right'; ctx.fillText(_hexFmtVal(maxY), PL - 3, PT + 6);
-                           ctx.fillText(_hexFmtVal(minY), PL - 3, PT + ch + 4);
+  ctx.textAlign = 'left';  ctx.fillText(_hexFmtVal(minX), PL,      H - 5);
+  ctx.textAlign = 'right'; ctx.fillText(_hexFmtVal(maxX), PL + cw, H - 5);
+  ctx.textAlign = 'right'; ctx.fillText(_hexFmtVal(maxY), PL - 3, PT + 9);
+                           ctx.fillText(_hexFmtVal(minY), PL - 3, PT + ch + 6);
   // axis titles
-  ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.font = '8px monospace';
+  ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.font = '10px monospace';
   ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-  ctx.fillText(xLabel, PL + cw / 2, H - 1);
-  ctx.save(); ctx.translate(9, PT + ch / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText(xLabel, PL + cw / 2, H - 3);
+  ctx.save(); ctx.translate(10, PT + ch / 2); ctx.rotate(-Math.PI / 2);
   ctx.fillText(yLabel, 0, 0); ctx.restore();
 }
+
+// StatCard and Section MUST live at module level — not inside the
+// HexBinPanel function body.  If they were inner functions, every re-render
+// of HexBinPanel (triggered by an inline onClose arrow changing reference)
+// would create new function-object identities for StatCard and Section.
+// React uses reference equality to identify component types, so a new
+// reference looks like a brand-new component type: React unmounts the old
+// subtree and mounts a fresh one, destroying canvas DOM nodes and erasing
+// all painted chart content (charts appear black).  Stable module-level
+// definitions eliminate this unmount/remount cycle entirely.
+
+const HexStatCard = ({ label, val }) => (
+  <div className="hex-panel-stat">
+    <span>{label}</span>
+    <strong>{val ?? '\u2014'}</strong>
+  </div>
+);
+
+const Section = ({ label, children, onExpand }) => (
+  <div className="hex-panel-section"
+       onClick={onExpand}
+       style={onExpand ? { cursor: 'pointer' } : undefined}>
+    <div className="hex-panel-section-label">
+      {label}
+      {onExpand && (
+        <button className="hex-section-expand"
+                onClick={e => { e.stopPropagation(); onExpand(); }}
+                title="Expand chart">⤢</button>
+      )}
+    </div>
+    {children}
+  </div>
+);
 
 /** Full-height right-side panel for hex bin analytics. */
 function HexBinPanel({ data, onClose }) {
@@ -788,29 +851,6 @@ function HexBinPanel({ data, onClose }) {
     dateRange = d0 === d1 ? d0 : `${d0} → ${d1}`;
   }
 
-  const StatCard = ({ label, val }) => (
-    <div className="hex-panel-stat">
-      <span>{label}</span>
-      <strong>{val ?? '—'}</strong>
-    </div>
-  );
-
-  const Section = ({ label, children, onExpand }) => (
-    <div className="hex-panel-section"
-         onClick={onExpand}
-         style={onExpand ? { cursor: 'pointer' } : undefined}>
-      <div className="hex-panel-section-label">
-        {label}
-        {onExpand && (
-          <button className="hex-section-expand"
-                  onClick={e => { e.stopPropagation(); onExpand(); }}
-                  title="Expand chart">⤢</button>
-        )}
-      </div>
-      {children}
-    </div>
-  );
-
   return (
     <>
     <div className="hex-panel">
@@ -843,9 +883,9 @@ function HexBinPanel({ data, onClose }) {
         {uSv.avg != null && (<>
           <Section label="Dose Rate (µSv/h)">
             <div className="hex-panel-stat-row">
-              <StatCard label="avg" val={uSv.avg.toFixed(3)} />
-              <StatCard label="min" val={uSv.min.toFixed(3)} />
-              <StatCard label="max" val={uSv.max.toFixed(3)} />
+              <HexStatCard label="avg" val={uSv.avg.toFixed(3)} />
+              <HexStatCard label="min" val={uSv.min.toFixed(3)} />
+              <HexStatCard label="max" val={uSv.max.toFixed(3)} />
             </div>
           </Section>
           <Section label="Dose Rate over Time"
@@ -858,9 +898,9 @@ function HexBinPanel({ data, onClose }) {
         {cps.avg != null && (<>
           <Section label="CPS">
             <div className="hex-panel-stat-row">
-              <StatCard label="avg" val={cps.avg.toFixed(1)} />
-              <StatCard label="min" val={cps.min.toFixed(1)} />
-              <StatCard label="max" val={cps.max.toFixed(1)} />
+              <HexStatCard label="avg" val={cps.avg.toFixed(1)} />
+              <HexStatCard label="min" val={cps.min.toFixed(1)} />
+              <HexStatCard label="max" val={cps.max.toFixed(1)} />
             </div>
           </Section>
           <Section label="CPS over Time"
@@ -873,9 +913,9 @@ function HexBinPanel({ data, onClose }) {
         {dpc?.avg != null && (<>
           <Section label="Dose/Count (µSv/c)">
             <div className="hex-panel-stat-row">
-              <StatCard label="avg" val={dpc.avg.toFixed(4)} />
-              <StatCard label="min" val={dpc.min.toFixed(4)} />
-              <StatCard label="max" val={dpc.max.toFixed(4)} />
+              <HexStatCard label="avg" val={dpc.avg.toFixed(4)} />
+              <HexStatCard label="min" val={dpc.min.toFixed(4)} />
+              <HexStatCard label="max" val={dpc.max.toFixed(4)} />
             </div>
           </Section>
           <Section label="Dose/Count over Time"
@@ -899,9 +939,9 @@ function HexBinPanel({ data, onClose }) {
         {spd.avg != null && (<>
           <Section label="Speed (km/h)">
             <div className="hex-panel-stat-row">
-              <StatCard label="avg" val={spd.avg.toFixed(1)} />
-              <StatCard label="min" val={spd.min.toFixed(1)} />
-              <StatCard label="max" val={spd.max.toFixed(1)} />
+              <HexStatCard label="avg" val={spd.avg.toFixed(1)} />
+              <HexStatCard label="min" val={spd.min.toFixed(1)} />
+              <HexStatCard label="max" val={spd.max.toFixed(1)} />
             </div>
           </Section>
           <Section label="Speed over Time"
@@ -914,9 +954,9 @@ function HexBinPanel({ data, onClose }) {
         {alt.avg != null && (<>
           <Section label="Altitude (m)">
             <div className="hex-panel-stat-row">
-              <StatCard label="avg" val={alt.avg.toFixed(0)} />
-              <StatCard label="min" val={alt.min.toFixed(0)} />
-              <StatCard label="max" val={alt.max.toFixed(0)} />
+              <HexStatCard label="avg" val={alt.avg.toFixed(0)} />
+              <HexStatCard label="min" val={alt.min.toFixed(0)} />
+              <HexStatCard label="max" val={alt.max.toFixed(0)} />
             </div>
           </Section>
           <Section label="Altitude over Time"
@@ -1513,8 +1553,9 @@ export default function App() {
   // Stable refs for HexLayer props — prevents the canvas useEffect from
   // re-running (and rebuilding bins) on every parent render just because
   // the inline arrow functions change reference each time.
-  const handleBinClick = useCallback(bin => setHexFlyout(bin), []);
-  const handleBinHover = useCallback(h   => setHexHover(h),   []);
+  const handleBinClick      = useCallback(bin => setHexFlyout(bin),  []);
+  const handleBinHover      = useCallback(h   => setHexHover(h),     []);
+  const handleBinPanelClose = useCallback(()  => setHexFlyout(null), []);
 
   function startResize(e) {
     e.preventDefault();
@@ -2460,7 +2501,7 @@ export default function App() {
 
         {/* Hex bin analysis panel — full-height right flyout on hex click */}
         {hexFlyout && mapMode === 'Hex' && (
-          <HexBinPanel data={hexFlyout} onClose={() => setHexFlyout(null)} />
+          <HexBinPanel data={hexFlyout} onClose={handleBinPanelClose} />
         )}
       </main>
       </>)}
