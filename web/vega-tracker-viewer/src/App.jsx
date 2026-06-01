@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import ReactDOM from 'react-dom';
 import {
   MapContainer, TileLayer, Polyline, CircleMarker, Polygon, Rectangle,
   Tooltip, useMap, useMapEvents, Marker,
@@ -6,7 +7,7 @@ import {
 import L from 'leaflet';
 import { fetchSessions, fetchSessionRows, fetchAreaSessions } from './api.js';
 import {
-  doseColor, cpsColor, speedColor, altColor, hdopColor, accColor,
+  doseColor, cpsColor, speedColor, altColor, hdopColor, accColor, dosePerCountColor,
   sessionColor, fmtTs, fmtDose,
 } from './colors.js';
 import { SparkChart } from './SparkChart.jsx';
@@ -29,12 +30,13 @@ const MAP_MODES = ['Track', 'Dots', 'Hex', 'Arrows'];
 
 // Color channel options
 const COLOR_CHANNELS = [
-  { key: 'dose',  label: 'Dose rate' },
-  { key: 'cps',   label: 'CPS' },
-  { key: 'speed', label: 'Speed' },
-  { key: 'alt',   label: 'Altitude' },
-  { key: 'hdop',  label: 'HDOP' },
-  { key: 'accM',  label: 'Accuracy (m)' },
+  { key: 'dose',    label: 'Dose rate' },
+  { key: 'cps',     label: 'CPS' },
+  { key: 'speed',   label: 'Speed' },
+  { key: 'alt',     label: 'Altitude' },
+  { key: 'hdop',    label: 'HDOP' },
+  { key: 'accM',    label: 'Accuracy (m)' },
+  { key: 'dpc',     label: 'Dose/Count' },
   { key: 'session', label: 'Session' },
 ];
 
@@ -67,6 +69,22 @@ const TILES = [
 ];
 
 // ---- helpers ---------------------------------------------------------------
+
+// Max plausible straight-line distance between two consecutive 1 Hz GPS fixes.
+// Based on 100 mph (160.9 km/h) with a 3-second buffer = ~134 m.
+// Any two points farther apart than this get a gap drawn instead of a line,
+// preventing the long phantom diagonals that appear when GPS jumps.
+const MAX_SEGMENT_M = 150;
+
+function haversineMeters(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat  = toRad(lat2 - lat1);
+  const dLng  = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2
+          + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
 function bboxFromPoints(points) {
   if (!points.length) return null;
@@ -146,7 +164,7 @@ function MapZoomSync({ onZoomChange }) {
 // The pixel scale factor 2^(mapZoom-binZoom) converts bin pixel coords from
 // binZoom space to the current screen space on every draw, so geography is
 // always correct regardless of the zoom mismatch.
-function HexLayer({ traces, field, binZoom, onBinClick }) {
+function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges }) {
   const map = useMap();
 
   useEffect(() => {
@@ -165,8 +183,8 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
     const S3    = Math.sqrt(3);
 
     const canvas = document.createElement('canvas');
-    // Enable pointer events so clicks register when onBinClick is provided.
-    canvas.style.cssText = `position:absolute;top:0;left:0;pointer-events:${onBinClick ? 'auto' : 'none'};z-index:400;background:transparent;`;
+    // Enable pointer events when click or hover handlers are provided.
+    canvas.style.cssText = `position:absolute;top:0;left:0;pointer-events:${(onBinClick || onBinHover) ? 'auto' : 'none'};z-index:400;background:transparent;`;
     map.getContainer().appendChild(canvas);
 
     // Bin all points at binZoom resolution once per effect run.
@@ -181,29 +199,31 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
       const dq = Math.abs(q - q_f), dr = Math.abs(r - r_f), ds = Math.abs(s - s_f);
       if      (dq > dr && dq > ds) q = -r - s;
       else if (dr > ds)            r = -q - s;
-      const val = field === 'cps'   ? (p.cps ?? 0)
-                : field === 'speed' ? (p.spd ?? 0)
-                : field === 'alt'   ? (p.alt ?? 0)
-                :                     (p.uSv ?? 0);
       const key = `${q},${r}`;
       if (bins.has(key)) {
         const b = bins.get(key);
-        b.sum += val; b.count++;
+        b.count++;
         b.latSum += p.lat; b.lngSum += p.lng;
-        if (p.uSv != null) { b.uSvSum += p.uSv; b.uSvN++; if (p.uSv < b.uSvMin) b.uSvMin = p.uSv; if (p.uSv > b.uSvMax) b.uSvMax = p.uSv; }
-        if (p.cps != null) { b.cpsSum += p.cps; b.cpsN++; if (p.cps < b.cpsMin) b.cpsMin = p.cps; if (p.cps > b.cpsMax) b.cpsMax = p.cps; }
-        if (p.spd != null) { b.spdSum += p.spd; b.spdN++; if (p.spd < b.spdMin) b.spdMin = p.spd; if (p.spd > b.spdMax) b.spdMax = p.spd; }
-        if (p.alt != null) { b.altSum += p.alt; b.altN++; if (p.alt < b.altMin) b.altMin = p.alt; if (p.alt > b.altMax) b.altMax = p.alt; }
+        if (p.uSv  != null) { b.uSvSum  += p.uSv;  b.uSvN++;  if (p.uSv  < b.uSvMin)  b.uSvMin  = p.uSv;  if (p.uSv  > b.uSvMax)  b.uSvMax  = p.uSv;  }
+        if (p.cps  != null) { b.cpsSum  += p.cps;  b.cpsN++;  if (p.cps  < b.cpsMin)  b.cpsMin  = p.cps;  if (p.cps  > b.cpsMax)  b.cpsMax  = p.cps;  }
+        if (p.spd  != null) { b.spdSum  += p.spd;  b.spdN++;  if (p.spd  < b.spdMin)  b.spdMin  = p.spd;  if (p.spd  > b.spdMax)  b.spdMax  = p.spd;  }
+        if (p.alt  != null) { b.altSum  += p.alt;  b.altN++;  if (p.alt  < b.altMin)  b.altMin  = p.alt;  if (p.alt  > b.altMax)  b.altMax  = p.alt;  }
+        if (p.dpc  != null) { b.dpcSum  += p.dpc;  b.dpcN++;  if (p.dpc  < b.dpcMin)  b.dpcMin  = p.dpc;  if (p.dpc  > b.dpcMax)  b.dpcMax  = p.dpc;  }
+        if (p.hdop != null) { b.hdopSum += p.hdop; b.hdopN++; if (p.hdop < b.hdopMin) b.hdopMin = p.hdop; if (p.hdop > b.hdopMax) b.hdopMax = p.hdop; }
+        if (p.accM != null) { b.accMSum += p.accM; b.accMN++; if (p.accM < b.accMMin) b.accMMin = p.accM; if (p.accM > b.accMMax) b.accMMax = p.accM; }
         if (p._sid) b.sessionIds.add(p._sid);
         b.pts.push(p);
       } else {
         bins.set(key, {
-          q, r, sum: val, count: 1,
+          q, r, count: 1,
           latSum: p.lat, lngSum: p.lng,
-          uSvSum: p.uSv ?? 0, uSvN: p.uSv != null ? 1 : 0, uSvMin: p.uSv ?? Infinity, uSvMax: p.uSv ?? -Infinity,
-          cpsSum: p.cps ?? 0, cpsN: p.cps != null ? 1 : 0, cpsMin: p.cps ?? Infinity, cpsMax: p.cps ?? -Infinity,
-          spdSum: p.spd ?? 0, spdN: p.spd != null ? 1 : 0, spdMin: p.spd ?? Infinity, spdMax: p.spd ?? -Infinity,
-          altSum: p.alt ?? 0, altN: p.alt != null ? 1 : 0, altMin: p.alt ?? Infinity, altMax: p.alt ?? -Infinity,
+          uSvSum:  p.uSv  ?? 0, uSvN:  p.uSv  != null ? 1 : 0, uSvMin:  p.uSv  ?? Infinity, uSvMax:  p.uSv  ?? -Infinity,
+          cpsSum:  p.cps  ?? 0, cpsN:  p.cps  != null ? 1 : 0, cpsMin:  p.cps  ?? Infinity, cpsMax:  p.cps  ?? -Infinity,
+          spdSum:  p.spd  ?? 0, spdN:  p.spd  != null ? 1 : 0, spdMin:  p.spd  ?? Infinity, spdMax:  p.spd  ?? -Infinity,
+          altSum:  p.alt  ?? 0, altN:  p.alt  != null ? 1 : 0, altMin:  p.alt  ?? Infinity, altMax:  p.alt  ?? -Infinity,
+          dpcSum:  p.dpc  ?? 0, dpcN:  p.dpc  != null ? 1 : 0, dpcMin:  p.dpc  ?? Infinity, dpcMax:  p.dpc  ?? -Infinity,
+          hdopSum: p.hdop ?? 0, hdopN: p.hdop != null ? 1 : 0, hdopMin: p.hdop ?? Infinity, hdopMax: p.hdop ?? -Infinity,
+          accMSum: p.accM ?? 0, accMN: p.accM != null ? 1 : 0, accMMin: p.accM ?? Infinity, accMMax: p.accM ?? -Infinity,
           sessionIds: new Set(p._sid ? [p._sid] : []),
           pts: [p],
         });
@@ -227,15 +247,28 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
       const origin = map.project(map.getBounds().getNorthWest(), mapZoom);
       const ox = origin.x, oy = origin.y;
 
-      // Normalise colour against max average of VISIBLE hexes only.
+      // Per-bin field average: uses only non-null data points for the active channel.
+      // This prevents null values (e.g., missing speedKph in RC track imports) from
+      // dragging all bin averages toward zero and producing uniform coloring.
+      function binFieldAvg(b) {
+        if (field === 'cps')   return b.cpsN  ? b.cpsSum  / b.cpsN  : 0;
+        if (field === 'speed') return b.spdN  ? b.spdSum  / b.spdN  : 0;
+        if (field === 'alt')   return b.altN  ? b.altSum  / b.altN  : 0;
+        if (field === 'dpc')   return b.dpcN  ? b.dpcSum  / b.dpcN  : 0;
+        if (field === 'hdop')  return b.hdopN ? b.hdopSum / b.hdopN : 0;
+        if (field === 'accM')  return b.accMN ? b.accMSum / b.accMN : 0;
+        return b.uSvN ? b.uSvSum / b.uSvN : 0; // dose + session fallback
+      }
+
+      // maxAvg for session/fallback channel normalisation (relative heat gradient).
       let maxAvg = 1e-9;
       for (const b of bins.values()) {
         const cx = HEX_R * 1.5 * b.q * scale - ox;
         const cy = HEX_R * S3 * (b.r + b.q / 2) * scale - oy;
         if (cx > -visR * 2 && cx < W + visR * 2 &&
             cy > -visR * 2 && cy < H + visR * 2) {
-          const avg = b.sum / b.count;
-          if (avg > maxAvg) maxAvg = avg;
+          const fa = binFieldAvg(b);
+          if (fa > maxAvg) maxAvg = fa;
         }
       }
 
@@ -245,8 +278,16 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
         if (cx < -visR * 2 || cx > W + visR * 2 ||
             cy < -visR * 2 || cy > H + visR * 2) continue;
 
-        const t     = Math.min(1, (b.sum / b.count) / maxAvg);
-        const color = heatGradientColor(t);
+        const fa = binFieldAvg(b);
+        let color;
+        if      (field === 'dpc')   color = dosePerCountColor(fa, ranges.dpcMin,  ranges.dpcMax);
+        else if (field === 'cps')   color = cpsColor(fa,          ranges.cpsMin,  ranges.cpsMax);
+        else if (field === 'speed') color = speedColor(fa,         ranges.spdMin,  ranges.spdMax);
+        else if (field === 'alt')   color = altColor(fa,           ranges.altMin,  ranges.altMax);
+        else if (field === 'hdop')  color = hdopColor(fa,          ranges.hdopMin, ranges.hdopMax);
+        else if (field === 'accM')  color = accColor(fa,           ranges.accMin,  ranges.accMax);
+        else if (field === 'dose' || field == null) color = doseColor(fa, ranges.doseMin, ranges.doseMax);
+        else                        color = heatGradientColor(Math.min(1, fa / maxAvg));
         const DR    = visR * 0.94;  // 94% — tight gap between neighbours
 
         ctx.beginPath();
@@ -317,22 +358,261 @@ function HexLayer({ traces, field, binZoom, onBinClick }) {
         cps:  { avg: b.cpsN ? b.cpsSum / b.cpsN : null, min: b.cpsN ? b.cpsMin : null, max: b.cpsN ? b.cpsMax : null },
         spd:  { avg: b.spdN ? b.spdSum / b.spdN : null, min: b.spdN ? b.spdMin : null, max: b.spdN ? b.spdMax : null },
         alt:  { avg: b.altN ? b.altSum / b.altN : null, min: b.altN ? b.altMin : null, max: b.altN ? b.altMax : null },
+        dpc:  { avg: b.dpcN ? b.dpcSum / b.dpcN : null, min: b.dpcN ? b.dpcMin : null, max: b.dpcN ? b.dpcMax : null },
         points: chartPts,
       });
     }
 
-    if (onBinClick) canvas.addEventListener('click', handleClick);
+    // Hover: resolve which bin the mouse is over, emit compact stats to onBinHover.
+    function resolveBin(e) {
+      const rect    = canvas.getBoundingClientRect();
+      const ex      = e.clientX - rect.left;
+      const ey      = e.clientY - rect.top;
+      const mapZoom = map.getZoom();
+      const scale   = Math.pow(2, mapZoom - binZoom);
+      const origin  = map.project(map.getBounds().getNorthWest(), mapZoom);
+      const gx = (ex + origin.x) / scale;
+      const gy = (ey + origin.y) / scale;
+      const q_f = ( 2 / 3 * gx) / HEX_R;
+      const r_f = (-1 / 3 * gx + S3 / 3 * gy) / HEX_R;
+      const s_f = -q_f - r_f;
+      let q = Math.round(q_f), r = Math.round(r_f), s = Math.round(s_f);
+      const dq = Math.abs(q - q_f), dr = Math.abs(r - r_f), ds = Math.abs(s - s_f);
+      if      (dq > dr && dq > ds) q = -r - s;
+      else if (dr > ds)            r = -q - s;
+      return bins.get(`${q},${r}`) || null;
+    }
+
+    function handleMouseMove(e) {
+      if (!onBinHover) return;
+      const b = resolveBin(e);
+      if (!b) { onBinHover(null); return; }
+      onBinHover({
+        clientX: e.clientX, clientY: e.clientY,
+        count: b.count,
+        sessionIds: [...b.sessionIds],
+        uSv: { avg: b.uSvN ? b.uSvSum / b.uSvN : null },
+        cps: { avg: b.cpsN ? b.cpsSum / b.cpsN : null },
+        spd: { avg: b.spdN ? b.spdSum / b.spdN : null },
+        alt: { avg: b.altN ? b.altSum / b.altN : null },
+        dpc: { avg: b.dpcN ? b.dpcSum / b.dpcN : null },
+      });
+    }
+    function handleMouseLeave() { if (onBinHover) onBinHover(null); }
+
+    if (onBinClick)  canvas.addEventListener('click',      handleClick);
+    if (onBinHover)  canvas.addEventListener('mousemove',  handleMouseMove);
+    if (onBinHover)  canvas.addEventListener('mouseleave', handleMouseLeave);
     map.on('move zoom viewreset', draw);
     draw();
 
     return () => {
       map.off('move zoom viewreset', draw);
-      if (onBinClick) canvas.removeEventListener('click', handleClick);
+      if (onBinClick)  canvas.removeEventListener('click',      handleClick);
+      if (onBinHover)  canvas.removeEventListener('mousemove',  handleMouseMove);
+      if (onBinHover)  canvas.removeEventListener('mouseleave', handleMouseLeave);
       canvas.remove();
     };
-  }, [traces, field, binZoom, map, onBinClick]);
+  }, [traces, field, binZoom, map, onBinClick, onBinHover, ranges]); // eslint-disable-line
 
   return null;
+}
+
+// ============================================================
+// HEX BIN HOVER TOOLTIP — floating label on mouseover.
+// ============================================================
+
+/** Floating tooltip shown when hovering over a hex bin on the map. */
+function HexTooltip({ data }) {
+  if (!data) return null;
+  const { clientX, clientY, count, uSv, cps, spd, alt, dpc, sessionIds } = data;
+  return (
+    <div className="hex-tooltip" style={{ left: clientX + 14, top: clientY - 8 }}>
+      <div className="hex-tt-count">
+        {count.toLocaleString()} pts · {sessionIds.length} session{sessionIds.length !== 1 ? 's' : ''}
+      </div>
+      {uSv?.avg != null && <div className="hex-tt-row"><span>Dose rate</span><strong>{uSv.avg.toFixed(3)} µSv/h</strong></div>}
+      {cps?.avg != null && <div className="hex-tt-row"><span>CPS</span><strong>{cps.avg.toFixed(1)}</strong></div>}
+      {dpc?.avg != null && <div className="hex-tt-row"><span>Dose/Count</span><strong>{dpc.avg.toFixed(4)} µSv/c</strong></div>}
+      {spd?.avg != null && <div className="hex-tt-row"><span>Speed</span><strong>{spd.avg.toFixed(1)} km/h</strong></div>}
+      {alt?.avg != null && <div className="hex-tt-row"><span>Altitude</span><strong>{alt.avg.toFixed(0)} m</strong></div>}
+    </div>
+  );
+}
+
+// ============================================================
+// HEX CHART MODAL — full-screen interactive chart expansion.
+// Opened when user clicks ⤢ on a chart section in HexBinPanel.
+// Supports interactive hover crosshair + data point tooltip.
+// ============================================================
+
+function HexChartModal({ data, onClose }) {
+  const canvasRef = useRef(null);
+  const savedRef  = useRef(null); // saved base ImageData for hover restore
+  const [zoom, setZoom] = useState(1);
+
+  // Reset zoom to 100% whenever a different chart is opened.
+  useEffect(() => { setZoom(1); }, [data?.label]);
+
+  useEffect(() => {
+    if (!data || !canvasRef.current) return;
+    const c = canvasRef.current;
+    if (data.type === 'line') {
+      _drawHexLine(c, data.pts, data.getVal, data.strokeColor);
+    } else {
+      _drawHexScatter(c, data.pts, data.getX, data.getY, data.xLabel, data.yLabel);
+    }
+    savedRef.current = c.getContext('2d').getImageData(0, 0, c.width, c.height);
+  }, [data]);
+
+  const handleMouseMove = useCallback((e) => {
+    if (!data || !canvasRef.current || !savedRef.current) return;
+    const c   = canvasRef.current;
+    const ctx = c.getContext('2d');
+    const rect = c.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (c.width  / rect.width);
+    const my = (e.clientY - rect.top)  * (c.height / rect.height);
+
+    ctx.putImageData(savedRef.current, 0, 0);
+
+    const pts = data.pts;
+    const W = c.width, H = c.height;
+
+    if (data.type === 'line') {
+      const PL = 44, PR = 6, PT = 8, PB = 22;
+      const cw = W - PL - PR, ch = H - PT - PB;
+      const valid = pts.filter(p => { const v = data.getVal(p); return v != null && isFinite(v); });
+      if (valid.length < 2) return;
+      const minT = valid[0].ts, maxT = valid[valid.length - 1].ts;
+      const vals = valid.map(p => data.getVal(p));
+      const minV = Math.min(...vals), maxV = Math.max(...vals);
+      const rangeV = maxV - minV || 0.001, rangeT = maxT - minT || 1;
+
+      const frac    = Math.max(0, Math.min(1, (mx - PL) / cw));
+      const targetT = minT + frac * rangeT;
+      let best = valid[0], bestDt = Infinity;
+      for (const p of valid) { const dt = Math.abs(p.ts - targetT); if (dt < bestDt) { best = p; bestDt = dt; } }
+      const pv = data.getVal(best);
+      const px = PL + (best.ts - minT) / rangeT * cw;
+      const py = PT + (1 - (pv - minV) / rangeV) * ch;
+
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
+      ctx.beginPath(); ctx.moveTo(px, PT); ctx.lineTo(px, PT + ch); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(PL, py); ctx.lineTo(PL + cw, py); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2);
+      ctx.fillStyle = data.strokeColor; ctx.fill();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5; ctx.stroke();
+
+      const d = new Date(best.ts);
+      const ts = `${String(d.getMonth()+1).padStart(2,'0')}/${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+      const absV = Math.abs(pv);
+      const vs = absV < 0.1 ? pv.toFixed(4) : absV < 10 ? pv.toFixed(3) : pv.toFixed(1);
+      const tipText = `${ts}   ${vs}`;
+      ctx.font = 'bold 12px monospace';
+      const tw = ctx.measureText(tipText).width + 14, th = 22;
+      let tx = px + 10; if (tx + tw > W - 4) tx = px - tw - 10;
+      const ty = Math.max(PT + 2, py - th / 2);
+      ctx.fillStyle = 'rgba(10,14,20,0.9)'; ctx.fillRect(tx - 2, ty - 2, tw + 4, th + 4);
+      ctx.fillStyle = '#eee'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(tipText, tx + 5, ty + th / 2);
+      ctx.restore();
+
+    } else {
+      const PL = 44, PR = 6, PT = 8, PB = 24;
+      const cw = W - PL - PR, ch = H - PT - PB;
+      const valid = pts.filter(p => {
+        const xv = data.getX(p), yv = data.getY(p);
+        return xv != null && isFinite(xv) && yv != null && isFinite(yv);
+      });
+      if (!valid.length) return;
+      const xs = valid.map(data.getX), ys = valid.map(data.getY);
+      const minX = Math.min(...xs), maxX = Math.max(...xs);
+      const minY = Math.min(...ys), maxY = Math.max(...ys);
+      const rx = maxX - minX || 0.001, ry = maxY - minY || 0.001;
+
+      let bestPt = valid[0], bestDist = Infinity;
+      for (const p of valid) {
+        const px = PL + (data.getX(p) - minX) / rx * cw;
+        const py = PT + (1 - (data.getY(p) - minY) / ry) * ch;
+        const dist = Math.hypot(px - mx, py - my);
+        if (dist < bestDist) { bestPt = p; bestDist = dist; }
+      }
+      if (bestDist > 50) return;
+      const bx = PL + (data.getX(bestPt) - minX) / rx * cw;
+      const by = PT + (1 - (data.getY(bestPt) - minY) / ry) * ch;
+      const xv = data.getX(bestPt), yv = data.getY(bestPt);
+
+      ctx.save();
+      ctx.beginPath(); ctx.arc(bx, by, 6, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff'; ctx.fill();
+      ctx.strokeStyle = '#222'; ctx.lineWidth = 1; ctx.stroke();
+      const tipText = `${data.xLabel}: ${_hexFmtVal(xv)}   ${data.yLabel}: ${_hexFmtVal(yv)}`;
+      ctx.font = 'bold 12px monospace';
+      const tw = ctx.measureText(tipText).width + 14, th = 22;
+      let tx = bx + 10; if (tx + tw > W - 4) tx = bx - tw - 10;
+      const ty = Math.max(PT + 2, by - th / 2);
+      ctx.fillStyle = 'rgba(10,14,20,0.9)'; ctx.fillRect(tx - 2, ty - 2, tw + 4, th + 4);
+      ctx.fillStyle = '#eee'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+      ctx.fillText(tipText, tx + 5, ty + th / 2);
+      ctx.restore();
+    }
+  }, [data]);
+
+  const handleMouseLeave = useCallback(() => {
+    if (!canvasRef.current || !savedRef.current) return;
+    canvasRef.current.getContext('2d').putImageData(savedRef.current, 0, 0);
+  }, []);
+
+  if (!data) return null;
+  const isScatter = data.type === 'scatter';
+  const baseW = isScatter ? 900 : 1100;
+  const baseH = isScatter ? 560 : 380;
+  const zBtnStyle = {
+    background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.18)',
+    color: '#fff', borderRadius: 4, width: 26, height: 26, cursor: 'pointer',
+    fontSize: 16, lineHeight: 1, display: 'inline-flex', alignItems: 'center',
+    justifyContent: 'center', flexShrink: 0,
+  };
+  return ReactDOM.createPortal(
+    <div className="hex-chart-modal-overlay" onClick={onClose}>
+      <div className="hex-chart-modal" onClick={e => e.stopPropagation()}>
+        <div className="hex-chart-modal-header">
+          <span className="hex-chart-modal-title">{data.label}</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
+            <button style={zBtnStyle} title="Zoom out"
+                    onClick={() => setZoom(z => Math.max(1, Math.round((z - 0.25) * 100) / 100))}>−</button>
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', minWidth: 34, textAlign: 'center' }}>
+              {Math.round(zoom * 100)}%
+            </span>
+            <button style={zBtnStyle} title="Zoom in"
+                    onClick={() => setZoom(z => Math.min(4, Math.round((z + 0.25) * 100) / 100))}>+</button>
+            <button className="hex-chart-modal-close" onClick={onClose}>✕</button>
+          </div>
+        </div>
+        <div className="hex-chart-modal-hint">Hover to inspect · click outside to close · ± to zoom</div>
+        <div style={{ overflow: 'auto', borderRadius: 6 }}>
+          <div style={{ position: 'relative', width: baseW * zoom, height: baseH * zoom, flexShrink: 0 }}>
+            <canvas
+              ref={canvasRef}
+              className="hex-chart-modal-canvas"
+              style={{
+                position: 'absolute', top: 0, left: 0,
+                transform: `scale(${zoom})`, transformOrigin: '0 0',
+                maxWidth: 'none',
+              }}
+              width={baseW}
+              height={baseH}
+              onMouseMove={handleMouseMove}
+              onMouseLeave={handleMouseLeave}
+            />
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
 }
 
 // ============================================================
@@ -392,7 +672,7 @@ function _drawHexLine(canvas, pts, getVal, strokeColor) {
   const minT = valid[0].ts, maxT = valid[valid.length - 1].ts;
   const rangeT = maxT - minT || 1;
 
-  const PL = 40, PR = 6, PT = 6, PB = 18;
+  const PL = 44, PR = 6, PT = 8, PB = 22;
   const cw = W - PL - PR, ch = H - PT - PB;
 
   // horizontal grid lines
@@ -403,11 +683,11 @@ function _drawHexLine(canvas, pts, getVal, strokeColor) {
   }
 
   // Y-axis labels
-  ctx.fillStyle = 'rgba(255,255,255,0.38)'; ctx.font = '8px monospace';
+  ctx.fillStyle = 'rgba(255,255,255,0.38)'; ctx.font = '10px monospace';
   ctx.textAlign = 'right'; ctx.textBaseline = 'alphabetic';
-  ctx.fillText(_hexFmtVal(maxV), PL - 3, PT + 6);
-  ctx.fillText(_hexFmtVal((maxV + minV) / 2), PL - 3, PT + ch / 2 + 4);
-  ctx.fillText(_hexFmtVal(minV), PL - 3, PT + ch + 4);
+  ctx.fillText(_hexFmtVal(maxV), PL - 3, PT + 9);
+  ctx.fillText(_hexFmtVal((maxV + minV) / 2), PL - 3, PT + ch / 2 + 5);
+  ctx.fillText(_hexFmtVal(minV), PL - 3, PT + ch + 6);
 
   // gradient fill under line
   const grad = ctx.createLinearGradient(0, PT, 0, PT + ch);
@@ -436,10 +716,10 @@ function _drawHexLine(canvas, pts, getVal, strokeColor) {
   ctx.strokeStyle = strokeColor; ctx.lineWidth = 1.5; ctx.stroke();
 
   // X-axis time labels
-  ctx.fillStyle = 'rgba(255,255,255,0.28)'; ctx.font = '8px monospace';
+  ctx.fillStyle = 'rgba(255,255,255,0.28)'; ctx.font = '10px monospace';
   ctx.textBaseline = 'alphabetic';
-  ctx.textAlign = 'left';  ctx.fillText(_hexFmtTime(minT), PL,      H - 3);
-  ctx.textAlign = 'right'; ctx.fillText(_hexFmtTime(maxT), PL + cw, H - 3);
+  ctx.textAlign = 'left';  ctx.fillText(_hexFmtTime(minT), PL,      H - 5);
+  ctx.textAlign = 'right'; ctx.fillText(_hexFmtTime(maxT), PL + cw, H - 5);
 }
 
 /**
@@ -468,7 +748,7 @@ function _drawHexScatter(canvas, pts, getX, getY, xLabel, yLabel) {
   const minY = Math.min(...ys), maxY = Math.max(...ys);
   const rx = maxX - minX || 0.001, ry = maxY - minY || 0.001;
 
-  const PL = 40, PR = 6, PT = 8, PB = 20;
+  const PL = 44, PR = 6, PT = 8, PB = 24;
   const cw = W - PL - PR, ch = H - PT - PB;
 
   // grid
@@ -485,7 +765,7 @@ function _drawHexScatter(canvas, pts, getX, getY, xLabel, yLabel) {
     const px = PL + (getX(p) - minX) / rx * cw;
     const py = PT + (1 - (getY(p) - minY) / ry) * ch;
     const t  = (p.ts - minT) / rangeT;
-    ctx.beginPath(); ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+    ctx.beginPath(); ctx.arc(px, py, 3, 0, Math.PI * 2);
     ctx.fillStyle = `rgba(${Math.round(220*t)},${Math.round(160+60*(1-t))},${Math.round(230*(1-t))},0.65)`;
     ctx.fill();
   }
@@ -510,37 +790,73 @@ function _drawHexScatter(canvas, pts, getX, getY, xLabel, yLabel) {
     const sst = ys.reduce((a, v) => a + (v - ym) ** 2, 0);
     const sse = ys.reduce((a, v, i) => a + (v - yPred[i]) ** 2, 0);
     const r2  = sst > 0 ? Math.max(0, 1 - sse / sst) : 0;
-    ctx.fillStyle = 'rgba(255,210,60,0.9)'; ctx.font = 'bold 9px monospace';
+    ctx.fillStyle = 'rgba(255,210,60,0.9)'; ctx.font = 'bold 11px monospace';
     ctx.textAlign = 'left'; ctx.textBaseline = 'alphabetic';
-    ctx.fillText(`R² = ${r2.toFixed(3)}`, PL + 4, PT + 12);
+    ctx.fillText(`R² = ${r2.toFixed(3)}`, PL + 4, PT + 14);
   }
 
   // axis labels
-  ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.font = '8px monospace';
+  ctx.fillStyle = 'rgba(255,255,255,0.35)'; ctx.font = '10px monospace';
   ctx.textBaseline = 'alphabetic';
-  ctx.textAlign = 'left';  ctx.fillText(_hexFmtVal(minX), PL,      H - 3);
-  ctx.textAlign = 'right'; ctx.fillText(_hexFmtVal(maxX), PL + cw, H - 3);
-  ctx.textAlign = 'right'; ctx.fillText(_hexFmtVal(maxY), PL - 3, PT + 6);
-                           ctx.fillText(_hexFmtVal(minY), PL - 3, PT + ch + 4);
+  ctx.textAlign = 'left';  ctx.fillText(_hexFmtVal(minX), PL,      H - 5);
+  ctx.textAlign = 'right'; ctx.fillText(_hexFmtVal(maxX), PL + cw, H - 5);
+  ctx.textAlign = 'right'; ctx.fillText(_hexFmtVal(maxY), PL - 3, PT + 9);
+                           ctx.fillText(_hexFmtVal(minY), PL - 3, PT + ch + 6);
   // axis titles
-  ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.font = '8px monospace';
+  ctx.fillStyle = 'rgba(255,255,255,0.22)'; ctx.font = '10px monospace';
   ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic';
-  ctx.fillText(xLabel, PL + cw / 2, H - 1);
-  ctx.save(); ctx.translate(9, PT + ch / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillText(xLabel, PL + cw / 2, H - 3);
+  ctx.save(); ctx.translate(10, PT + ch / 2); ctx.rotate(-Math.PI / 2);
   ctx.fillText(yLabel, 0, 0); ctx.restore();
 }
+
+// StatCard and Section MUST live at module level — not inside the
+// HexBinPanel function body.  If they were inner functions, every re-render
+// of HexBinPanel (triggered by an inline onClose arrow changing reference)
+// would create new function-object identities for StatCard and Section.
+// React uses reference equality to identify component types, so a new
+// reference looks like a brand-new component type: React unmounts the old
+// subtree and mounts a fresh one, destroying canvas DOM nodes and erasing
+// all painted chart content (charts appear black).  Stable module-level
+// definitions eliminate this unmount/remount cycle entirely.
+
+const HexStatCard = ({ label, val }) => (
+  <div className="hex-panel-stat">
+    <span>{label}</span>
+    <strong>{val ?? '\u2014'}</strong>
+  </div>
+);
+
+const Section = ({ label, children, onExpand }) => (
+  <div className="hex-panel-section"
+       onClick={onExpand}
+       style={onExpand ? { cursor: 'pointer' } : undefined}>
+    <div className="hex-panel-section-label">
+      {label}
+      {onExpand && (
+        <button className="hex-section-expand"
+                onClick={e => { e.stopPropagation(); onExpand(); }}
+                title="Expand chart">⤢</button>
+      )}
+    </div>
+    {children}
+  </div>
+);
 
 /** Full-height right-side panel for hex bin analytics. */
 function HexBinPanel({ data, onClose }) {
   const doseRef    = useRef(null), cpsRef   = useRef(null);
   const spdRef     = useRef(null), altRef   = useRef(null);
   const corrRef    = useRef(null), altCorrRef = useRef(null);
+  const dpcRef     = useRef(null);
+  const [chartModal, setChartModal] = useState(null);
 
   useEffect(() => {
     if (!data?.points?.length) return;
     const pts = data.points;            // already sorted by ts, downsampled
     _drawHexLine(doseRef.current,  pts, p => p.uSv, '#00E676');
     _drawHexLine(cpsRef.current,   pts, p => p.cps, '#4FC3F7');
+    if (pts.some(p => p.dpc != null)) _drawHexLine(dpcRef.current,  pts, p => p.dpc, '#E040FB');
     if (pts.some(p => p.spd != null)) _drawHexLine(spdRef.current, pts, p => p.spd, '#FFB74D');
     if (pts.some(p => p.alt != null)) _drawHexLine(altRef.current, pts, p => p.alt, '#CE93D8');
     if (data.uSv.avg != null && data.cps.avg != null)
@@ -550,7 +866,7 @@ function HexBinPanel({ data, onClose }) {
   }, [data]);
 
   if (!data) return null;
-  const { lat, lng, count, sessionIds, uSv, cps, spd, alt, points } = data;
+  const { lat, lng, count, sessionIds, uSv, cps, spd, alt, dpc, points } = data;
 
   // Date range header from raw points
   let dateRange = null;
@@ -563,21 +879,8 @@ function HexBinPanel({ data, onClose }) {
     dateRange = d0 === d1 ? d0 : `${d0} → ${d1}`;
   }
 
-  const StatCard = ({ label, val }) => (
-    <div className="hex-panel-stat">
-      <span>{label}</span>
-      <strong>{val ?? '—'}</strong>
-    </div>
-  );
-
-  const Section = ({ label, children }) => (
-    <div className="hex-panel-section">
-      <div className="hex-panel-section-label">{label}</div>
-      {children}
-    </div>
-  );
-
   return (
+    <>
     <div className="hex-panel">
       <div className="hex-panel-header">
         <div>
@@ -608,13 +911,14 @@ function HexBinPanel({ data, onClose }) {
         {uSv.avg != null && (<>
           <Section label="Dose Rate (µSv/h)">
             <div className="hex-panel-stat-row">
-              <StatCard label="avg" val={uSv.avg.toFixed(3)} />
-              <StatCard label="min" val={uSv.min.toFixed(3)} />
-              <StatCard label="max" val={uSv.max.toFixed(3)} />
+              <HexStatCard label="avg" val={uSv.avg.toFixed(3)} />
+              <HexStatCard label="min" val={uSv.min.toFixed(3)} />
+              <HexStatCard label="max" val={uSv.max.toFixed(3)} />
             </div>
           </Section>
-          <Section label="Dose Rate over Time">
-            <canvas ref={doseRef} className="hex-chart" width={280} height={76} />
+          <Section label="Dose Rate over Time"
+            onExpand={() => setChartModal({ type: 'line', label: 'Dose Rate over Time', pts: points, getVal: p => p.uSv, strokeColor: '#00E676' })}>
+            <canvas ref={doseRef} className="hex-chart" width={560} height={160} />
           </Section>
         </>)}
 
@@ -622,20 +926,37 @@ function HexBinPanel({ data, onClose }) {
         {cps.avg != null && (<>
           <Section label="CPS">
             <div className="hex-panel-stat-row">
-              <StatCard label="avg" val={cps.avg.toFixed(1)} />
-              <StatCard label="min" val={cps.min.toFixed(1)} />
-              <StatCard label="max" val={cps.max.toFixed(1)} />
+              <HexStatCard label="avg" val={cps.avg.toFixed(1)} />
+              <HexStatCard label="min" val={cps.min.toFixed(1)} />
+              <HexStatCard label="max" val={cps.max.toFixed(1)} />
             </div>
           </Section>
-          <Section label="CPS over Time">
-            <canvas ref={cpsRef} className="hex-chart" width={280} height={68} />
+          <Section label="CPS over Time"
+            onExpand={() => setChartModal({ type: 'line', label: 'CPS over Time', pts: points, getVal: p => p.cps, strokeColor: '#4FC3F7' })}>
+            <canvas ref={cpsRef} className="hex-chart" width={560} height={140} />
           </Section>
         </>)}
 
+        {/* ── Dose per Count ── */}
+        {dpc?.avg != null && (<>
+          <Section label="Dose/Count (µSv/c)">
+            <div className="hex-panel-stat-row">
+              <HexStatCard label="avg" val={dpc.avg.toFixed(4)} />
+              <HexStatCard label="min" val={dpc.min.toFixed(4)} />
+              <HexStatCard label="max" val={dpc.max.toFixed(4)} />
+            </div>
+          </Section>
+          <Section label="Dose/Count over Time"
+            onExpand={() => setChartModal({ type: 'line', label: 'Dose/Count over Time', pts: points, getVal: p => p.dpc, strokeColor: '#E040FB' })}>
+            <canvas ref={dpcRef} className="hex-chart" width={560} height={140} />
+          </Section>
+        </>) }
+
         {/* ── Dose ↔ CPS correlation ── */}
         {uSv.avg != null && cps.avg != null && (
-          <Section label="Dose ↔ CPS Correlation">
-            <canvas ref={corrRef} className="hex-scatter" width={280} height={140} />
+          <Section label="Dose ↔ CPS Correlation"
+            onExpand={() => setChartModal({ type: 'scatter', label: 'Dose ↔ CPS Correlation', pts: points, getX: p => p.cps, getY: p => p.uSv, xLabel: 'CPS', yLabel: 'µSv/h' })}>
+            <canvas ref={corrRef} className="hex-scatter" width={560} height={260} />
             <div className="hex-panel-chart-note">
               early → blue · late → amber · dashed line = linear fit
             </div>
@@ -646,13 +967,14 @@ function HexBinPanel({ data, onClose }) {
         {spd.avg != null && (<>
           <Section label="Speed (km/h)">
             <div className="hex-panel-stat-row">
-              <StatCard label="avg" val={spd.avg.toFixed(1)} />
-              <StatCard label="min" val={spd.min.toFixed(1)} />
-              <StatCard label="max" val={spd.max.toFixed(1)} />
+              <HexStatCard label="avg" val={spd.avg.toFixed(1)} />
+              <HexStatCard label="min" val={spd.min.toFixed(1)} />
+              <HexStatCard label="max" val={spd.max.toFixed(1)} />
             </div>
           </Section>
-          <Section label="Speed over Time">
-            <canvas ref={spdRef} className="hex-chart" width={280} height={60} />
+          <Section label="Speed over Time"
+            onExpand={() => setChartModal({ type: 'line', label: 'Speed over Time', pts: points, getVal: p => p.spd, strokeColor: '#FFB74D' })}>
+            <canvas ref={spdRef} className="hex-chart" width={560} height={120} />
           </Section>
         </>)}
 
@@ -660,17 +982,19 @@ function HexBinPanel({ data, onClose }) {
         {alt.avg != null && (<>
           <Section label="Altitude (m)">
             <div className="hex-panel-stat-row">
-              <StatCard label="avg" val={alt.avg.toFixed(0)} />
-              <StatCard label="min" val={alt.min.toFixed(0)} />
-              <StatCard label="max" val={alt.max.toFixed(0)} />
+              <HexStatCard label="avg" val={alt.avg.toFixed(0)} />
+              <HexStatCard label="min" val={alt.min.toFixed(0)} />
+              <HexStatCard label="max" val={alt.max.toFixed(0)} />
             </div>
           </Section>
-          <Section label="Altitude over Time">
-            <canvas ref={altRef} className="hex-chart" width={280} height={60} />
+          <Section label="Altitude over Time"
+            onExpand={() => setChartModal({ type: 'line', label: 'Altitude over Time', pts: points, getVal: p => p.alt, strokeColor: '#CE93D8' })}>
+            <canvas ref={altRef} className="hex-chart" width={560} height={120} />
           </Section>
           {uSv.avg != null && (
-            <Section label="Dose ↔ Altitude Correlation">
-              <canvas ref={altCorrRef} className="hex-scatter" width={280} height={120} />
+            <Section label="Dose ↔ Altitude Correlation"
+              onExpand={() => setChartModal({ type: 'scatter', label: 'Dose ↔ Altitude Correlation', pts: points, getX: p => p.alt, getY: p => p.uSv, xLabel: 'Alt (m)', yLabel: 'µSv/h' })}>
+              <canvas ref={altCorrRef} className="hex-scatter" width={560} height={220} />
             </Section>
           )}
         </>)}
@@ -683,6 +1007,8 @@ function HexBinPanel({ data, onClose }) {
         )}
       </div>
     </div>
+    {chartModal && <HexChartModal data={chartModal} onClose={() => setChartModal(null)} />}
+    </>
   );
 }
 
@@ -1108,6 +1434,7 @@ function getPointColor(p, channel, idx, ranges) {
     case 'alt':     return altColor(p.alt,   ranges.altMin,  ranges.altMax);
     case 'hdop':    return hdopColor(p.hdop, ranges.hdopMin, ranges.hdopMax);
     case 'accM':    return accColor(p.accM, ranges.accMin, ranges.accMax);
+    case 'dpc':     return dosePerCountColor(p.dpc, ranges.dpcMin, ranges.dpcMax);
     case 'session': return sessionColor(idx);
     default:        return doseColor(p.uSv,  ranges.doseMin, ranges.doseMax);
   }
@@ -1130,6 +1457,8 @@ function compactRows(raw) {
       // measured (RadiaCode track imports) or derived from hdop via
       // /admin/backfill-accuracy (UERE=5.0). Both fields can coexist.
       accM: r.accuracyM  ?? null,
+      // dose per count = µSv/h ÷ CPS; null when either is missing or CPS is zero
+      dpc:  (r.uSvPerHour != null && r.cps != null && r.cps > 0) ? r.uSvPerHour / r.cps : null,
       // GPS_LOST / GPS_REGAINED transition marker (firmware 0.7.0+).
       // Event rows have no lat/lng so they're filtered out of `points`,
       // but their timestamps are used to break track polylines.
@@ -1178,11 +1507,13 @@ export default function App() {
   const [altMin,  setAltMin]    = useState(0);    const [altMax,  setAltMax]    = useState(500);   const [altManual,  setAltManual]    = useState(false);
   const [hdopMin, setHdopMin]   = useState(0);    const [hdopMax, setHdopMax]   = useState(5);     const [hdopManual, setHdopManual]   = useState(false);
   const [accMin,  setAccMin]    = useState(0);    const [accMax,  setAccMax]    = useState(25);    const [accManual,  setAccManual]    = useState(false);
+  const [dpcMin,  setDpcMin]    = useState(0);    const [dpcMax,  setDpcMax]    = useState(0.05);  const [dpcManual,  setDpcManual]    = useState(false);
   // stable track bounds for sliders — derived from raw data, never from the scale handles
   const [doseDataMax, setDoseDataMax] = useState(2.0);
   const [cpsDataMax,  setCpsDataMax]  = useState(100);
   const [spdDataMax,  setSpdDataMax]  = useState(120);
   const [altDataMax,  setAltDataMax]  = useState(1000);
+  const [dpcDataMax,  setDpcDataMax]  = useState(0.1);
   // legacy alias kept for existing references
   const doseScaleManual = doseManual;
   const setDoseScaleManual = setDoseManual;
@@ -1200,6 +1531,7 @@ export default function App() {
   const [hexBinZoom, setHexBinZoom]         = useState(6);    // bin resolution (default = initial map zoom)
   const [hexBinAuto, setHexBinAuto]         = useState(true); // auto-follow map zoom
   const [hexFlyout,  setHexFlyout]          = useState(null); // clicked hex bin stats | null
+  const [hexHover,   setHexHover]           = useState(null); // hovered hex bin stats | null
   const [trackShowDots, setTrackShowDots]   = useState(false);
   const [trackDotOpacity, setTrackDotOpacity] = useState(0.5);
   const [arrowDotOpacity, setArrowDotOpacity] = useState(0.12);
@@ -1245,6 +1577,13 @@ export default function App() {
       .then(data => { setAreaData(data); setAreaLoading(false); })
       .catch(e => { setError(String(e)); setAreaLoading(false); });
   }, []);   // fetchAreaSessions is a module-level function, no deps needed
+
+  // Stable refs for HexLayer props — prevents the canvas useEffect from
+  // re-running (and rebuilding bins) on every parent render just because
+  // the inline arrow functions change reference each time.
+  const handleBinClick      = useCallback(bin => setHexFlyout(bin),  []);
+  const handleBinHover      = useCallback(h   => setHexHover(h),     []);
+  const handleBinPanelClose = useCallback(()  => setHexFlyout(null), []);
 
   function startResize(e) {
     e.preventDefault();
@@ -1347,6 +1686,7 @@ export default function App() {
       // true, leaving a visible break instead of drawing a phantom straight
       // line across the gap.
       let pendingGap = false;
+      let prevPoint  = null;
       for (const r of rows) {
         if (r.event === 'GPS_LOST') {
           pendingGap = true;
@@ -1357,9 +1697,14 @@ export default function App() {
         const p = { ...r };
         if (pendingGap) {
           p.gapBefore = true;
-          pendingGap = false;
+          pendingGap  = false;
+        } else if (prevPoint && haversineMeters(prevPoint.lat, prevPoint.lng, p.lat, p.lng) > MAX_SEGMENT_M) {
+          // Distance jump too large for 100 mph travel — treat as a gap so no
+          // phantom straight line is drawn across the missing track segment.
+          p.gapBefore = true;
         }
         points.push(p);
+        prevPoint = p;
       }
       out.push({ id: s.sessionId, color: sessionColor(idx), points, rows, meta: s, idx });
       idx++;
@@ -1397,52 +1742,6 @@ export default function App() {
     setFitTrigger(t => t + 1);
   }, [fitKey]);
 
-  // ---- auto-scale all color channels from loaded data
-  function autoScaleChannel(field, manualFlag, setLo, setHi, decimals = 2) {
-    const vals = [];
-    for (const id of selected) {
-      const rows = rowsBySession[id];
-      if (!rows) continue;
-      for (const r of rows) {
-        const v = r[field];
-        if (typeof v === 'number' && isFinite(v)) vals.push(v);
-      }
-    }
-    if (vals.length < 2) return;
-    vals.sort((a, b) => a - b);
-    const lo = vals[Math.floor(vals.length * 0.02)];
-    const hi = vals[Math.floor(vals.length * 0.98)];
-    if (!(hi > lo)) return;
-    setLo(parseFloat(lo.toFixed(decimals)));
-    setHi(parseFloat(hi.toFixed(decimals)));
-  }
-
-  useEffect(() => {
-    if (!doseManual) autoScaleChannel('uSv',  false, setDoseMin, setDoseMax, 3);
-    if (!cpsManual)  autoScaleChannel('cps',  false, setCpsMin,  setCpsMax,  1);
-    if (!spdManual)  autoScaleChannel('spd',  false, setSpdMin,  setSpdMax,  1);
-    if (!altManual)  autoScaleChannel('alt',  false, setAltMin,  setAltMax,  0);
-    if (!hdopManual) autoScaleChannel('hdop', false, setHdopMin, setHdopMax, 2);
-    if (!accManual)  autoScaleChannel('accM', false, setAccMin,  setAccMax,  0);
-    // always update stable track bounds from raw data max
-    const rawMax = (field, fallback) => {
-      let m = fallback;
-      for (const id of selected) {
-        const rows = rowsBySession[id];
-        if (!rows) continue;
-        for (const r of rows) {
-          const v = r[field];
-          if (typeof v === 'number' && isFinite(v) && v > m) m = v;
-        }
-      }
-      return m;
-    };
-    setDoseDataMax(Math.max(rawMax('uSv',  0) * 1.2, 2));
-    setCpsDataMax (Math.max(rawMax('cps',  0) * 1.2, 10));
-    setSpdDataMax (Math.max(rawMax('spd',  0) * 1.2, 20));
-    setAltDataMax (Math.max(rawMax('alt',  0) * 1.2, 100));
-  }, [rowsBySession, selected, doseManual, cpsManual, spdManual, altManual, hdopManual, accManual]); // eslint-disable-line
-
   // ---- play
   useEffect(() => {
     if (!playing) { clearInterval(playRef.current); return; }
@@ -1479,9 +1778,18 @@ export default function App() {
         // rawRows have the same field names as the /sessions/{id} endpoint;
         // compactRows() normalises them to the {ts, lat, lng, uSv, ...} shape.
         const compact = compactRows(rawRows);
-        const points  = compact.filter(
-          r => r.lat != null && r.lng != null && !(r.lat === 0 && r.lng === 0) && !r.event
-        );
+        // Apply the same distance-gap guard used in the traces useMemo so that
+        // area-filtered track rendering also avoids phantom straight segments.
+        const points = compact.reduce((acc, r) => {
+          if (r.lat == null || r.lng == null || (r.lat === 0 && r.lng === 0) || r.event) return acc;
+          const p    = { ...r };
+          const prev = acc.length ? acc[acc.length - 1] : null;
+          if (prev && haversineMeters(prev.lat, prev.lng, p.lat, p.lng) > MAX_SEGMENT_M) {
+            p.gapBefore = true;
+          }
+          acc.push(p);
+          return acc;
+        }, []);
         // Match the session's color index from the global sessions list.
         const idx = sessions.findIndex(s => s.sessionId === sessionId);
         return {
@@ -1538,6 +1846,79 @@ export default function App() {
     return arr;
   }, [areaFilteredTraces]);
 
+  // ---- auto-scale all color channels from loaded data
+  // When an area bbox is active and data is loaded, scale from the area-filtered
+  // rows so that the color range fits the VISIBLE data, not the entire session.
+  // Without this, a session with mostly background radiation produces a 98th-pct
+  // max of ~0.115 µSv/h, but the drawn area may contain hotspots far above that,
+  // causing every hex in the area to clamp to the max color.
+  // NOTE: must be placed AFTER areaFilteredTraces is declared (TDZ guard).
+  useEffect(() => {
+    // If areaBbox is set but areaFilteredTraces is empty (still loading), skip —
+    // the vals.length < 2 guard below will bail and leave the previous range intact.
+    const useAreaData = areaBbox && areaFilteredTraces.length > 0;
+
+    function collectVals(field) {
+      const vals = [];
+      if (useAreaData) {
+        for (const t of areaFilteredTraces) {
+          for (const r of (t.rows || [])) {
+            const v = r[field];
+            if (typeof v === 'number' && isFinite(v)) vals.push(v);
+          }
+        }
+      } else {
+        for (const id of selected) {
+          const rows = rowsBySession[id];
+          if (!rows) continue;
+          for (const r of rows) {
+            const v = r[field];
+            if (typeof v === 'number' && isFinite(v)) vals.push(v);
+          }
+        }
+      }
+      return vals;
+    }
+
+    function autoScale(field, manual, setLo, setHi, decimals) {
+      if (manual) return;
+      const vals = collectVals(field);
+      if (vals.length < 2) return;
+      vals.sort((a, b) => a - b);
+      const lo = vals[Math.floor(vals.length * 0.02)];
+      const hi = vals[Math.floor(vals.length * 0.98)];
+      if (!(hi > lo)) return;
+      setLo(parseFloat(lo.toFixed(decimals)));
+      setHi(parseFloat(hi.toFixed(decimals)));
+    }
+
+    autoScale('uSv',  doseManual, setDoseMin, setDoseMax, 3);
+    autoScale('cps',  cpsManual,  setCpsMin,  setCpsMax,  1);
+    autoScale('spd',  spdManual,  setSpdMin,  setSpdMax,  1);
+    autoScale('alt',  altManual,  setAltMin,  setAltMax,  0);
+    autoScale('hdop', hdopManual, setHdopMin, setHdopMax, 2);
+    autoScale('accM', accManual,  setAccMin,  setAccMax,  0);
+    autoScale('dpc',  dpcManual,  setDpcMin,  setDpcMax,  4);
+
+    // Update track slider ceilings from absolute max of visible data.
+    const rawMax = (field, fallback) => {
+      let m = fallback;
+      const src = useAreaData
+        ? areaFilteredTraces.flatMap(t => t.rows || [])
+        : [...selected].flatMap(id => rowsBySession[id] || []);
+      for (const r of src) {
+        const v = r[field];
+        if (typeof v === 'number' && isFinite(v) && v > m) m = v;
+      }
+      return m;
+    };
+    setDoseDataMax(Math.max(rawMax('uSv',  0) * 1.2, 2));
+    setCpsDataMax (Math.max(rawMax('cps',  0) * 1.2, 10));
+    setSpdDataMax (Math.max(rawMax('spd',  0) * 1.2, 20));
+    setAltDataMax (Math.max(rawMax('alt',  0) * 1.2, 100));
+    setDpcDataMax (Math.max(rawMax('dpc',  0) * 1.2, 0.01));
+  }, [rowsBySession, selected, areaBbox, areaFilteredTraces, doseManual, cpsManual, spdManual, altManual, hdopManual, accManual, dpcManual]); // eslint-disable-line
+
   // ---- date-grouped sessions for sessions sidebar panel
   const dateGroupedSessions = useMemo(() => {
     const q = searchFilter.toLowerCase().trim();
@@ -1573,8 +1954,8 @@ export default function App() {
   // Memoized so canvas layers only redraw when a scale value actually changes,
   // not on every unrelated render (e.g. sidebar resize, tab switch).
   const ranges = useMemo(() => ({
-    doseMin, doseMax, cpsMin, cpsMax, spdMin, spdMax, altMin, altMax, hdopMin, hdopMax, accMin, accMax,
-  }), [doseMin, doseMax, cpsMin, cpsMax, spdMin, spdMax, altMin, altMax, hdopMin, hdopMax, accMin, accMax]); // eslint-disable-line
+    doseMin, doseMax, cpsMin, cpsMax, spdMin, spdMax, altMin, altMax, hdopMin, hdopMax, accMin, accMax, dpcMin, dpcMax,
+  }), [doseMin, doseMax, cpsMin, cpsMax, spdMin, spdMax, altMin, altMax, hdopMin, hdopMax, accMin, accMax, dpcMin, dpcMax]); // eslint-disable-line
   function getColor(p, traceIdx) {
     return getPointColor(p, colorChannel, traceIdx, ranges);
   }
@@ -1855,6 +2236,18 @@ export default function App() {
                 onAuto={() => setAccManual(false)}
               />
             )}
+            {colorChannel === 'dpc' && (
+              <DualRangeSlider
+                lo={0} hi={dpcDataMax}
+                low={dpcMin} high={dpcMax}
+                onLowChange={v  => { setDpcManual(true); setDpcMin(parseFloat(v.toFixed(4))); }}
+                onHighChange={v => { setDpcManual(true); setDpcMax(parseFloat(v.toFixed(4))); }}
+                colorFn={t => dosePerCountColor(t, 0, 1)}
+                label="Dose/Count scale (µSv/c)"
+                fmtVal={v => v.toFixed(4) + ' µSv/c'}
+                onAuto={() => setDpcManual(false)}
+              />
+            )}
 
             <SectionHead>Map Tiles</SectionHead>
             <div className="tile-grid">
@@ -2054,7 +2447,9 @@ export default function App() {
               traces={areaFilteredTraces}
               field={colorChannel}
               binZoom={hexBinZoom}
-              onBinClick={bin => setHexFlyout(bin)}
+              onBinClick={handleBinClick}
+              onBinHover={handleBinHover}
+              ranges={ranges}
             />
           )}
 
@@ -2169,9 +2564,12 @@ export default function App() {
           />
         )}
 
+        {/* Hex bin hover tooltip */}
+        {mapMode === 'Hex' && <HexTooltip data={hexHover} />}
+
         {/* Hex bin analysis panel — full-height right flyout on hex click */}
         {hexFlyout && mapMode === 'Hex' && (
-          <HexBinPanel data={hexFlyout} onClose={() => setHexFlyout(null)} />
+          <HexBinPanel data={hexFlyout} onClose={handleBinPanelClose} />
         )}
       </main>
       </>)}
