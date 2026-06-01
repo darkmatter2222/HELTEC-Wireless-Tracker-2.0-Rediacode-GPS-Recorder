@@ -1720,79 +1720,6 @@ export default function App() {
     setFitTrigger(t => t + 1);
   }, [fitKey]);
 
-  // ---- auto-scale all color channels from loaded data
-  // When an area bbox is active and data is loaded, scale from the area-filtered
-  // rows so that the color range fits the VISIBLE data, not the entire session.
-  // Without this, a session with mostly background radiation produces a 98th-pct
-  // max of ~0.115 µSv/h, but the drawn area may contain hotspots far above that,
-  // causing every hex in the area to clamp to the max color.
-  useEffect(() => {
-    // Collect rows from the right source depending on whether an area filter is active.
-    // If areaBbox is set but areaFilteredTraces is empty (still loading), skip — the
-    // guard below (vals.length < 2) will bail out and leave the previous range intact.
-    const useAreaData = areaBbox && areaFilteredTraces.length > 0;
-
-    function collectVals(field) {
-      const vals = [];
-      if (useAreaData) {
-        for (const t of areaFilteredTraces) {
-          for (const r of (t.rows || [])) {
-            const v = r[field];
-            if (typeof v === 'number' && isFinite(v)) vals.push(v);
-          }
-        }
-      } else {
-        for (const id of selected) {
-          const rows = rowsBySession[id];
-          if (!rows) continue;
-          for (const r of rows) {
-            const v = r[field];
-            if (typeof v === 'number' && isFinite(v)) vals.push(v);
-          }
-        }
-      }
-      return vals;
-    }
-
-    function autoScale(field, manual, setLo, setHi, decimals) {
-      if (manual) return;
-      const vals = collectVals(field);
-      if (vals.length < 2) return;
-      vals.sort((a, b) => a - b);
-      const lo = vals[Math.floor(vals.length * 0.02)];
-      const hi = vals[Math.floor(vals.length * 0.98)];
-      if (!(hi > lo)) return;
-      setLo(parseFloat(lo.toFixed(decimals)));
-      setHi(parseFloat(hi.toFixed(decimals)));
-    }
-
-    autoScale('uSv',  doseManual, setDoseMin, setDoseMax, 3);
-    autoScale('cps',  cpsManual,  setCpsMin,  setCpsMax,  1);
-    autoScale('spd',  spdManual,  setSpdMin,  setSpdMax,  1);
-    autoScale('alt',  altManual,  setAltMin,  setAltMax,  0);
-    autoScale('hdop', hdopManual, setHdopMin, setHdopMax, 2);
-    autoScale('accM', accManual,  setAccMin,  setAccMax,  0);
-    autoScale('dpc',  dpcManual,  setDpcMin,  setDpcMax,  4);
-
-    // Update track slider ceilings from absolute max of visible data.
-    const rawMax = (field, fallback) => {
-      let m = fallback;
-      const src = useAreaData
-        ? areaFilteredTraces.flatMap(t => t.rows || [])
-        : [...selected].flatMap(id => rowsBySession[id] || []);
-      for (const r of src) {
-        const v = r[field];
-        if (typeof v === 'number' && isFinite(v) && v > m) m = v;
-      }
-      return m;
-    };
-    setDoseDataMax(Math.max(rawMax('uSv',  0) * 1.2, 2));
-    setCpsDataMax (Math.max(rawMax('cps',  0) * 1.2, 10));
-    setSpdDataMax (Math.max(rawMax('spd',  0) * 1.2, 20));
-    setAltDataMax (Math.max(rawMax('alt',  0) * 1.2, 100));
-    setDpcDataMax (Math.max(rawMax('dpc',  0) * 1.2, 0.01));
-  }, [rowsBySession, selected, areaBbox, areaFilteredTraces, doseManual, cpsManual, spdManual, altManual, hdopManual, accManual, dpcManual]); // eslint-disable-line
-
   // ---- play
   useEffect(() => {
     if (!playing) { clearInterval(playRef.current); return; }
@@ -1887,6 +1814,79 @@ export default function App() {
     arr.sort((a, b) => a.ts - b.ts);
     return arr;
   }, [areaFilteredTraces]);
+
+  // ---- auto-scale all color channels from loaded data
+  // When an area bbox is active and data is loaded, scale from the area-filtered
+  // rows so that the color range fits the VISIBLE data, not the entire session.
+  // Without this, a session with mostly background radiation produces a 98th-pct
+  // max of ~0.115 µSv/h, but the drawn area may contain hotspots far above that,
+  // causing every hex in the area to clamp to the max color.
+  // NOTE: must be placed AFTER areaFilteredTraces is declared (TDZ guard).
+  useEffect(() => {
+    // If areaBbox is set but areaFilteredTraces is empty (still loading), skip —
+    // the vals.length < 2 guard below will bail and leave the previous range intact.
+    const useAreaData = areaBbox && areaFilteredTraces.length > 0;
+
+    function collectVals(field) {
+      const vals = [];
+      if (useAreaData) {
+        for (const t of areaFilteredTraces) {
+          for (const r of (t.rows || [])) {
+            const v = r[field];
+            if (typeof v === 'number' && isFinite(v)) vals.push(v);
+          }
+        }
+      } else {
+        for (const id of selected) {
+          const rows = rowsBySession[id];
+          if (!rows) continue;
+          for (const r of rows) {
+            const v = r[field];
+            if (typeof v === 'number' && isFinite(v)) vals.push(v);
+          }
+        }
+      }
+      return vals;
+    }
+
+    function autoScale(field, manual, setLo, setHi, decimals) {
+      if (manual) return;
+      const vals = collectVals(field);
+      if (vals.length < 2) return;
+      vals.sort((a, b) => a - b);
+      const lo = vals[Math.floor(vals.length * 0.02)];
+      const hi = vals[Math.floor(vals.length * 0.98)];
+      if (!(hi > lo)) return;
+      setLo(parseFloat(lo.toFixed(decimals)));
+      setHi(parseFloat(hi.toFixed(decimals)));
+    }
+
+    autoScale('uSv',  doseManual, setDoseMin, setDoseMax, 3);
+    autoScale('cps',  cpsManual,  setCpsMin,  setCpsMax,  1);
+    autoScale('spd',  spdManual,  setSpdMin,  setSpdMax,  1);
+    autoScale('alt',  altManual,  setAltMin,  setAltMax,  0);
+    autoScale('hdop', hdopManual, setHdopMin, setHdopMax, 2);
+    autoScale('accM', accManual,  setAccMin,  setAccMax,  0);
+    autoScale('dpc',  dpcManual,  setDpcMin,  setDpcMax,  4);
+
+    // Update track slider ceilings from absolute max of visible data.
+    const rawMax = (field, fallback) => {
+      let m = fallback;
+      const src = useAreaData
+        ? areaFilteredTraces.flatMap(t => t.rows || [])
+        : [...selected].flatMap(id => rowsBySession[id] || []);
+      for (const r of src) {
+        const v = r[field];
+        if (typeof v === 'number' && isFinite(v) && v > m) m = v;
+      }
+      return m;
+    };
+    setDoseDataMax(Math.max(rawMax('uSv',  0) * 1.2, 2));
+    setCpsDataMax (Math.max(rawMax('cps',  0) * 1.2, 10));
+    setSpdDataMax (Math.max(rawMax('spd',  0) * 1.2, 20));
+    setAltDataMax (Math.max(rawMax('alt',  0) * 1.2, 100));
+    setDpcDataMax (Math.max(rawMax('dpc',  0) * 1.2, 0.01));
+  }, [rowsBySession, selected, areaBbox, areaFilteredTraces, doseManual, cpsManual, spdManual, altManual, hdopManual, accManual, dpcManual]); // eslint-disable-line
 
   // ---- date-grouped sessions for sessions sidebar panel
   const dateGroupedSessions = useMemo(() => {
