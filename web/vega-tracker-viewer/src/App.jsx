@@ -183,32 +183,31 @@ function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges }) {
       const dq = Math.abs(q - q_f), dr = Math.abs(r - r_f), ds = Math.abs(s - s_f);
       if      (dq > dr && dq > ds) q = -r - s;
       else if (dr > ds)            r = -q - s;
-      const val = field === 'cps'   ? (p.cps ?? 0)
-                : field === 'speed' ? (p.spd ?? 0)
-                : field === 'alt'   ? (p.alt ?? 0)
-                : field === 'dpc'   ? (p.dpc ?? 0)
-                :                     (p.uSv ?? 0);
       const key = `${q},${r}`;
       if (bins.has(key)) {
         const b = bins.get(key);
-        b.sum += val; b.count++;
+        b.count++;
         b.latSum += p.lat; b.lngSum += p.lng;
-        if (p.uSv != null) { b.uSvSum += p.uSv; b.uSvN++; if (p.uSv < b.uSvMin) b.uSvMin = p.uSv; if (p.uSv > b.uSvMax) b.uSvMax = p.uSv; }
-        if (p.cps != null) { b.cpsSum += p.cps; b.cpsN++; if (p.cps < b.cpsMin) b.cpsMin = p.cps; if (p.cps > b.cpsMax) b.cpsMax = p.cps; }
-        if (p.spd != null) { b.spdSum += p.spd; b.spdN++; if (p.spd < b.spdMin) b.spdMin = p.spd; if (p.spd > b.spdMax) b.spdMax = p.spd; }
-        if (p.alt != null) { b.altSum += p.alt; b.altN++; if (p.alt < b.altMin) b.altMin = p.alt; if (p.alt > b.altMax) b.altMax = p.alt; }
-        if (p.dpc != null) { b.dpcSum += p.dpc; b.dpcN++; if (p.dpc < b.dpcMin) b.dpcMin = p.dpc; if (p.dpc > b.dpcMax) b.dpcMax = p.dpc; }
+        if (p.uSv  != null) { b.uSvSum  += p.uSv;  b.uSvN++;  if (p.uSv  < b.uSvMin)  b.uSvMin  = p.uSv;  if (p.uSv  > b.uSvMax)  b.uSvMax  = p.uSv;  }
+        if (p.cps  != null) { b.cpsSum  += p.cps;  b.cpsN++;  if (p.cps  < b.cpsMin)  b.cpsMin  = p.cps;  if (p.cps  > b.cpsMax)  b.cpsMax  = p.cps;  }
+        if (p.spd  != null) { b.spdSum  += p.spd;  b.spdN++;  if (p.spd  < b.spdMin)  b.spdMin  = p.spd;  if (p.spd  > b.spdMax)  b.spdMax  = p.spd;  }
+        if (p.alt  != null) { b.altSum  += p.alt;  b.altN++;  if (p.alt  < b.altMin)  b.altMin  = p.alt;  if (p.alt  > b.altMax)  b.altMax  = p.alt;  }
+        if (p.dpc  != null) { b.dpcSum  += p.dpc;  b.dpcN++;  if (p.dpc  < b.dpcMin)  b.dpcMin  = p.dpc;  if (p.dpc  > b.dpcMax)  b.dpcMax  = p.dpc;  }
+        if (p.hdop != null) { b.hdopSum += p.hdop; b.hdopN++; if (p.hdop < b.hdopMin) b.hdopMin = p.hdop; if (p.hdop > b.hdopMax) b.hdopMax = p.hdop; }
+        if (p.accM != null) { b.accMSum += p.accM; b.accMN++; if (p.accM < b.accMMin) b.accMMin = p.accM; if (p.accM > b.accMMax) b.accMMax = p.accM; }
         if (p._sid) b.sessionIds.add(p._sid);
         b.pts.push(p);
       } else {
         bins.set(key, {
-          q, r, sum: val, count: 1,
+          q, r, count: 1,
           latSum: p.lat, lngSum: p.lng,
-          uSvSum: p.uSv ?? 0, uSvN: p.uSv != null ? 1 : 0, uSvMin: p.uSv ?? Infinity, uSvMax: p.uSv ?? -Infinity,
-          cpsSum: p.cps ?? 0, cpsN: p.cps != null ? 1 : 0, cpsMin: p.cps ?? Infinity, cpsMax: p.cps ?? -Infinity,
-          spdSum: p.spd ?? 0, spdN: p.spd != null ? 1 : 0, spdMin: p.spd ?? Infinity, spdMax: p.spd ?? -Infinity,
-          altSum: p.alt ?? 0, altN: p.alt != null ? 1 : 0, altMin: p.alt ?? Infinity, altMax: p.alt ?? -Infinity,
-          dpcSum: p.dpc ?? 0, dpcN: p.dpc != null ? 1 : 0, dpcMin: p.dpc ?? Infinity, dpcMax: p.dpc ?? -Infinity,
+          uSvSum:  p.uSv  ?? 0, uSvN:  p.uSv  != null ? 1 : 0, uSvMin:  p.uSv  ?? Infinity, uSvMax:  p.uSv  ?? -Infinity,
+          cpsSum:  p.cps  ?? 0, cpsN:  p.cps  != null ? 1 : 0, cpsMin:  p.cps  ?? Infinity, cpsMax:  p.cps  ?? -Infinity,
+          spdSum:  p.spd  ?? 0, spdN:  p.spd  != null ? 1 : 0, spdMin:  p.spd  ?? Infinity, spdMax:  p.spd  ?? -Infinity,
+          altSum:  p.alt  ?? 0, altN:  p.alt  != null ? 1 : 0, altMin:  p.alt  ?? Infinity, altMax:  p.alt  ?? -Infinity,
+          dpcSum:  p.dpc  ?? 0, dpcN:  p.dpc  != null ? 1 : 0, dpcMin:  p.dpc  ?? Infinity, dpcMax:  p.dpc  ?? -Infinity,
+          hdopSum: p.hdop ?? 0, hdopN: p.hdop != null ? 1 : 0, hdopMin: p.hdop ?? Infinity, hdopMax: p.hdop ?? -Infinity,
+          accMSum: p.accM ?? 0, accMN: p.accM != null ? 1 : 0, accMMin: p.accM ?? Infinity, accMMax: p.accM ?? -Infinity,
           sessionIds: new Set(p._sid ? [p._sid] : []),
           pts: [p],
         });
@@ -232,15 +231,28 @@ function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges }) {
       const origin = map.project(map.getBounds().getNorthWest(), mapZoom);
       const ox = origin.x, oy = origin.y;
 
-      // Normalise colour against max average of VISIBLE hexes only.
+      // Per-bin field average: uses only non-null data points for the active channel.
+      // This prevents null values (e.g., missing speedKph in RC track imports) from
+      // dragging all bin averages toward zero and producing uniform coloring.
+      function binFieldAvg(b) {
+        if (field === 'cps')   return b.cpsN  ? b.cpsSum  / b.cpsN  : 0;
+        if (field === 'speed') return b.spdN  ? b.spdSum  / b.spdN  : 0;
+        if (field === 'alt')   return b.altN  ? b.altSum  / b.altN  : 0;
+        if (field === 'dpc')   return b.dpcN  ? b.dpcSum  / b.dpcN  : 0;
+        if (field === 'hdop')  return b.hdopN ? b.hdopSum / b.hdopN : 0;
+        if (field === 'accM')  return b.accMN ? b.accMSum / b.accMN : 0;
+        return b.uSvN ? b.uSvSum / b.uSvN : 0; // dose + session fallback
+      }
+
+      // maxAvg for session/fallback channel normalisation (relative heat gradient).
       let maxAvg = 1e-9;
       for (const b of bins.values()) {
         const cx = HEX_R * 1.5 * b.q * scale - ox;
         const cy = HEX_R * S3 * (b.r + b.q / 2) * scale - oy;
         if (cx > -visR * 2 && cx < W + visR * 2 &&
             cy > -visR * 2 && cy < H + visR * 2) {
-          const avg = b.sum / b.count;
-          if (avg > maxAvg) maxAvg = avg;
+          const fa = binFieldAvg(b);
+          if (fa > maxAvg) maxAvg = fa;
         }
       }
 
@@ -250,16 +262,16 @@ function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges }) {
         if (cx < -visR * 2 || cx > W + visR * 2 ||
             cy < -visR * 2 || cy > H + visR * 2) continue;
 
-        const avg = b.sum / b.count;
+        const fa = binFieldAvg(b);
         let color;
-        if      (field === 'dpc')   color = dosePerCountColor(avg, ranges.dpcMin,  ranges.dpcMax);
-        else if (field === 'cps')   color = cpsColor(avg,          ranges.cpsMin,  ranges.cpsMax);
-        else if (field === 'speed') color = speedColor(avg,         ranges.spdMin,  ranges.spdMax);
-        else if (field === 'alt')   color = altColor(avg,           ranges.altMin,  ranges.altMax);
-        else if (field === 'hdop')  color = hdopColor(avg,          ranges.hdopMin, ranges.hdopMax);
-        else if (field === 'accM')  color = accColor(avg,           ranges.accMin,  ranges.accMax);
-        else if (field === 'dose' || field == null) color = doseColor(avg, ranges.doseMin, ranges.doseMax);
-        else                        color = heatGradientColor(Math.min(1, avg / maxAvg));
+        if      (field === 'dpc')   color = dosePerCountColor(fa, ranges.dpcMin,  ranges.dpcMax);
+        else if (field === 'cps')   color = cpsColor(fa,          ranges.cpsMin,  ranges.cpsMax);
+        else if (field === 'speed') color = speedColor(fa,         ranges.spdMin,  ranges.spdMax);
+        else if (field === 'alt')   color = altColor(fa,           ranges.altMin,  ranges.altMax);
+        else if (field === 'hdop')  color = hdopColor(fa,          ranges.hdopMin, ranges.hdopMax);
+        else if (field === 'accM')  color = accColor(fa,           ranges.accMin,  ranges.accMax);
+        else if (field === 'dose' || field == null) color = doseColor(fa, ranges.doseMin, ranges.doseMax);
+        else                        color = heatGradientColor(Math.min(1, fa / maxAvg));
         const DR    = visR * 0.94;  // 94% — tight gap between neighbours
 
         ctx.beginPath();
