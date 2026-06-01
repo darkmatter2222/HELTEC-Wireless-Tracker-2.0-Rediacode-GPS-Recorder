@@ -70,6 +70,22 @@ const TILES = [
 
 // ---- helpers ---------------------------------------------------------------
 
+// Max plausible straight-line distance between two consecutive 1 Hz GPS fixes.
+// Based on 100 mph (160.9 km/h) with a 3-second buffer = ~134 m.
+// Any two points farther apart than this get a gap drawn instead of a line,
+// preventing the long phantom diagonals that appear when GPS jumps.
+const MAX_SEGMENT_M = 150;
+
+function haversineMeters(lat1, lng1, lat2, lng2) {
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat  = toRad(lat2 - lat1);
+  const dLng  = toRad(lng2 - lng1);
+  const a = Math.sin(dLat / 2) ** 2
+          + Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
 function bboxFromPoints(points) {
   if (!points.length) return null;
   let minLat = points[0].lat, maxLat = points[0].lat;
@@ -1670,6 +1686,7 @@ export default function App() {
       // true, leaving a visible break instead of drawing a phantom straight
       // line across the gap.
       let pendingGap = false;
+      let prevPoint  = null;
       for (const r of rows) {
         if (r.event === 'GPS_LOST') {
           pendingGap = true;
@@ -1680,9 +1697,14 @@ export default function App() {
         const p = { ...r };
         if (pendingGap) {
           p.gapBefore = true;
-          pendingGap = false;
+          pendingGap  = false;
+        } else if (prevPoint && haversineMeters(prevPoint.lat, prevPoint.lng, p.lat, p.lng) > MAX_SEGMENT_M) {
+          // Distance jump too large for 100 mph travel — treat as a gap so no
+          // phantom straight line is drawn across the missing track segment.
+          p.gapBefore = true;
         }
         points.push(p);
+        prevPoint = p;
       }
       out.push({ id: s.sessionId, color: sessionColor(idx), points, rows, meta: s, idx });
       idx++;
@@ -1756,9 +1778,18 @@ export default function App() {
         // rawRows have the same field names as the /sessions/{id} endpoint;
         // compactRows() normalises them to the {ts, lat, lng, uSv, ...} shape.
         const compact = compactRows(rawRows);
-        const points  = compact.filter(
-          r => r.lat != null && r.lng != null && !(r.lat === 0 && r.lng === 0) && !r.event
-        );
+        // Apply the same distance-gap guard used in the traces useMemo so that
+        // area-filtered track rendering also avoids phantom straight segments.
+        const points = compact.reduce((acc, r) => {
+          if (r.lat == null || r.lng == null || (r.lat === 0 && r.lng === 0) || r.event) return acc;
+          const p    = { ...r };
+          const prev = acc.length ? acc[acc.length - 1] : null;
+          if (prev && haversineMeters(prev.lat, prev.lng, p.lat, p.lng) > MAX_SEGMENT_M) {
+            p.gapBefore = true;
+          }
+          acc.push(p);
+          return acc;
+        }, []);
         // Match the session's color index from the global sessions list.
         const idx = sessions.findIndex(s => s.sessionId === sessionId);
         return {
