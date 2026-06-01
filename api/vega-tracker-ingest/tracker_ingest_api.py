@@ -1861,7 +1861,7 @@ def export_time_range_preview(startMs: int, endMs: int, gpsOnly: bool = False):
     # Rough byte estimate: ~90 bytes per row for radiacode_txt, ~75 for CSV.
     # Use the larger estimate so we don't surprise users with an unexpected zip.
     est_bytes = count * 90
-    max_bytes = 10 * 1024 * 1024  # 10 MB
+    max_bytes = 9 * 1024 * 1024  # 9 MB
     # Ceiling division for number of files.
     est_files = max(1, (est_bytes + max_bytes - 1) // max_bytes)
 
@@ -1878,13 +1878,13 @@ def export_time_range_preview(startMs: int, endMs: int, gpsOnly: bool = False):
 @app.post("/export/time-range")
 async def export_time_range(request: Request):
     """Export all samples within a time window, auto-splitting into a ZIP when
-    any single file would exceed maxBytesPerFile (default 10 MB).
+    any single file would exceed maxBytesPerFile (default 9 MB).
 
     Request body (JSON):
         startMs          int   Unix epoch ms, inclusive
         endMs            int   Unix epoch ms, inclusive
         format           str   radiacode_txt | radiacode | internal
-        maxBytesPerFile  int   optional, default 10485760 (10 MB)
+        maxBytesPerFile  int   optional, default 9437184 (9 MB)
 
     Response:
         text/plain       — single .txt file when format=radiacode_txt and data <= limit
@@ -1895,7 +1895,7 @@ async def export_time_range(request: Request):
     start_ms  = body.get("startMs")
     end_ms    = body.get("endMs")
     fmt       = body.get("format", "radiacode_txt").lower()
-    max_bytes = int(body.get("maxBytesPerFile", 10 * 1024 * 1024))
+    max_bytes = int(body.get("maxBytesPerFile", 9 * 1024 * 1024))
     ui_label  = body.get("label", "")  # optional human-readable range name for filename
     gps_only  = bool(body.get("gpsOnly", False))
 
