@@ -163,46 +163,39 @@ def sync_tracks(dry_run: bool = False, single_file: Path | None = None) -> None:
             skipped_count += 1
             continue
 
-        print(f"\n[sync] {'(dry-run) ' if dry_run else ''}→ {fname}")
+        print(f"\n[sync] {'(dry-run) ' if dry_run else ''}-> {fname}")
 
         if dry_run:
             uploaded_count += 1
             continue
 
-        pre_ts = time.time()
         try:
             task_id = client.upload_track(path)
-            track   = client.wait_for_upload(pre_upload_ts=pre_ts)
 
-            if track:
-                coll.update_one(
-                    {"filename": fname},
-                    {
-                        "$set": {
-                            "filename":               fname,
-                            "file_hash":              fhash,
-                            "status":                 "uploaded",
-                            "radiaverse_track_id":    track["id"],
-                            "radiaverse_track_name":  track.get("name", track["id"]),
-                            "task_id":                task_id,
-                            "uploaded_at":            datetime.now(timezone.utc),
-                            "error":                  None,
-                        }
-                    },
-                    upsert=True,
-                )
-                print(f"[sync]   ✓  {track.get('name', track['id'])}")
-                uploaded_count += 1
-            else:
-                # Upload was submitted but we couldn't confirm it appeared.
-                # Record as pending so the next run can re-try.
-                raise RuntimeError(
-                    "Upload submitted but track did not appear in list within timeout"
-                )
+            # A task_id in the 200 response means Radiaverse accepted the file.
+            # Track processing is async on their side — we don't wait.
+            coll.update_one(
+                {"filename": fname},
+                {
+                    "$set": {
+                        "filename":               fname,
+                        "file_hash":              fhash,
+                        "status":                 "uploaded",
+                        "radiaverse_track_id":    None,   # filled in later by reconcile
+                        "radiaverse_track_name":  None,
+                        "task_id":                task_id,
+                        "uploaded_at":            datetime.now(timezone.utc),
+                        "error":                  None,
+                    }
+                },
+                upsert=True,
+            )
+            print(f"[sync]   OK  task_id={task_id}")
+            uploaded_count += 1
 
         except Exception as exc:
             err = str(exc)
-            print(f"[sync]   ✗  FAILED: {err}")
+            print(f"[sync]   FAIL  FAILED: {err}")
             coll.update_one(
                 {"filename": fname},
                 {

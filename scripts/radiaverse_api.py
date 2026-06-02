@@ -210,21 +210,21 @@ class RadiaverseClient:
 
     def wait_for_upload(
         self,
-        pre_upload_ts: float,
-        timeout: int = 120,
-        poll_interval: int = 5,
+        pre_upload_count: int,
+        timeout: int = 180,
+        poll_interval: int = 8,
     ) -> dict | None:
         """
-        After calling upload_track(), poll the track list until a new track
-        with published_at >= pre_upload_ts appears (meaning processing finished).
+        After calling upload_track(), poll the track list until the total count
+        increases (meaning the new track finished processing and is visible).
 
         Args:
-            pre_upload_ts: float returned by time.time() BEFORE upload_track().
-            timeout:       seconds to wait before giving up.
-            poll_interval: seconds between polls.
+            pre_upload_count: total track count BEFORE upload_track() was called.
+            timeout:          seconds to wait before giving up.
+            poll_interval:    seconds between polls.
 
         Returns:
-            The new track dict, or None on timeout.
+            The new track dict (newest in the list), or None on timeout.
         """
         deadline = time.time() + timeout
         print("[api] Waiting for Radiaverse to process upload", end="", flush=True)
@@ -232,14 +232,15 @@ class RadiaverseClient:
             time.sleep(poll_interval)
             print(".", end="", flush=True)
             try:
-                data = self.list_tracks(page=1, size=5, sort_by="Uploaded at", sort_order="desc")
-                for item in data.get("items", []):
-                    if item.get("published_at", 0) >= pre_upload_ts:
-                        print(f"  done  →  {item['id']}")
-                        return item
+                data = self.list_tracks(page=1, size=1, sort_by="Uploaded at", sort_order="desc")
+                if data.get("total", 0) > pre_upload_count:
+                    newest = data["items"][0] if data.get("items") else None
+                    if newest:
+                        print(f"  done -> {newest['id']}")
+                        return newest
             except Exception as exc:
                 print(f"\n[api] Poll error: {exc}", end="")
-        print("  TIMEOUT — upload may still be processing on Radiaverse")
+        print("  TIMEOUT -- upload may still be processing on Radiaverse")
         return None
 
     # ── Delete ────────────────────────────────────────────────────────────────
@@ -274,10 +275,10 @@ class RadiaverseClient:
                 continue
             try:
                 self.delete_track(tid)
-                print(f"[api]   ✓  {name}")
+                print(f"[api]   OK  {name}")
                 deleted += 1
             except Exception as exc:
-                print(f"[api]   ✗  {name}: {exc}")
+                print(f"[api]   FAIL  {name}: {exc}")
         return deleted
 
 
@@ -324,9 +325,10 @@ if __name__ == "__main__":
             print("Aborted.")
 
     elif args.cmd == "upload":
-        ts = time.time()
+        pre_count_data = client.list_tracks(page=1, size=1)
+        pre_count = pre_count_data.get("total", 0)
         task_id = client.upload_track(args.file)
-        track = client.wait_for_upload(pre_upload_ts=ts)
+        track = client.wait_for_upload(pre_upload_count=pre_count)
         if track:
             print(f"Uploaded: {track['id']}  {track.get('name')}")
         else:

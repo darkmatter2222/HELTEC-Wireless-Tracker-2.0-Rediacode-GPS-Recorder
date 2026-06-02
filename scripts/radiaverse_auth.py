@@ -143,71 +143,108 @@ def _find_edge() -> str:
     )
 
 
-async def _capture_tokens_via_cdp(ws_debug_url: str) -> dict:
+async def _capture_tokens_via_cdp(port: int = CDP_PORT) -> dict:
     """
-    Attach to Edge via CDP WebSocket, enable Network recording, then wait for
-    the user to complete Google login.  When the browser posts to
-    /api/auth/google and gets a 200, capture the access + refresh tokens from
-    the response body.
+    Monitor all Edge pages via CDP Network events for the Radiaverse auth/google
+    response.  Reconnects automatically when a page navigates (Google OAuth
+    performs several HTTP redirects which close the per-page WebSocket).
     """
     import websockets  # websockets 10+ (async)
+    import requests as req_lib
 
     print(
         "[auth] Browser is open — complete the Google login in the Edge window.\n"
         "[auth] The script will capture your tokens automatically (timeout: 5 min)."
     )
 
-    async with websockets.connect(ws_debug_url) as ws:
-        # Enable Network event tracking
-        await ws.send(json.dumps({"id": 1, "method": "Network.enable"}))
-        await ws.recv()  # ignore the ack
+    loop = asyncio.get_event_loop()
+    deadline = loop.time() + 300  # 5-minute window
+    seen_req_ids: set[str] = set()
+    msg_id = 0
 
-        seen_req_ids: set[str] = set()
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + 300  # 5-minute window
+    def next_id() -> int:
+        nonlocal msg_id
+        msg_id += 1
+        return msg_id
 
-        while loop.time() < deadline:
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
-            except asyncio.TimeoutError:
-                continue
+    while loop.time() < deadline:
+        # ── Find the current page's CDP WebSocket URL ─────────────────────────
+        try:
+            targets = req_lib.get(
+                f"http://localhost:{port}/json", timeout=3
+            ).json()
+            pages = [
+                t for t in targets
+                if t.get("type") == "page" and "webSocketDebuggerUrl" in t
+            ]
+        except Exception:
+            await asyncio.sleep(1)
+            continue
 
-            msg = json.loads(raw)
-            evt = msg.get("method", "")
+        if not pages:
+            await asyncio.sleep(1)
+            continue
 
-            # Detect auth response
-            if evt == "Network.responseReceived":
-                resp = msg["params"]["response"]
-                if (
-                    "auth/google" in resp.get("url", "")
-                    and resp.get("status") == 200
-                ):
-                    req_id = msg["params"]["requestId"]
-                    if req_id not in seen_req_ids:
-                        seen_req_ids.add(req_id)
-                        # Request the response body from CDP
-                        await ws.send(json.dumps({
-                            "id": 2,
-                            "method": "Network.getResponseBody",
-                            "params": {"requestId": req_id},
-                        }))
+        ws_url = pages[0]["webSocketDebuggerUrl"]
 
-            # Handle response body
-            elif msg.get("id") == 2 and "result" in msg:
-                body_text = msg["result"].get("body", "")
-                try:
-                    data = json.loads(body_text)
-                    user = data.get("user", {})
-                    access = user.get("accessToken")
-                    refresh = user.get("refreshToken")
-                    if access and refresh:
-                        return {
-                            "access_token": access,
-                            "refresh_token": refresh,
-                            "saved_at": time.time(),
-                        }
-                except Exception as exc:
-                    print(f"[auth] Warning: failed to parse auth response: {exc}")
+        # ── Attach and listen; reconnect if the page navigates away ──────────
+        try:
+            async with websockets.connect(ws_url) as ws:
+                # Enable network event recording on this page
+                await ws.send(json.dumps({"id": next_id(), "method": "Network.enable"}))
+
+                body_request_id: int | None = None
+
+                while loop.time() < deadline:
+                    try:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
+
+                    msg = json.loads(raw)
+                    evt = msg.get("method", "")
+
+                    # Detect the auth/google response
+                    if evt == "Network.responseReceived":
+                        resp = msg["params"]["response"]
+                        if (
+                            "auth/google" in resp.get("url", "")
+                            and resp.get("status") == 200
+                        ):
+                            req_id = msg["params"]["requestId"]
+                            if req_id not in seen_req_ids:
+                                seen_req_ids.add(req_id)
+                                body_request_id = next_id()
+                                await ws.send(json.dumps({
+                                    "id": body_request_id,
+                                    "method": "Network.getResponseBody",
+                                    "params": {"requestId": req_id},
+                                }))
+
+                    # Receive the response body
+                    elif (
+                        body_request_id is not None
+                        and msg.get("id") == body_request_id
+                        and "result" in msg
+                    ):
+                        body_text = msg["result"].get("body", "")
+                        try:
+                            data = json.loads(body_text)
+                            user = data.get("user", {})
+                            access = user.get("accessToken")
+                            refresh = user.get("refreshToken")
+                            if access and refresh:
+                                return {
+                                    "access_token": access,
+                                    "refresh_token": refresh,
+                                    "saved_at": time.time(),
+                                }
+                        except Exception as exc:
+                            print(f"[auth] Warning: failed to parse auth response: {exc}")
+
+        except Exception:
+            # Page navigated → connection dropped; poll for the new page URL
+            await asyncio.sleep(0.5)
 
     raise TimeoutError("[auth] Login not completed within 5 minutes.")
 
@@ -241,17 +278,14 @@ def login_via_browser() -> dict:
         stderr=subprocess.DEVNULL,
     )
 
-    # Poll for the CDP endpoint
-    ws_debug_url: str | None = None
+    # Wait for CDP to become ready (poll /json endpoint)
     for _ in range(30):
         time.sleep(1)
         try:
             targets = req_lib.get(
                 f"http://localhost:{CDP_PORT}/json", timeout=2
             ).json()
-            page = next((t for t in targets if t.get("type") == "page"), None)
-            if page:
-                ws_debug_url = page["webSocketDebuggerUrl"]
+            if any(t.get("type") == "page" for t in targets):
                 break
         except Exception:
             pass
@@ -262,7 +296,7 @@ def login_via_browser() -> dict:
         )
 
     try:
-        tokens = asyncio.run(_capture_tokens_via_cdp(ws_debug_url))
+        tokens = asyncio.run(_capture_tokens_via_cdp(port=CDP_PORT))
     finally:
         try:
             proc.terminate()
