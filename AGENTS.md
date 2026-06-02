@@ -931,8 +931,9 @@ python scripts\radiaverse_api.py delete <track_id>
   `ConnectionResetError` or `ReadTimeout`, wait 30–60 s before retrying. The sync
   script includes a 3 s inter-upload delay to stay under limits.
 - **All 121 historical tracks** from `tracks/` were bulk-uploaded on 2026-06-02.
-  Radiaverse confirmed 101+ tracks visible at that time; remaining files were still
-  being processed server-side (expected async behavior).
+  Radiaverse confirmed **101 tracks visible** (stable count after full async processing).
+  The remaining 20 files had no valid GPS data and Radiaverse does not create a visible
+  track entry for GPS-less uploads — this is expected behavior, not an upload failure.
 
 ---
 
