@@ -859,6 +859,83 @@ consistency, and 30-second serial latency loop (the non-blocking BLE regression)
 
 ---
 
+## Radiaverse Track Upload Tooling (scripts/)
+
+Three scripts manage syncing local RadiaCode `.txt` track exports to the
+[Radiaverse](https://map.radiaverse.com) platform and recording upload state in MongoDB.
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `scripts/radiaverse_auth.py` | JWT token management — browser login + token cache |
+| `scripts/radiaverse_api.py`  | `RadiaverseClient` REST wrapper for all Radiaverse API calls |
+| `scripts/radiaverse_sync.py` | Daily sync driver — upload tracks, track state in MongoDB |
+| `scripts/radiaverse_tokens.json` | **gitignored** — cached JWT; valid ~7 days, auto-refreshed |
+
+### MongoDB collection: `radiaverse_uploads`
+
+Database `radiacode`, collection `radiaverse_uploads`. Unique index on `filename`.
+Document schema:
+```
+filename              local basename of .txt file
+file_hash             sha256 of file (detects content changes)
+status                "uploaded" | "failed" | "deleted"
+radiaverse_track_id   None (Radiaverse returns only task_id on upload)
+radiaverse_track_name None
+task_id               task_id returned by Radiaverse upload endpoint
+uploaded_at           ISO-8601 UTC timestamp
+error                 error string if status="failed", else None
+```
+
+### Common commands
+
+```powershell
+# First-time login (opens Edge, captures JWT via CDP, saves token to cache)
+python scripts\radiaverse_sync.py --login
+
+# Daily sync — upload any new/changed .txt tracks in tracks/
+python scripts\radiaverse_sync.py
+
+# Show upload status summary (MongoDB state vs Radiaverse API count)
+python scripts\radiaverse_sync.py --status
+
+# Dry run (no uploads, just show what would be done)
+python scripts\radiaverse_sync.py --dry-run
+
+# Upload a single file only
+python scripts\radiaverse_sync.py --file "tracks\RadiaCode_ Track(5).txt"
+
+# Wipe all tracks from Radiaverse and reset MongoDB records to "deleted"
+python scripts\radiaverse_sync.py --wipe-all --force
+
+# List all tracks currently on Radiaverse
+python scripts\radiaverse_api.py list
+
+# Delete a single track from Radiaverse
+python scripts\radiaverse_api.py delete <track_id>
+```
+
+### Important notes
+
+- **Radiaverse processes uploads asynchronously**: `upload_track()` returns a `task_id`
+  immediately; the track may not appear in `list_all_tracks()` for several minutes to
+  tens of minutes depending on file size and server load. MongoDB status `"uploaded"`
+  means the submission was accepted, not that the track is visible on the map yet.
+- **Token refresh**: `ensure_valid_token()` tries cached token → refresh → browser
+  re-login. Browser login requires Edge at the default install path and uses CDP
+  on port 9222. If Edge is already open, close it first or use `--force-login`.
+- **Zero-byte files**: Radiaverse accepts `0.0 KB` files (no GPS data) but they
+  may not generate a visible track entry.
+- **Rate limits**: Radiaverse enforces per-IP rate limits. If `list_all_tracks()` gets
+  `ConnectionResetError` or `ReadTimeout`, wait 30–60 s before retrying. The sync
+  script includes a 3 s inter-upload delay to stay under limits.
+- **All 121 historical tracks** from `tracks/` were bulk-uploaded on 2026-06-02.
+  Radiaverse confirmed 101+ tracks visible at that time; remaining files were still
+  being processed server-side (expected async behavior).
+
+---
+
 ## Python Dev Tools (scripts/)
 
 ```powershell
