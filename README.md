@@ -579,6 +579,96 @@ or specific month going back 3 years) and automatically packages multi-file expo
 
 ---
 
+## Automated Radiaverse Sync
+
+Three scripts in `scripts/` keep your MongoDB sessions automatically mirrored to
+[Radiaverse](https://map.radiaverse.com) — no manual export or upload needed.
+
+| File | Purpose |
+|------|---------|
+| `scripts/radiaverse_auth.py` | JWT token management — browser login + silent auto-refresh |
+| `scripts/radiaverse_api.py` | `RadiaverseClient` REST wrapper (upload, list, delete tracks) |
+| `scripts/radiaverse_sync.py` | Sync driver — daily job + file sync + status |
+| `scripts/radiaverse_daily.ps1` | Windows Task Scheduler wrapper (register/run/status/logs) |
+
+### How authentication works
+
+Authentication uses your **personal Google account** via OAuth on the Radiaverse website.
+You do a one-time browser login; the script captures and caches a JWT token pair locally
+in `scripts/radiaverse_tokens.json` (gitignored — never committed).
+
+| Token | Valid for | What happens when it expires |
+|-------|-----------|------------------------------|
+| Access token | ~7 days | Silently refreshed using the refresh token — no action needed |
+| Refresh token | ~90 days | Script fails with an auth error — run `--login` once to renew |
+
+The scheduled daily job runs fully unattended as long as you have used the script at
+least once in the past ~90 days. If the refresh token expires, you will see an error
+in `scripts/radiaverse_daily.log` — just run `--login` to fix it.
+
+**The sync cannot run on the server** — tokens belong to your Google account and live on
+your local Windows machine. The Task Scheduler job runs on your PC.
+
+### One-time setup
+
+```powershell
+# Step 1: Log in (opens Edge, sign in with Google, tokens are saved automatically)
+python scripts\radiaverse_sync.py --login
+
+# Step 2: Register the daily Task Scheduler job (runs at 06:00, catches up if PC was off)
+powershell -ExecutionPolicy Bypass scripts\radiaverse_daily.ps1 -Register
+```
+
+That's it. Every morning the job runs, finds any session that arrived in MongoDB overnight
+from the device, converts it to RadiaCode .txt format, and uploads it to Radiaverse.
+
+### Day-to-day commands
+
+```powershell
+# Upload all sessions not yet on Radiaverse (what the daily job does)
+python scripts\radiaverse_sync.py --sessions
+
+# Preview what would be uploaded without doing it
+python scripts\radiaverse_sync.py --sessions --dry-run
+
+# Upload one specific session by date ID
+python scripts\radiaverse_sync.py --session-id 2026-05-31
+
+# Show full status — how many sessions uploaded, pending, failed
+python scripts\radiaverse_sync.py --status
+
+# Force re-login (only needed if refresh token expired, ~every 90 days)
+python scripts\radiaverse_sync.py --login
+
+# Task Scheduler management
+powershell -ExecutionPolicy Bypass scripts\radiaverse_daily.ps1 -Register    # create job
+powershell -ExecutionPolicy Bypass scripts\radiaverse_daily.ps1 -Unregister  # remove job
+powershell -ExecutionPolicy Bypass scripts\radiaverse_daily.ps1 -Status      # show status table
+powershell -ExecutionPolicy Bypass scripts\radiaverse_daily.ps1 -DryRun      # manual dry-run
+```
+
+Logs are appended to `scripts/radiaverse_daily.log` on every scheduled run.
+
+### How sessions are tracked
+
+Each upload is recorded in the MongoDB `radiaverse_uploads` collection (database `radiacode`).
+Session uploads use the key `session_<sessionId>` (e.g. `session_2026-05-31`).
+Re-running the sync is safe — already-uploaded sessions are skipped automatically.
+Sessions with no GPS-locked rows are also skipped (Radiaverse would not create a visible
+track for GPS-less data anyway).
+
+### Asking Copilot to sync
+
+In any future Copilot chat session, just say:
+
+> "Upload all the latest data to Radiaverse"
+
+Copilot will run `python scripts\radiaverse_sync.py --sessions` (with `--dry-run` first
+to preview), check the output, and upload any pending sessions. If the token is expired
+it will prompt you to run `--login` first.
+
+---
+
 ## Detailed Documentation
 
 [AGENTS.md](AGENTS.md) is the full technical reference — hardware pinouts, BLE protocol details,
