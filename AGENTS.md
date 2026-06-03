@@ -859,6 +859,125 @@ consistency, and 30-second serial latency loop (the non-blocking BLE regression)
 
 ---
 
+## Radiaverse Track Upload Tooling (scripts/)
+
+Three scripts manage syncing local RadiaCode `.txt` track exports to the
+[Radiaverse](https://map.radiaverse.com) platform and recording upload state in MongoDB.
+
+### Files
+
+| File | Purpose |
+|------|---------|
+| `scripts/radiaverse_auth.py` | JWT token management — browser login + token cache |
+| `scripts/radiaverse_api.py`  | `RadiaverseClient` REST wrapper for all Radiaverse API calls |
+| `scripts/radiaverse_sync.py` | Daily sync driver — upload tracks, track state in MongoDB |
+| `scripts/radiaverse_tokens.json` | **gitignored** — cached JWT; valid ~7 days, auto-refreshed |
+
+### MongoDB collection: `radiaverse_uploads`
+
+Database `radiacode`, collection `radiaverse_uploads`. Unique index on `filename`.
+Document schema:
+```
+filename              local basename of .txt file OR "session_<sessionId>" for session-based uploads
+file_hash             sha256 of file (detects content changes); None for session-based uploads
+source                "file" (tracks/ upload) | "session" (daily session sync)
+status                "uploaded" | "failed" | "deleted"
+sessionId             only present for source="session"
+sampleCount           total samples for this session (only for source="session")
+gpsCount              GPS-locked samples for this session (only for source="session")
+radiaverse_track_id   None (Radiaverse returns only task_id on upload)
+radiaverse_track_name None
+task_id               task_id returned by Radiaverse upload endpoint
+uploaded_at           ISO-8601 UTC timestamp
+error                 error string if status="failed", else None
+```
+
+### Daily Session Sync (automated — preferred workflow)
+
+The daily session sync queries MongoDB `tracker_sessions` and uploads any session not yet
+in `radiaverse_uploads`. This is the correct workflow for ongoing device use: whenever
+the device syncs new GPS data to MongoDB via Wi-Fi, the next daily run uploads it to Radiaverse.
+
+```powershell
+# One-time: first-time login (opens Edge, captures JWT, saves to cache)
+python scripts\radiaverse_sync.py --login
+
+# Manual trigger (same as the scheduled task runs)
+python scripts\radiaverse_sync.py --sessions
+
+# Dry-run preview (shows what would be uploaded without doing it)
+python scripts\radiaverse_sync.py --sessions --dry-run
+
+# Upload one specific session by ID (e.g. re-run after a failure)
+python scripts\radiaverse_sync.py --session-id 2026-05-31
+
+# Register Windows Task Scheduler daily task (runs at 06:00 every day)
+powershell -ExecutionPolicy Bypass scripts\radiaverse_daily.ps1 -Register
+
+# Remove the scheduled task
+powershell -ExecutionPolicy Bypass scripts\radiaverse_daily.ps1 -Unregister
+
+# Status (uses --status mode)
+powershell -ExecutionPolicy Bypass scripts\radiaverse_daily.ps1 -Status
+```
+
+**Logs**: `scripts\radiaverse_daily.log` — one entry per day per run (appended, not rotated).
+
+**Tracking**: session uploads use key `session_<sessionId>` in `radiaverse_uploads`. This is
+distinct from the file-based keys so both `--sessions` and `--file` uploads can coexist.
+
+**Skipped sessions**: sessions with no GPS-locked rows are silently skipped (Radiaverse won't
+create a visible track entry for them regardless — same as the 20 GPS-less `.txt` files).
+
+### File Sync (historical tracks/ folder)
+
+```powershell
+# Upload any new/changed .txt tracks in tracks/
+python scripts\radiaverse_sync.py
+
+# Show upload status summary
+python scripts\radiaverse_sync.py --status
+
+# Dry run
+python scripts\radiaverse_sync.py --dry-run
+
+# Upload a single file only
+python scripts\radiaverse_sync.py --file "tracks\RadiaCode_ Track(5).txt"
+
+# Wipe all tracks from Radiaverse and reset MongoDB records to "deleted"
+python scripts\radiaverse_sync.py --wipe-all --force
+
+# List all tracks currently on Radiaverse
+python scripts\radiaverse_api.py list
+
+# Delete a single track from Radiaverse
+python scripts\radiaverse_api.py delete <track_id>
+```
+
+### Important notes
+
+- **Radiaverse processes uploads asynchronously**: `upload_track()` returns a `task_id`
+  immediately; the track may not appear in `list_all_tracks()` for several minutes to
+  tens of minutes depending on file size and server load. MongoDB status `"uploaded"`
+  means the submission was accepted, not that the track is visible on the map yet.
+- **Token refresh**: `ensure_valid_token()` tries cached token → refresh → browser
+  re-login. Browser login requires Edge at the default install path and uses CDP
+  on port 9222. If Edge is already open, close it first or use `--force-login`.
+  JWT is valid ~7 days; scheduled task runs daily so token is auto-refreshed.
+- **Session sync is idempotent**: re-running `--sessions` after a failure only retries
+  sessions still in `"failed"` state or not yet in `radiaverse_uploads`.
+- **Zero-byte files / GPS-less sessions**: Radiaverse accepts them but does not create
+  a visible track entry. Sessions without GPS rows are skipped before uploading.
+- **Rate limits**: Radiaverse enforces per-IP rate limits. If `list_all_tracks()` gets
+  `ConnectionResetError` or `ReadTimeout`, wait 30-60 s before retrying. The sync
+  script includes a 3 s inter-upload delay to stay under limits.
+- **All 121 historical tracks** from `tracks/` were bulk-uploaded on 2026-06-02.
+  Radiaverse confirmed **101 tracks visible** (stable count after full async processing).
+  The remaining 20 files had no valid GPS data and Radiaverse does not create a visible
+  track entry for GPS-less uploads -- this is expected behavior, not an upload failure.
+
+---
+
 ## Python Dev Tools (scripts/)
 
 ```powershell

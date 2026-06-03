@@ -65,3 +65,14 @@ All rules in AGENTS.md apply alongside these session rules.
 **Document maintenance rule**: After making any code changes in a session,
 review both AGENTS.md and this file and update them to reflect what changed.
 Both documents must stay in sync with the codebase at all times.
+
+---
+
+## Prompt library (task-specific runbooks)
+
+When the user asks for any of the tasks below, read the linked prompt file
+for exact steps before doing anything:
+
+| User says... | Prompt file to read |
+|---|---|
+| "upload to Radiaverse" / "sync sessions to Radiaverse" / "upload the latest data to Radiaverse" | [.github/radiaverse-sync.prompt.md](radiaverse-sync.prompt.md) |

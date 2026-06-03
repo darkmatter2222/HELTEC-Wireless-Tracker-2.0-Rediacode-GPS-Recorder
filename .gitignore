@@ -30,6 +30,10 @@ data/
 # ----- RadiaCode native track exports (imported into DB via scripts/import_tracks.py) -----
 tracks/
 
+# ----- Radiaverse sync — auth tokens and captured HAR files (contain credentials) -----
+scripts/radiaverse_tokens.json
+scripts/*.har
+
 # ----- PlatformIO build artifacts -----
 .pio/
 .pioenvs/
