@@ -507,6 +507,8 @@ uint32_t WifiUploader::runOnce() {
             ++ok;
             ++uploadedCount_;
             lastSuccess_ = millis();
+            // Notify lifetime stats counter (fast, non-blocking callback).
+            if (uploadSuccessCb_) uploadSuccessCb_();
             // v0.4.0: always delete after confirmed server receipt.
             // The "never duplicate data on device" contract is the whole
             // point of the rotate-then-delete model.

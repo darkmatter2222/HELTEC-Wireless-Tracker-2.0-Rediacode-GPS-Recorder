@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <vector>
+#include "lifetime_stats.h"
 #include "radiacode.h"
 
 class GpsModule;
@@ -14,13 +15,15 @@ public:
         SCREEN_GPS,
         SCREEN_STORAGE,
         SCREEN_DOSE,
+        SCREEN_LIFETIME,
         SCREEN_PICKER,
-        SCREEN_NORMAL_COUNT = SCREEN_PICKER, // STATS/GPS/STORAGE/DOSE cycle
+        SCREEN_NORMAL_COUNT = SCREEN_PICKER, // STATS/GPS/STORAGE/DOSE/LIFETIME cycle
     };
 
     void begin();
     void setSources(GpsModule* gps, SessionStore* store, RadiaCode* rc);
     void setWifi(WifiUploader* w) { wifi_ = w; }
+    void setLifetimeStats(LifetimeStats* l) { life_ = l; }
 
     void onShortPress();
     void onLongPress();
@@ -44,6 +47,7 @@ public:
         ACTION_PICK_DEVICE,     // Picker: connect to selected
         ACTION_CANCEL_PICKER,
         ACTION_RESET_DOSE,      // DOSE screen long-press: zero accumulator
+        ACTION_RESET_LIFETIME,  // LIFETIME screen long-press: zero all lifetime counters
         ACTION_FORCE_SYNC,      // STORAGE long-press: kick upload cycle now
     };
     LongAction lastLongAction() {
@@ -64,13 +68,15 @@ private:
     void renderGps();
     void renderStorage();
     void renderDose();
+    void renderLifetime();
     void renderPicker();
 
     Screen        screen_ = SCREEN_STATS;
-    GpsModule*    gps_ = nullptr;
-    SessionStore* store_ = nullptr;
-    RadiaCode*    rc_ = nullptr;
-    WifiUploader* wifi_ = nullptr;
+    GpsModule*     gps_ = nullptr;
+    SessionStore*  store_ = nullptr;
+    RadiaCode*     rc_ = nullptr;
+    WifiUploader*  wifi_ = nullptr;
+    LifetimeStats* life_ = nullptr;
 
     RadiaCode::Reading lastReading_{};
     RadiaCode::State   rcState_ = RadiaCode::State::Idle;
@@ -84,7 +90,7 @@ private:
     bool               forceFullRedraw_ = true;
     Screen             lastDrawnScreen_ = SCREEN_NORMAL_COUNT;
 
-    static constexpr int MAX_FIELDS = 40;
+    static constexpr int MAX_FIELDS = 50;
     String   prevText_[MAX_FIELDS];
     uint16_t prevFg_[MAX_FIELDS] = {0};
     uint8_t  prevSize_[MAX_FIELDS] = {0};

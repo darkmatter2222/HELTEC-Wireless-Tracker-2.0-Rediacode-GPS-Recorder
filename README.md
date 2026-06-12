@@ -4,7 +4,7 @@
 
 # Heltec Wireless Tracker 2.0 — RadiaCode GPS Field Logger & Personal Radiation Data Platform
 
-[![Firmware](https://img.shields.io/badge/firmware-v0.9.5-brightgreen?logo=cplusplus&logoColor=white)](src/config.h)
+[![Firmware](https://img.shields.io/badge/firmware-v1.0.0-brightgreen?logo=cplusplus&logoColor=white)](src/config.h)
 [![Platform](https://img.shields.io/badge/ESP32--S3-blue?logo=espressif&logoColor=white)](https://www.espressif.com/en/products/socs/esp32-s3)
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-build-orange?logo=platformio&logoColor=white)](https://platformio.org/)
 [![RadiaCode](https://img.shields.io/badge/RadiaCode-RC--102%20%7C%20RC--110-purple?logo=bluetooth&logoColor=white)](https://radiacode.com)

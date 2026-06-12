@@ -24,6 +24,7 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <functional>
 #include <vector>
 
 class SessionStore;
@@ -50,6 +51,13 @@ public:
     };
 
     void begin(SessionStore* store);
+
+    // Optional callback invoked (from the wifi_up task, core 0) after each
+    // successful HTTP 2xx file upload. Stored atomically; safe to set once
+    // from setup() before the task starts or any time thereafter.
+    // The callback MUST be fast and non-blocking (no file I/O, no serial).
+    using UploadSuccessCb = std::function<void()>;
+    void setUploadSuccessCb(UploadSuccessCb cb) { uploadSuccessCb_ = cb; }
 
     // Backwards-compatible no-op. The actual work runs on a dedicated
     // FreeRTOS task so the main Arduino loop is never blocked by Wi-Fi
@@ -100,6 +108,8 @@ private:
     volatile uint32_t failedCount_    = 0;
     volatile int      lastHttpStatus_ = 0;
     volatile uint8_t  activeNet_      = 0;  // ActiveNet enum
+
+    UploadSuccessCb   uploadSuccessCb_;
 
     // Set by connectWifi() on success; cleared by disconnectWifi().
     // Only accessed from the wifi_up task (no lock needed).
