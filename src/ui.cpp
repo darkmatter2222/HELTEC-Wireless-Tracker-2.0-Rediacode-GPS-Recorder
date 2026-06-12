@@ -642,45 +642,32 @@ void Ui::renderDose() {
 //   y=64  value       | value   | value
 //   y=72  "Hold: reset all"
 //
-// LIFETIME screen 1/2: Distance, Altitude Gain, Recording Time, Uploads.
+// LIFETIME screen 1/2: Distance (full width), Rec Time | Uploads, Altitude Gain (full width).
+// Distance and altitude gain get full width so large numbers don't collide.
 // Long-press emits ACTION_RESET_LIFETIME handled in main.cpp.
 void Ui::renderLifetime() {
     if (!life_) return;
     char buf[24];
 
-    // ---- Row 1: DIST | ALT GAIN ---------------------------------------------
-    field(10, 4,  14, 76, 8, "DIST",     COL_DIM, COL_BG, 1);
-    field(11, 84, 14, 72, 8, "ALT GAIN", COL_DIM, COL_BG, 1);
-
-    // Distance: km and miles
+    // ---- Row 1: DIST (full width) -------------------------------------------
+    field(10, 4, 14, 152, 8, "DIST", COL_DIM, COL_BG, 1);
     {
         const float km = life_->distanceKm();
         const float mi = km * 0.621371f;
-        if (km < 100.0f)       snprintf(buf, sizeof(buf), "%.1fkm %.1fmi", km, mi);
-        else if (km < 10000.f) snprintf(buf, sizeof(buf), "%.0fkm %.0fmi", km, mi);
-        else                   snprintf(buf, sizeof(buf), "%.0fkm",        km);
-        field(12, 4, 26, 76, 8, buf, COL_GREEN, COL_BG, 1);
-    }
-
-    // Altitude gain: metres and feet
-    {
-        const float m  = life_->altGainM();
-        const float ft = m * 3.28084f;
-        if (m < 10000.0f) snprintf(buf, sizeof(buf), "%.0fm %.0fft", m, ft);
-        else              snprintf(buf, sizeof(buf), "%.0fm", m);
-        field(13, 84, 26, 72, 8, buf, COL_GREEN, COL_BG, 1);
+        if (km < 100.0f)       snprintf(buf, sizeof(buf), "%.1fkm  %.1fmi", km, mi);
+        else if (km < 10000.f) snprintf(buf, sizeof(buf), "%.0fkm  %.0fmi", km, mi);
+        else                   snprintf(buf, sizeof(buf), "%.0fkm", km);
+        field(11, 4, 22, 152, 8, buf, COL_GREEN, COL_BG, 1);
     }
 
     // Separator line
     if (forceFullRedraw_) {
-        tft.drawFastHLine(4, 38, 152, COL_DIM);
+        tft.drawFastHLine(4, 32, 152, COL_DIM);
     }
 
-    // ---- Row 2: REC TIME | UPLOADS ------------------------------------------
-    field(14, 4,  42, 76, 8, "REC TIME", COL_DIM, COL_BG, 1);
-    field(15, 84, 42, 72, 8, "UPLOADS",  COL_DIM, COL_BG, 1);
-
-    // Recording time: days + hours, or hours + mins, or just mins
+    // ---- Row 2: REC TIME | UPLOADS (side by side — values stay short) -------
+    field(12, 4,  35, 76, 8, "REC TIME", COL_DIM, COL_BG, 1);
+    field(13, 84, 35, 72, 8, "UPLOADS",  COL_DIM, COL_BG, 1);
     {
         const uint32_t totalSecs = life_->recordingSecs();
         const uint32_t days  = totalSecs / 86400;
@@ -689,17 +676,30 @@ void Ui::renderLifetime() {
         if (days > 0)       snprintf(buf, sizeof(buf), "%ud %02uh",  (unsigned)days, (unsigned)hours);
         else if (hours > 0) snprintf(buf, sizeof(buf), "%uh %02um",  (unsigned)hours, (unsigned)mins);
         else                snprintf(buf, sizeof(buf), "%um",         (unsigned)mins);
-        field(16, 4, 54, 76, 8, buf, COL_FG, COL_BG, 1);
+        field(14, 4, 45, 76, 8, buf, COL_FG, COL_BG, 1);
     }
-
-    // Upload count
     {
         snprintf(buf, sizeof(buf), "%lu", (unsigned long)life_->wifiUploads());
-        field(17, 84, 54, 72, 8, buf, COL_FG, COL_BG, 1);
+        field(15, 84, 45, 72, 8, buf, COL_FG, COL_BG, 1);
+    }
+
+    // Separator line
+    if (forceFullRedraw_) {
+        tft.drawFastHLine(4, 55, 152, COL_DIM);
+    }
+
+    // ---- Row 3: ALT GAIN (full width) ---------------------------------------
+    field(16, 4, 58, 152, 8, "ALT GAIN", COL_DIM, COL_BG, 1);
+    {
+        const float m  = life_->altGainM();
+        const float ft = m * 3.28084f;
+        if (m < 10000.0f) snprintf(buf, sizeof(buf), "%.0fm  %.0fft", m, ft);
+        else              snprintf(buf, sizeof(buf), "%.0fm", m);
+        field(17, 4, 68, 152, 8, buf, COL_GREEN, COL_BG, 1);
     }
 
     // Footer hint
-    field(18, 4, 70, 156, 8, "Hold: reset all", COL_DIM, COL_BG, 1);
+    field(18, 4, 72, 156, 8, "Hold: reset all", COL_DIM, COL_BG, 1);
 }
 
 // LIFETIME screen 2/2: Spikes, Cells, Data written, Battery cycles.
