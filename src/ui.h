@@ -16,8 +16,9 @@ public:
         SCREEN_STORAGE,
         SCREEN_DOSE,
         SCREEN_LIFETIME,
+        SCREEN_LIFETIME2,
         SCREEN_PICKER,
-        SCREEN_NORMAL_COUNT = SCREEN_PICKER, // STATS/GPS/STORAGE/DOSE/LIFETIME cycle
+        SCREEN_NORMAL_COUNT = SCREEN_PICKER, // STATS/GPS/STORAGE/DOSE/LIFETIME/LIFETIME2 cycle
     };
 
     void begin();
@@ -69,6 +70,7 @@ private:
     void renderStorage();
     void renderDose();
     void renderLifetime();
+    void renderLifetime2();
     void renderPicker();
 
     Screen        screen_ = SCREEN_STATS;
