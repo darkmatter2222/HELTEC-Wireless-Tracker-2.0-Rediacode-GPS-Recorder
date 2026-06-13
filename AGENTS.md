@@ -377,14 +377,20 @@ namespace secrets {
   `Hold: sync now` shown at y=72 when Wi-Fi is configured. GPS long-press still advances the screen.
   STORAGE screen layout (v0.9.1): y=14 REC/AUTO/Samp; y=26 Day; y=38 Disk%; y=50 bar; y=56 Pending;
   y=64 Wi-Fi status; y=72 `Hold: sync now` hint.
-- **LIFETIME screen** (v1.0.0): New 6th screen in the normal cycle (STATS→GPS→STORAGE→DOSE→LIFETIME→STATS).
-  Displays 8 NVS-backed lifetime counters that survive every reboot and reset. Never fills flash — ~64 bytes
-  in the `"life"` NVS namespace. Long-press emits `ACTION_RESET_LIFETIME` → `LifetimeStats::reset()`.
-  Layout (two-column + three mini-columns in row 3):
-  - Row 1 (y=14/22): `DIST` km+mi  |  `ALT GAIN` m+ft
-  - Row 2 (y=37/46): `REC TIME` days+hours  |  `UPLOADS` count
-  - Row 3 (y=58/66): `SPIKES` (amber when > 0)  |  `CELLS` unique GPS grid cells  |  `DATA` KB/MB written
-  - Footer (y=72): `Hold: reset all`
+- **LIFETIME screens** (v1.0.0): Two new screens (6th and 7th) in the normal cycle
+  (STATS→GPS→STORAGE→DOSE→LIFETIME→LIFETIME2→STATS).
+  Both display NVS-backed lifetime counters that survive every reboot and reset (~64 bytes in
+  `"life"` NVS namespace). Long-press on **either** screen emits `ACTION_RESET_LIFETIME` →
+  `LifetimeStats::reset()` and zeroes all counters.
+  - **LIFETIME (1/2)** — metrics with full-width rows to prevent value/unit collisions on large numbers:
+    - Row 1 (y=14/22): `DIST` km + mi (full width)
+    - Row 2 (y=34/44): `REC TIME` days+hours  |  `UPLOADS` count (side-by-side)
+    - Row 3 (y=56/64): `ALT GAIN` m + ft (full width)
+    - Footer (y=71): `Hold: reset all`
+  - **LIFETIME2 (2/2)** — event counters:
+    - Row 1 (y=14/26): `SPIKES` (amber when > 0)  |  `CELLS` unique GPS grid cells
+    - Row 2 (y=42/54): `DATA` KB/MB written to flash  |  `BAT CYCLES` charge cycles
+    - Footer (y=70): `Hold: reset all`
 
 ### Wi-Fi Uploader — `wifi_uploader.{h,cpp}`
 
@@ -403,13 +409,18 @@ namespace secrets {
   (GPS+RC connected time), `wifiUploads` (successful HTTP 2xx), `spikeEvents` (CPS ≥ 50),
   `uniqueCells` (distinct 0.01° grid cells visited ≈ 1.1 km resolution), `totalBytes` (CSV
   bytes written to flash), `battCycles` (discharge ≤20% → charge ≥80% cycle count).
+- **`totalBytes` wiring**: `SessionStore::append()` was changed to return `size_t` (bytes written,
+  0 on skip/error). `main.cpp` calls `gLife.onBytesWritten(appendedBytes)` after each successful
+  append. Before this fix (v1.0.0 initial), DATA always showed 0.
+- **`battCycles` note**: counter is correct but will show 0 until the battery has been discharged
+  to ≤20% and then recharged to ≥80% at least once. This is expected behavior, not a bug.
 - **NVS save policy**: flush when any counter exceeds its delta threshold OR 60 s elapsed.
   Typical write rate: a few per hour in active use.
 - **Safety limits**: distance delta capped at 5 km/sample (GPS noise guard); altitude gain capped
   at 200 m/sample; recording time capped at 10 s/sample; in-RAM unique-cell hash table (512 slots)
   saturates gracefully — counter stays accurate from NVS value, RAM tracking stops.
 - **Reset**: `LifetimeStats::reset()` zeroes all counters and writes NVS immediately.
-  Triggered by long-press on the LIFETIME screen (`ACTION_RESET_LIFETIME`).
+  Triggered by long-press on either LIFETIME screen (`ACTION_RESET_LIFETIME`).
 - **Unit tests**: `test/test_lifetime_stats_native/` — 24 tests covering haversine, noise gates,
   altitude accumulation, spike detection, recording time capping, cell key encoding, and battery
   cycle state machine.

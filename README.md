@@ -73,10 +73,17 @@ and a full-featured web application — all in one repo. If any of these apply t
 
 ## Screens
 
-| STATS | GPS | STORAGE | PICKER |
-|:-----:|:---:|:-------:|:------:|
-| ![stats](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_stats.png) | ![gps](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_gps.png) | ![storage](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_storage.png) | ![picker](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_picker.png) |
-| Live dose rate (nSv/h) + sample counter | Fix quality, coordinates, bearing | Recording state, pending uploads, sync status | BLE device selection |
+Short-press cycles through all screens. Long-press action varies per screen (see table).
+
+| STATS | GPS | STORAGE | DOSE |
+|:-----:|:---:|:-------:|:----:|
+| ![stats](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_stats.png) | ![gps](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_gps.png) | ![storage](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_storage.png) | ![dose](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_dose.png) |
+| Live dose rate (nSv/h) + sample counter · **Long: BLE picker** | Fix quality, coordinates, bearing · **Long: advance** | Recording state, pending uploads, sync status · **Long: force sync** | Cumulative trip dose (µSv/mSv) + instant rate · **Long: reset dose** |
+
+| LIFETIME (1/2) | LIFETIME (2/2) | PICKER |
+|:--------------:|:--------------:|:------:|
+| ![lifetime](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_lifetime.png) | ![lifetime2](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_lifetime2.png) | ![picker](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_picker.png) |
+| Distance (km/mi) · Rec time · Alt gain (m/ft) · **Long: reset all** | Spikes · Unique cells · Data written · Battery cycles · **Long: reset all** | BLE device selection · **Long: connect** |
 
 > Rendered at 3× scale (480×240 px) from `scripts/render_screens.py`. Actual display is 160×80.
 
