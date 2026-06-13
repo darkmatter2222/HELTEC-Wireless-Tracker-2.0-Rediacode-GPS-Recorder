@@ -591,13 +591,13 @@ bool SessionStore::resumeIfActive() {
     return false;
 }
 
-void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
+size_t SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
                           float uSvPerHour, float cps,
                           bool hasGps, double lat, double lng,
                           const String& deviceId,
                           float speedKph, float bearingDeg,
                           float altitudeM, float hdop, float accuracyM) {
-    if (!hasUsableBackend()) return;
+    if (!hasUsableBackend()) return 0;
 
     // ---- Always-on contract gates ----------------------------------------
     // No GPS fix => sample is discarded entirely. The device's purpose is
@@ -609,13 +609,13 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
             Serial.printf("[REC] skip: no GPS fix (skipped=%u)\n",
                           (unsigned)skippedNoGps);
         }
-        return;
+        return 0;
     }
     constexpr uint64_t MIN_VALID_TS_MS = 1577836800000ULL;
-    if (timestampMsFull < MIN_VALID_TS_MS) return;
+    if (timestampMsFull < MIN_VALID_TS_MS) return 0;
 
     String day = dayIdFromEpochMs(timestampMsFull);
-    if (day.length() != 10) return;
+    if (day.length() != 10) return 0;
 
     Lock lk(mutex_);
     event_log::markPhase("ST_APPEND");
@@ -631,7 +631,7 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
         event_log::markPhase("ST_OPEN_DAY");
         if (!openDayFile_(day)) {
             event_log::markPhase("ST_OPEN_FAIL");
-            return;
+            return 0;
         }
     }
 
@@ -650,22 +650,22 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
                        (unsigned long long)timestampMsFull,
                        uSvPerHour, cps, lat, lng, deviceId.c_str(),
                        spd, brg, alt, hdp, acc);
-    if (len <= 0) return;
+    if (len <= 0) return 0;
 
     String path = pathFor(activeId_);
     if (backend_ == Backend::SdFat) {
         FsFile f = gSdFat.open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND);
-        if (!f) { log_w("append: open failed"); return; }
+        if (!f) { log_w("append: open failed"); return 0; }
         f.write((const uint8_t*)line, (size_t)len);
         f.close();
         ++sampleCount_;
         ++lifetimeSamples_;
-        return;
+        return (size_t)len;
     }
-    if (!fs_) return;
+    if (!fs_) return 0;
     event_log::markPhase("ST_OPEN_APPEND");
     File f = fs_->open(path, "a");
-    if (!f) { log_w("append: open failed"); event_log::markPhase("ST_OPEN_FAIL2"); return; }
+    if (!f) { log_w("append: open failed"); event_log::markPhase("ST_OPEN_FAIL2"); return 0; }
     event_log::markPhase("ST_WRITE");
     size_t written = f.print(line);
     event_log::markPhase("ST_CLOSE");
@@ -674,7 +674,7 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
     if ((int)written < len) {
         Serial.printf("[REC] WRITE ERR: tried %d bytes wrote %u heap=%u\n",
                       len, (unsigned)written, (unsigned)ESP.getFreeHeap());
-        return;
+        return 0;
     }
     ++sampleCount_;
     ++lifetimeSamples_;
@@ -683,6 +683,7 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
                       (unsigned)sampleCount_, activeId_.c_str(),
                       (unsigned)ESP.getFreeHeap());
     }
+    return (size_t)len;
 }
 
 // =============================================================================

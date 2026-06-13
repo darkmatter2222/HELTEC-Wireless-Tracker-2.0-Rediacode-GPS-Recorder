@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-render_screens.py — generate PNG mockups of the four TFT screens at 3× scale
+render_screens.py — generate PNG mockups of all TFT screens at 3× scale
 (480 × 240 px, representing the 160 × 80 display).
 
 Requires Pillow:
@@ -9,7 +9,7 @@ Requires Pillow:
 Usage:
     python scripts/render_screens.py
 
-Output: docs/screens/screen_{stats,gps,storage,picker}.png
+Output: docs/screens/screen_{stats,gps,storage,dose,lifetime,lifetime2,picker}.png
 """
 
 import os
@@ -231,6 +231,87 @@ def render_storage_uploading():
     return img
 
 # ---------------------------------------------------------------------------
+# DOSE screen — cumulative trip dose accumulator
+# ---------------------------------------------------------------------------
+def render_dose():
+    img  = Image.new("RGB", (W, H), COL_BG)
+    draw = ImageDraw.Draw(img)
+    draw_header(draw, "OK  ", COL_GREEN, has_fix=True, bat_pct=78, recording=True)
+
+    field(draw,  4, 14,  78, 8, "TOTAL DOSE",  COL_DIM,   COL_BG)
+    field(draw, 94, 14,  62, 8, "since reset", COL_DIM,   COL_BG)
+
+    # Big value (size-3) at native y=24, unit label at y=32
+    field(draw,  4, 24,  90, 24, " 0.142",     COL_GREEN, COL_BG, sz=3)
+    field(draw, 96, 32,  30,  8, "uSv",        COL_DIM,   COL_BG)
+
+    # Separator
+    draw.line([s(4), s(50), s(DW - 4), s(50)], fill=COL_DIM, width=1)
+
+    # Instantaneous rate
+    field(draw, 4, 56, 156, 8, "Rate:  0.285 uSv/h",   COL_FG,  COL_BG)
+    # Footer hint
+    field(draw, 4, 68, 156, 8, "Hold: reset dose",      COL_DIM, COL_BG)
+    return img
+
+# ---------------------------------------------------------------------------
+# LIFETIME screen 1/2 — Distance (full-width), Rec Time | Uploads, Alt Gain
+# ---------------------------------------------------------------------------
+def render_lifetime():
+    img  = Image.new("RGB", (W, H), COL_BG)
+    draw = ImageDraw.Draw(img)
+    draw_header(draw, "OK  ", COL_GREEN, has_fix=True, bat_pct=78, recording=True)
+
+    # Row 1: DIST full-width
+    field(draw, 4, 14, 152, 8, "DIST",               COL_DIM,   COL_BG)
+    field(draw, 4, 22, 152, 8, "234.1km  145.5mi",   COL_GREEN, COL_BG)
+
+    # Separator
+    draw.line([s(4), s(31), s(DW - 4), s(31)], fill=COL_DIM, width=1)
+
+    # Row 2: REC TIME | UPLOADS side-by-side
+    field(draw,  4, 34,  76, 8, "REC TIME",  COL_DIM, COL_BG)
+    field(draw, 84, 34,  72, 8, "UPLOADS",   COL_DIM, COL_BG)
+    field(draw,  4, 44,  76, 8, "5h 23m",   COL_FG,  COL_BG)
+    field(draw, 84, 44,  72, 8, "42",        COL_FG,  COL_BG)
+
+    # Separator
+    draw.line([s(4), s(53), s(DW - 4), s(53)], fill=COL_DIM, width=1)
+
+    # Row 3: ALT GAIN full-width
+    field(draw, 4, 56, 152, 8, "ALT GAIN",           COL_DIM,   COL_BG)
+    field(draw, 4, 64, 152, 8, "1842m  6043ft",      COL_GREEN, COL_BG)
+
+    field(draw, 4, 71, 156, 8, "Hold: reset all",    COL_DIM,   COL_BG)
+    return img
+
+# ---------------------------------------------------------------------------
+# LIFETIME screen 2/2 — Spikes, Cells, Data written, Battery cycles
+# ---------------------------------------------------------------------------
+def render_lifetime2():
+    img  = Image.new("RGB", (W, H), COL_BG)
+    draw = ImageDraw.Draw(img)
+    draw_header(draw, "OK  ", COL_GREEN, has_fix=True, bat_pct=78, recording=True)
+
+    # Row 1: SPIKES | CELLS
+    field(draw,  4, 14, 76, 8, "SPIKES",     COL_DIM,   COL_BG)
+    field(draw, 84, 14, 72, 8, "CELLS",      COL_DIM,   COL_BG)
+    field(draw,  4, 26, 76, 8, "3",          COL_AMBER, COL_BG)   # amber when > 0
+    field(draw, 84, 26, 72, 8, "1289",       COL_FG,    COL_BG)
+
+    # Separator
+    draw.line([s(4), s(38), s(DW - 4), s(38)], fill=COL_DIM, width=1)
+
+    # Row 2: DATA | BAT CYCLES
+    field(draw,  4, 42, 76, 8, "DATA",       COL_DIM,   COL_BG)
+    field(draw, 84, 42, 72, 8, "BAT CYCLES", COL_DIM,   COL_BG)
+    field(draw,  4, 54, 76, 8, "4MB",        COL_FG,    COL_BG)
+    field(draw, 84, 54, 72, 8, "7",          COL_FG,    COL_BG)
+
+    field(draw, 4, 70, 156, 8, "Hold: reset all",    COL_DIM, COL_BG)
+    return img
+
+# ---------------------------------------------------------------------------
 # PICKER screen — BLE device list
 # ---------------------------------------------------------------------------
 def render_picker():
@@ -274,6 +355,9 @@ def main():
         "gps":               render_gps(),
         "storage":           render_storage(),
         "storage_uploading": render_storage_uploading(),
+        "dose":              render_dose(),
+        "lifetime":          render_lifetime(),
+        "lifetime2":         render_lifetime2(),
         "picker":            render_picker(),
     }
 

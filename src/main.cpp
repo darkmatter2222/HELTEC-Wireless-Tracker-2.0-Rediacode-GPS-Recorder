@@ -14,6 +14,7 @@
 #include "button.h"
 #include "event_log.h"
 #include "gps_module.h"
+#include "lifetime_stats.h"
 #include "radiacode.h"
 #include "session_store.h"
 #include "ui.h"
@@ -22,6 +23,7 @@
 namespace {
 Button        gButton;
 GpsModule     gGps;
+LifetimeStats gLife;
 RadiaCode     gRadia;
 SessionStore  gStore;
 Ui            gUi;
@@ -265,10 +267,17 @@ void setup() {
     // already mounted and the NVS partition is accessible.
     loadDoseFromNvs();
 
+    // Load lifetime statistics from NVS (v1.0.0).
+    gLife.begin();
+
     gWifi.begin(&gStore);
+    // Wire lifetime upload counter — incremented on the wifi_up task (core 0).
+    // LifetimeStats::onUploadSuccess() is a single atomic increment; safe.
+    gWifi.setUploadSuccessCb([]() { gLife.onUploadSuccess(); });
 
     gUi.setSources(&gGps, &gStore, &gRadia);
     gUi.setWifi(&gWifi);
+    gUi.setLifetimeStats(&gLife);
     gUi.setRadiaState(RadiaCode::State::Idle, String());
 
     gRadia.begin(
@@ -683,21 +692,31 @@ void loop() {
     portEXIT_CRITICAL(&gSampleMux);
     if (have) {
         event_log::markPhase("MAIN_APPEND");
-        gStore.append(0, s.ts, s.uSv, s.cps,
+        const size_t appendedBytes = gStore.append(0, s.ts, s.uSv, s.cps,
                       s.hasGps, s.lat, s.lng, s.deviceId,
                       s.speed, s.bearing, s.alt, s.hdop, s.acc);
+        if (appendedBytes > 0 && gLife.ready()) gLife.onBytesWritten(appendedBytes);
 
         // Integrate dose: µSv/hr × dt_ms / 3 600 000 = µSv accumulated.
         // Cap dt to 10 s to avoid a phantom spike after a long BLE gap.
+        const uint32_t nowDose = millis();
+        uint32_t dtMs32 = 0;
         if (s.uSv > 0.0f) {
-            const uint32_t nowDose = millis();
             if (gLastDoseMs > 0) {
                 const float dtMs = (float)(int32_t)(nowDose - gLastDoseMs);
                 if (dtMs > 0.0f && dtMs < 10000.0f) {
                     gTripDoseMicroSv += s.uSv * dtMs / 3600000.0f;
+                    dtMs32 = (uint32_t)dtMs;
                 }
             }
             gLastDoseMs = nowDose;
+        }
+
+        // Update lifetime statistics for this sample.
+        if (s.hasGps && gLife.ready()) {
+            gLife.onGpsFix(s.lat, s.lng,
+                           (double)s.alt, s.alt > -9000.f);
+            gLife.onSample(s.cps, dtMs32);
         }
 
         event_log::markPhase("MAIN_LOOP");
@@ -754,6 +773,9 @@ void loop() {
                 case Ui::ACTION_RESET_DOSE:
                     resetDose();
                     break;
+                case Ui::ACTION_RESET_LIFETIME:
+                    gLife.reset();
+                    break;
                 case Ui::ACTION_FORCE_SYNC:
                     Serial.println("[UI] STORAGE long-press: forcing sync now");
                     gWifi.requestNow();
@@ -781,7 +803,9 @@ void loop() {
     const uint32_t now = millis();
     if ((now - lastBat) > 5000) {
         lastBat = now;
-        gUi.setBatteryPercent(readBatteryPercent());
+        const int bpct = readBatteryPercent();
+        gUi.setBatteryPercent(bpct);
+        if (gLife.ready()) gLife.onBattery(bpct);
     }
     // Persist cumulative dose to NVS only when the value has changed by at
     // least DOSE_NVS_DELTA_USV or the safety ceiling DOSE_NVS_MAX_INTERVAL_MS
@@ -813,6 +837,9 @@ void loop() {
                       (unsigned)gStore.lifetimeSamples(),
                       gTripDoseMicroSv);
     }
+
+    // Periodic lifetime stats NVS flush.
+    if (gLife.ready()) gLife.tickSave();
 
     gUi.setTripDose(gTripDoseMicroSv);
     gUi.tick();

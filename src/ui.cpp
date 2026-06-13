@@ -1,6 +1,7 @@
 #include "ui.h"
 #include "config.h"
 #include "gps_module.h"
+#include "lifetime_stats.h"
 #include "session_store.h"
 #include "wifi_uploader.h"
 
@@ -133,6 +134,11 @@ void Ui::onLongPress() {
             // Long-press on DOSE screen signals main.cpp to zero the accumulator.
             pendingAction_ = ACTION_RESET_DOSE;
             break;
+        case SCREEN_LIFETIME:
+        case SCREEN_LIFETIME2:
+            // Long-press on either LIFETIME screen resets all lifetime counters.
+            pendingAction_ = ACTION_RESET_LIFETIME;
+            break;
         case SCREEN_PICKER:
             if (pickerCursor_ >= (int)pickList_.size()) {
                 pendingAction_ = ACTION_CANCEL_PICKER;
@@ -231,11 +237,13 @@ void Ui::tick() {
 
     renderHeader();
     switch (screen_) {
-        case SCREEN_STATS:   renderStats();   break;
-        case SCREEN_GPS:     renderGps();     break;
-        case SCREEN_STORAGE: renderStorage(); break;
-        case SCREEN_DOSE:    renderDose();    break;
-        case SCREEN_PICKER:  renderPicker();  break;
+        case SCREEN_STATS:    renderStats();    break;
+        case SCREEN_GPS:      renderGps();      break;
+        case SCREEN_STORAGE:  renderStorage();  break;
+        case SCREEN_DOSE:     renderDose();     break;
+        case SCREEN_LIFETIME:  renderLifetime();  break;
+        case SCREEN_LIFETIME2: renderLifetime2(); break;
+        case SCREEN_PICKER:   renderPicker();   break;
         default: break;
     }
     forceFullRedraw_ = false;
@@ -619,6 +627,124 @@ void Ui::renderDose() {
 
     // Footer hint -----------------------------------------------------------
     field(15, 4, 68, 156, 8, "Hold: reset dose", COL_DIM, COL_BG, 1);
+}
+
+// ---------------------------------------------------------------------------
+// LIFETIME screen (160 x 68 below header, v1.0.0)
+//
+// Two-column grid, 5 data rows + 1 hint footer.
+// Pixel layout:
+//   y=14  "DIST km"   | "ALT GAIN m"
+//   y=26  value       | value
+//   y=38  "REC TIME"  | "UPLOADS"
+//   y=46  value       | value
+//   y=56  "SPIKES"    | "CELLS" | "DATA"
+//   y=64  value       | value   | value
+//   y=72  "Hold: reset all"
+//
+// LIFETIME screen 1/2: Distance (full width), Rec Time | Uploads, Altitude Gain (full width).
+// Distance and altitude gain get full width so large numbers don't collide.
+// Long-press emits ACTION_RESET_LIFETIME handled in main.cpp.
+void Ui::renderLifetime() {
+    if (!life_) return;
+    char buf[24];
+
+    // ---- Row 1: DIST (full width) -------------------------------------------
+    field(10, 4, 14, 152, 8, "DIST", COL_DIM, COL_BG, 1);
+    {
+        const float km = life_->distanceKm();
+        const float mi = km * 0.621371f;
+        if (km < 100.0f)       snprintf(buf, sizeof(buf), "%.1fkm  %.1fmi", km, mi);
+        else if (km < 10000.f) snprintf(buf, sizeof(buf), "%.0fkm  %.0fmi", km, mi);
+        else                   snprintf(buf, sizeof(buf), "%.0fkm", km);
+        field(11, 4, 22, 152, 8, buf, COL_GREEN, COL_BG, 1);
+    }
+
+    // Separator line
+    if (forceFullRedraw_) {
+        tft.drawFastHLine(4, 31, 152, COL_DIM);
+    }
+
+    // ---- Row 2: REC TIME | UPLOADS (side by side — values stay short) -------
+    field(12, 4,  34, 76, 8, "REC TIME", COL_DIM, COL_BG, 1);
+    field(13, 84, 34, 72, 8, "UPLOADS",  COL_DIM, COL_BG, 1);
+    {
+        const uint32_t totalSecs = life_->recordingSecs();
+        const uint32_t days  = totalSecs / 86400;
+        const uint32_t hours = (totalSecs % 86400) / 3600;
+        const uint32_t mins  = (totalSecs % 3600)  / 60;
+        if (days > 0)       snprintf(buf, sizeof(buf), "%ud %02uh",  (unsigned)days, (unsigned)hours);
+        else if (hours > 0) snprintf(buf, sizeof(buf), "%uh %02um",  (unsigned)hours, (unsigned)mins);
+        else                snprintf(buf, sizeof(buf), "%um",         (unsigned)mins);
+        field(14, 4, 44, 76, 8, buf, COL_FG, COL_BG, 1);
+    }
+    {
+        snprintf(buf, sizeof(buf), "%lu", (unsigned long)life_->wifiUploads());
+        field(15, 84, 44, 72, 8, buf, COL_FG, COL_BG, 1);
+    }
+
+    // Separator line
+    if (forceFullRedraw_) {
+        tft.drawFastHLine(4, 53, 152, COL_DIM);
+    }
+
+    // ---- Row 3: ALT GAIN (full width) ---------------------------------------
+    field(16, 4, 56, 152, 8, "ALT GAIN", COL_DIM, COL_BG, 1);
+    {
+        const float m  = life_->altGainM();
+        const float ft = m * 3.28084f;
+        if (m < 10000.0f) snprintf(buf, sizeof(buf), "%.0fm  %.0fft", m, ft);
+        else              snprintf(buf, sizeof(buf), "%.0fm", m);
+        field(17, 4, 64, 152, 8, buf, COL_GREEN, COL_BG, 1);
+    }
+
+    // Footer hint (y=71 → 8px font fits within 80px display)
+    field(18, 4, 71, 156, 8, "Hold: reset all", COL_DIM, COL_BG, 1);
+}
+
+// LIFETIME screen 2/2: Spikes, Cells, Data written, Battery cycles.
+// Long-press also emits ACTION_RESET_LIFETIME.
+void Ui::renderLifetime2() {
+    if (!life_) return;
+    char buf[24];
+
+    // ---- Row 1: SPIKES | CELLS ----------------------------------------------
+    field(19, 4,  14, 76, 8, "SPIKES",     COL_DIM, COL_BG, 1);
+    field(20, 84, 14, 72, 8, "CELLS",      COL_DIM, COL_BG, 1);
+
+    {
+        snprintf(buf, sizeof(buf), "%lu", (unsigned long)life_->spikeEvents());
+        const uint16_t spkCol = life_->spikeEvents() > 0 ? COL_AMBER : COL_DIM;
+        field(21, 4, 26, 76, 8, buf, spkCol, COL_BG, 1);
+    }
+    {
+        snprintf(buf, sizeof(buf), "%lu", (unsigned long)life_->uniqueCells());
+        field(22, 84, 26, 72, 8, buf, COL_FG, COL_BG, 1);
+    }
+
+    // Separator line
+    if (forceFullRedraw_) {
+        tft.drawFastHLine(4, 38, 152, COL_DIM);
+    }
+
+    // ---- Row 2: DATA WRITTEN | BAT CYCLES -----------------------------------
+    field(23, 4,  42, 76, 8, "DATA",       COL_DIM, COL_BG, 1);
+    field(24, 84, 42, 72, 8, "BAT CYCLES", COL_DIM, COL_BG, 1);
+
+    // Total data: show in KB or MB
+    {
+        const uint64_t bytes = life_->totalBytes();
+        if (bytes < 1024*1024ULL) snprintf(buf, sizeof(buf), "%luKB", (unsigned long)(bytes / 1024));
+        else                      snprintf(buf, sizeof(buf), "%luMB", (unsigned long)(bytes / 1024 / 1024));
+        field(25, 4, 54, 76, 8, buf, COL_FG, COL_BG, 1);
+    }
+    {
+        snprintf(buf, sizeof(buf), "%lu", (unsigned long)life_->battCycles());
+        field(26, 84, 54, 72, 8, buf, COL_FG, COL_BG, 1);
+    }
+
+    // Footer hint
+    field(27, 4, 70, 156, 8, "Hold: reset all", COL_DIM, COL_BG, 1);
 }
 
 // ---------------------------------------------------------------------------
