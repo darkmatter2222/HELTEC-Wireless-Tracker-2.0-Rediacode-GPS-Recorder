@@ -692,9 +692,10 @@ void loop() {
     portEXIT_CRITICAL(&gSampleMux);
     if (have) {
         event_log::markPhase("MAIN_APPEND");
-        gStore.append(0, s.ts, s.uSv, s.cps,
+        const size_t appendedBytes = gStore.append(0, s.ts, s.uSv, s.cps,
                       s.hasGps, s.lat, s.lng, s.deviceId,
                       s.speed, s.bearing, s.alt, s.hdop, s.acc);
+        if (appendedBytes > 0 && gLife.ready()) gLife.onBytesWritten(appendedBytes);
 
         // Integrate dose: µSv/hr × dt_ms / 3 600 000 = µSv accumulated.
         // Cap dt to 10 s to avoid a phantom spike after a long BLE gap.

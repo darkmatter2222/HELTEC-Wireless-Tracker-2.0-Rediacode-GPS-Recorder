@@ -86,7 +86,8 @@ public:
     // When the local-eastern day rolls over mid-append, the previous day
     // file is rotated to pending-upload state and a new <today>.csv is opened
     // transparently. No samples are lost across the rollover.
-    void append(uint32_t timestampMsLow,    // legacy, ignored
+    // Returns the number of bytes actually written (0 on skip/error).
+    size_t append(uint32_t timestampMsLow,    // legacy, ignored
                 uint64_t timestampMsFull,
                 float uSvPerHour,
                 float cps,
