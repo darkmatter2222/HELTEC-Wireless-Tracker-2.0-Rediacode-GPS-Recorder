@@ -57,7 +57,10 @@ public:
     // dt_ms is milliseconds since the previous call (for recording-time accrual).
     // cps is the raw count rate.
     void onSample(float cps, uint32_t dt_ms);
-
+    // Called once per second when the device is powered on but NOT actively
+    // recording (no GPS fix, RC disconnected, or sample not yet available).
+    // dt_ms: elapsed milliseconds since the last idle tick (capped at 10 s).
+    void onIdleTick(uint32_t dt_ms);
     // Called by WifiUploader after each successful HTTP 2xx response.
     void onUploadSuccess();
 
@@ -80,6 +83,7 @@ public:
     float    distanceKm()     const { return distanceKm_; }
     float    altGainM()       const { return altGainM_; }
     uint32_t recordingSecs()  const { return recordingSecs_; }
+    uint32_t idleSecs()       const { return idleSecs_; }
     uint32_t wifiUploads()    const { return wifiUploads_; }
     uint32_t spikeEvents()    const { return spikeEvents_; }
     uint32_t uniqueCells()    const { return uniqueCells_; }
@@ -114,6 +118,7 @@ private:
     float    distanceKm_    = 0.0f;
     float    altGainM_      = 0.0f;
     uint32_t recordingSecs_ = 0;
+    uint32_t idleSecs_      = 0;
     uint32_t wifiUploads_   = 0;
     uint32_t spikeEvents_   = 0;
     uint32_t uniqueCells_   = 0;
@@ -128,6 +133,7 @@ private:
     float    savedDistKm_   = 0.0f;
     float    savedAltM_     = 0.0f;
     uint32_t savedRecSecs_  = 0;
+    uint32_t savedIdleSecs_ = 0;
     uint32_t savedUploads_  = 0;
     uint32_t savedSpikes_   = 0;
     uint32_t savedCells_    = 0;

@@ -634,16 +634,17 @@ void Ui::renderDose() {
 //
 // Two-column grid, 5 data rows + 1 hint footer.
 // Pixel layout:
-//   y=14  "DIST km"   | "ALT GAIN m"
-//   y=26  value       | value
-//   y=38  "REC TIME"  | "UPLOADS"
-//   y=46  value       | value
-//   y=56  "SPIKES"    | "CELLS" | "DATA"
-//   y=64  value       | value   | value
-//   y=72  "Hold: reset all"
+//   y=14  "DIST"                   (full width label)
+//   y=22  value km + mi            (full width value)
+//   — sep y=31 —
+//   y=34  "REC TIME" | "NOT REC"   (half-width labels)
+//   y=44  value      | value
+//   — sep y=53 —
+//   y=56  "ALT GAIN" | "UPLOADS"   (half-width labels)
+//   y=64  value      | value
+//   y=71  "Hold: reset all"
 //
-// LIFETIME screen 1/2: Distance (full width), Rec Time | Uploads, Altitude Gain (full width).
-// Distance and altitude gain get full width so large numbers don't collide.
+// LIFETIME screen 1/2: Distance (full width), Rec Time vs Not-Rec Time, Alt Gain | Uploads.
 // Long-press emits ACTION_RESET_LIFETIME handled in main.cpp.
 void Ui::renderLifetime() {
     if (!life_) return;
@@ -665,9 +666,9 @@ void Ui::renderLifetime() {
         tft.drawFastHLine(4, 31, 152, COL_DIM);
     }
 
-    // ---- Row 2: REC TIME | UPLOADS (side by side — values stay short) -------
+    // ---- Row 2: REC TIME | NOT REC (side by side) ---------------------------
     field(12, 4,  34, 76, 8, "REC TIME", COL_DIM, COL_BG, 1);
-    field(13, 84, 34, 72, 8, "UPLOADS",  COL_DIM, COL_BG, 1);
+    field(13, 84, 34, 72, 8, "NOT REC",  COL_DIM, COL_BG, 1);
     {
         const uint32_t totalSecs = life_->recordingSecs();
         const uint32_t days  = totalSecs / 86400;
@@ -679,7 +680,13 @@ void Ui::renderLifetime() {
         field(14, 4, 44, 76, 8, buf, COL_FG, COL_BG, 1);
     }
     {
-        snprintf(buf, sizeof(buf), "%lu", (unsigned long)life_->wifiUploads());
+        const uint32_t idleSecs = life_->idleSecs();
+        const uint32_t days  = idleSecs / 86400;
+        const uint32_t hours = (idleSecs % 86400) / 3600;
+        const uint32_t mins  = (idleSecs % 3600)  / 60;
+        if (days > 0)       snprintf(buf, sizeof(buf), "%ud %02uh",  (unsigned)days, (unsigned)hours);
+        else if (hours > 0) snprintf(buf, sizeof(buf), "%uh %02um",  (unsigned)hours, (unsigned)mins);
+        else                snprintf(buf, sizeof(buf), "%um",         (unsigned)mins);
         field(15, 84, 44, 72, 8, buf, COL_FG, COL_BG, 1);
     }
 
@@ -688,18 +695,23 @@ void Ui::renderLifetime() {
         tft.drawFastHLine(4, 53, 152, COL_DIM);
     }
 
-    // ---- Row 3: ALT GAIN (full width) ---------------------------------------
-    field(16, 4, 56, 152, 8, "ALT GAIN", COL_DIM, COL_BG, 1);
+    // ---- Row 3: ALT GAIN | UPLOADS (side by side) ---------------------------
+    field(16, 4,  56, 76, 8, "ALT GAIN", COL_DIM, COL_BG, 1);
+    field(17, 84, 56, 72, 8, "UPLOADS",  COL_DIM, COL_BG, 1);
     {
         const float m  = life_->altGainM();
         const float ft = m * 3.28084f;
-        if (m < 10000.0f) snprintf(buf, sizeof(buf), "%.0fm  %.0fft", m, ft);
+        if (m < 10000.0f) snprintf(buf, sizeof(buf), "%.0fm %.0fft", m, ft);
         else              snprintf(buf, sizeof(buf), "%.0fm", m);
-        field(17, 4, 64, 152, 8, buf, COL_GREEN, COL_BG, 1);
+        field(18, 4, 64, 76, 8, buf, COL_GREEN, COL_BG, 1);
+    }
+    {
+        snprintf(buf, sizeof(buf), "%lu", (unsigned long)life_->wifiUploads());
+        field(19, 84, 64, 72, 8, buf, COL_FG, COL_BG, 1);
     }
 
     // Footer hint (y=71 → 8px font fits within 80px display)
-    field(18, 4, 71, 156, 8, "Hold: reset all", COL_DIM, COL_BG, 1);
+    field(20, 4, 71, 156, 8, "Hold: reset all", COL_DIM, COL_BG, 1);
 }
 
 // LIFETIME screen 2/2: Spikes, Cells, Data written, Battery cycles.

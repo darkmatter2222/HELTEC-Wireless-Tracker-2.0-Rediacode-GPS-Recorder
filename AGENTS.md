@@ -382,10 +382,10 @@ namespace secrets {
   Both display NVS-backed lifetime counters that survive every reboot and reset (~64 bytes in
   `"life"` NVS namespace). Long-press on **either** screen emits `ACTION_RESET_LIFETIME` →
   `LifetimeStats::reset()` and zeroes all counters.
-  - **LIFETIME (1/2)** — metrics with full-width rows to prevent value/unit collisions on large numbers:
+  - **LIFETIME (1/2)** — metrics with half-width side-by-side rows:
     - Row 1 (y=14/22): `DIST` km + mi (full width)
-    - Row 2 (y=34/44): `REC TIME` days+hours  |  `UPLOADS` count (side-by-side)
-    - Row 3 (y=56/64): `ALT GAIN` m + ft (full width)
+    - Row 2 (y=34/44): `REC TIME` days+hours  |  `NOT REC` days+hours (side-by-side)
+    - Row 3 (y=56/64): `ALT GAIN` m + ft  |  `UPLOADS` count (side-by-side)
     - Footer (y=71): `Hold: reset all`
   - **LIFETIME2 (2/2)** — event counters:
     - Row 1 (y=14/26): `SPIKES` (amber when > 0)  |  `CELLS` unique GPS grid cells
@@ -403,10 +403,11 @@ namespace secrets {
 
 ### Lifetime Statistics — `lifetime_stats.{h,cpp}` (v1.0.0)
 
-- Eight NVS-backed counters in Preferences namespace `"life"` (~64 bytes total, no flash wear concern).
+- Nine NVS-backed counters in Preferences namespace `"life"` (~72 bytes total, no flash wear concern).
 - All updates run on Core 1 (main loop); no cross-core contention.
 - **Counters**: `distanceKm` (haversine), `altGainM` (positive deltas only), `recordingSecs`
-  (GPS+RC connected time), `wifiUploads` (successful HTTP 2xx), `spikeEvents` (CPS ≥ 50),
+  (GPS+RC connected time), `idleSecs` (powered-on but NOT recording — no GPS fix or RC disconnected),
+  `wifiUploads` (successful HTTP 2xx), `spikeEvents` (CPS ≥ 50),
   `uniqueCells` (distinct 0.01° grid cells visited ≈ 1.1 km resolution), `totalBytes` (CSV
   bytes written to flash), `battCycles` (discharge ≤20% → charge ≥80% cycle count).
 - **`totalBytes` wiring**: `SessionStore::append()` was changed to return `size_t` (bytes written,
@@ -414,6 +415,9 @@ namespace secrets {
   append. Before this fix (v1.0.0 initial), DATA always showed 0.
 - **`battCycles` note**: counter is correct but will show 0 until the battery has been discharged
   to ≤20% and then recharged to ≥80% at least once. This is expected behavior, not a bug.
+- **`idleSecs` wiring**: `main.cpp` calls `gLife.onIdleTick(elapsed)` once per second from the
+  idle else-branch (when no GPS+RC sample arrived that loop iteration). The cap is 10 s/tick
+  (same as `recordingSecs_`) so a long sleep or single missed tick never inflates the counter.
 - **NVS save policy**: flush when any counter exceeds its delta threshold OR 60 s elapsed.
   Typical write rate: a few per hour in active use.
 - **Safety limits**: distance delta capped at 5 km/sample (GPS noise guard); altitude gain capped

@@ -727,6 +727,12 @@ void loop() {
         static uint32_t lastIdleMark = 0;
         uint32_t now = millis();
         if (now - lastIdleMark >= 1000) {
+            // Accumulate not-recording time (device on, but no GPS+RC sample).
+            if (gLife.ready()) {
+                const uint32_t elapsed = (lastIdleMark > 0)
+                    ? (uint32_t)(now - lastIdleMark) : 1000u;
+                gLife.onIdleTick(elapsed);
+            }
             event_log::markPhase("MAIN_IDLE");
             lastIdleMark = now;
         }

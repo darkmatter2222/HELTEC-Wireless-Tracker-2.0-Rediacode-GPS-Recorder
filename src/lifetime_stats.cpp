@@ -18,6 +18,7 @@ static const char* kKeyCells  = "cells";  // uint32 unique cells
 static const char* kKeyBytesL = "bytL";   // uint32 low 32 bits of totalBytes
 static const char* kKeyBytesH = "bytH";   // uint32 high 32 bits of totalBytes
 static const char* kKeyBat    = "bat";    // uint32 battery cycles
+static const char* kKeyIdle   = "idle";   // uint32 not-recording seconds
 
 // Save interval: 60 seconds, matching wifi upload cadence.
 static constexpr uint32_t kSaveIntervalMs = 60000;
@@ -26,6 +27,7 @@ static constexpr uint32_t kSaveIntervalMs = 60000;
 static constexpr float    kDeltaDist  = 0.5f;    // km
 static constexpr float    kDeltaAlt   = 10.0f;   // m
 static constexpr uint32_t kDeltaRec   = 60;      // seconds
+static constexpr uint32_t kDeltaIdle  = 60;      // seconds not recording
 static constexpr uint32_t kDeltaUpl   = 1;       // any new upload
 static constexpr uint32_t kDeltaSpk   = 1;       // any spike
 static constexpr uint32_t kDeltaCells = 5;       // cells
@@ -49,8 +51,8 @@ void LifetimeStats::begin() {
     memset(cellTable_, 0xFF, sizeof(cellTable_));  // 0xFFFFFFFF = empty sentinel
     loadFromNvs();
     ready_ = true;
-    Serial.printf("[LIFE] loaded: dist=%.2fkm alt=%.1fm rec=%us upl=%u spk=%u cells=%u bytes=%llu bat=%u\n",
-                  distanceKm_, altGainM_, (unsigned)recordingSecs_,
+    Serial.printf("[LIFE] loaded: dist=%.2fkm alt=%.1fm rec=%us idle=%us upl=%u spk=%u cells=%u bytes=%llu bat=%u\n",
+                  distanceKm_, altGainM_, (unsigned)recordingSecs_, (unsigned)idleSecs_,
                   (unsigned)wifiUploads_, (unsigned)spikeEvents_,
                   (unsigned)uniqueCells_, (unsigned long long)totalBytes_,
                   (unsigned)battCycles_);
@@ -62,6 +64,7 @@ void LifetimeStats::loadFromNvs() {
     distanceKm_    = p.getFloat(kKeyDist,   0.0f);
     altGainM_      = p.getFloat(kKeyAlt,    0.0f);
     recordingSecs_ = p.getUInt(kKeyRec,     0);
+    idleSecs_      = p.getUInt(kKeyIdle,    0);
     wifiUploads_   = p.getUInt(kKeyUpl,     0);
     spikeEvents_   = p.getUInt(kKeySpk,     0);
     uniqueCells_   = p.getUInt(kKeyCells,   0);
@@ -75,6 +78,7 @@ void LifetimeStats::loadFromNvs() {
     savedDistKm_  = distanceKm_;
     savedAltM_    = altGainM_;
     savedRecSecs_ = recordingSecs_;
+    savedIdleSecs_= idleSecs_;
     savedUploads_ = wifiUploads_;
     savedSpikes_  = spikeEvents_;
     savedCells_   = uniqueCells_;
@@ -88,6 +92,7 @@ void LifetimeStats::saveToNvs() {
     p.putFloat(kKeyDist,   distanceKm_);
     p.putFloat(kKeyAlt,    altGainM_);
     p.putUInt(kKeyRec,     recordingSecs_);
+    p.putUInt(kKeyIdle,    idleSecs_);
     p.putUInt(kKeyUpl,     wifiUploads_);
     p.putUInt(kKeySpk,     spikeEvents_);
     p.putUInt(kKeyCells,   uniqueCells_);
@@ -99,6 +104,7 @@ void LifetimeStats::saveToNvs() {
     savedDistKm_  = distanceKm_;
     savedAltM_    = altGainM_;
     savedRecSecs_ = recordingSecs_;
+    savedIdleSecs_= idleSecs_;
     savedUploads_ = wifiUploads_;
     savedSpikes_  = spikeEvents_;
     savedCells_   = uniqueCells_;
@@ -194,6 +200,14 @@ void LifetimeStats::onSample(float cps, uint32_t dt_ms) {
     }
 }
 
+void LifetimeStats::onIdleTick(uint32_t dt_ms) {
+    // Not-recording time: device is on but no GPS-locked RC sample arrived.
+    // Cap dt to 10 s same as onSample to avoid phantom accumulation.
+    if (dt_ms > 0 && dt_ms < 10000) {
+        idleSecs_ += dt_ms / 1000;
+    }
+}
+
 void LifetimeStats::onUploadSuccess() {
     ++wifiUploads_;
 }
@@ -225,14 +239,15 @@ void LifetimeStats::tickSave() {
     const bool distDirty  = (distanceKm_    - savedDistKm_)  >= kDeltaDist;
     const bool altDirty   = (altGainM_      - savedAltM_)    >= kDeltaAlt;
     const bool recDirty   = (recordingSecs_ - savedRecSecs_)  >= kDeltaRec;
+    const bool idleDirty  = (idleSecs_      - savedIdleSecs_) >= kDeltaIdle;
     const bool uplDirty   = (wifiUploads_   - savedUploads_)  >= kDeltaUpl;
     const bool spkDirty   = (spikeEvents_   - savedSpikes_)   >= kDeltaSpk;
     const bool cellDirty  = (uniqueCells_   - savedCells_)    >= kDeltaCells;
     const bool byteDirty  = (totalBytes_    - savedBytes_)     >= (uint64_t)1024;
     const bool batDirty   = (battCycles_    - savedBatCyc_)   >= kDeltaBat;
 
-    const bool anyDirty = distDirty || altDirty || recDirty || uplDirty ||
-                          spkDirty  || cellDirty || byteDirty || batDirty;
+    const bool anyDirty = distDirty || altDirty || recDirty || idleDirty ||
+                          uplDirty  || spkDirty  || cellDirty || byteDirty || batDirty;
 
     if (anyDirty || elapsed >= kSaveIntervalMs) {
         saveToNvs();
@@ -241,12 +256,13 @@ void LifetimeStats::tickSave() {
 
 // -----------------------------------------------------------------------
 void LifetimeStats::reset() {
-    Serial.printf("[LIFE] reset by user (dist=%.2fkm alt=%.1fm rec=%us upl=%u spk=%u cells=%u)\n",
-                  distanceKm_, altGainM_, (unsigned)recordingSecs_,
+    Serial.printf("[LIFE] reset by user (dist=%.2fkm alt=%.1fm rec=%us idle=%us upl=%u spk=%u cells=%u)\n",
+                  distanceKm_, altGainM_, (unsigned)recordingSecs_, (unsigned)idleSecs_,
                   (unsigned)wifiUploads_, (unsigned)spikeEvents_, (unsigned)uniqueCells_);
     distanceKm_    = 0.0f;
     altGainM_      = 0.0f;
     recordingSecs_ = 0;
+    idleSecs_      = 0;
     wifiUploads_   = 0;
     spikeEvents_   = 0;
     uniqueCells_   = 0;
