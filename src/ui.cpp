@@ -110,6 +110,12 @@ void Ui::onShortPress() {
         forceFullRedraw_ = true;     // redraw rows so cursor is visible
         return;
     }
+    if (screen_ == SCREEN_LIFETIME_CONFIRM) {
+        // Short-press on confirm screen = cancel, return to originating screen.
+        screen_          = confirmFromScreen_;
+        forceFullRedraw_ = true;
+        return;
+    }
     // Cycle STATS -> GPS -> STORAGE -> STATS
     screen_ = (Screen)((screen_ + 1) % SCREEN_NORMAL_COUNT);
     forceFullRedraw_ = true;
@@ -136,8 +142,11 @@ void Ui::onLongPress() {
             break;
         case SCREEN_LIFETIME:
         case SCREEN_LIFETIME2:
-            // Long-press on either LIFETIME screen resets all lifetime counters.
-            pendingAction_ = ACTION_RESET_LIFETIME;
+            // Long-press on either LIFETIME screen enters the reset confirmation screen.
+            // Actual reset only happens after the user confirms on SCREEN_LIFETIME_CONFIRM.
+            confirmFromScreen_ = screen_;
+            screen_            = SCREEN_LIFETIME_CONFIRM;
+            forceFullRedraw_   = true;
             break;
         case SCREEN_PICKER:
             if (pickerCursor_ >= (int)pickList_.size()) {
@@ -241,8 +250,9 @@ void Ui::tick() {
         case SCREEN_GPS:      renderGps();      break;
         case SCREEN_STORAGE:  renderStorage();  break;
         case SCREEN_DOSE:     renderDose();     break;
-        case SCREEN_LIFETIME:  renderLifetime();  break;
-        case SCREEN_LIFETIME2: renderLifetime2(); break;
+        case SCREEN_LIFETIME:  renderLifetime();        break;
+        case SCREEN_LIFETIME2: renderLifetime2();       break;
+        case SCREEN_LIFETIME_CONFIRM: renderLifetimeConfirm(); break;
         case SCREEN_PICKER:   renderPicker();   break;
         default: break;
     }
@@ -634,17 +644,18 @@ void Ui::renderDose() {
 //
 // Two-column grid, 5 data rows + 1 hint footer.
 // Pixel layout:
-//   y=14  "DIST km"   | "ALT GAIN m"
-//   y=26  value       | value
-//   y=38  "REC TIME"  | "UPLOADS"
-//   y=46  value       | value
-//   y=56  "SPIKES"    | "CELLS" | "DATA"
-//   y=64  value       | value   | value
-//   y=72  "Hold: reset all"
+//   y=14  "DIST"                   (full width label)
+//   y=22  value km + mi            (full width value)
+//   — sep y=31 —
+//   y=34  "REC TIME" | "NOT REC"   (half-width labels)
+//   y=44  value      | value
+//   — sep y=53 —
+//   y=56  "ALT GAIN" | "UPLOADS"   (half-width labels)
+//   y=64  value      | value
+//   y=71  "Hold: reset?"
 //
-// LIFETIME screen 1/2: Distance (full width), Rec Time | Uploads, Altitude Gain (full width).
-// Distance and altitude gain get full width so large numbers don't collide.
-// Long-press emits ACTION_RESET_LIFETIME handled in main.cpp.
+// LIFETIME screen 1/2: Distance (full width), Rec Time vs Not-Rec Time, Alt Gain | Uploads.
+// Long-press navigates to SCREEN_LIFETIME_CONFIRM before any data is cleared.
 void Ui::renderLifetime() {
     if (!life_) return;
     char buf[24];
@@ -665,9 +676,9 @@ void Ui::renderLifetime() {
         tft.drawFastHLine(4, 31, 152, COL_DIM);
     }
 
-    // ---- Row 2: REC TIME | UPLOADS (side by side — values stay short) -------
+    // ---- Row 2: REC TIME | NOT REC (side by side) ---------------------------
     field(12, 4,  34, 76, 8, "REC TIME", COL_DIM, COL_BG, 1);
-    field(13, 84, 34, 72, 8, "UPLOADS",  COL_DIM, COL_BG, 1);
+    field(13, 84, 34, 72, 8, "NOT REC",  COL_DIM, COL_BG, 1);
     {
         const uint32_t totalSecs = life_->recordingSecs();
         const uint32_t days  = totalSecs / 86400;
@@ -679,7 +690,13 @@ void Ui::renderLifetime() {
         field(14, 4, 44, 76, 8, buf, COL_FG, COL_BG, 1);
     }
     {
-        snprintf(buf, sizeof(buf), "%lu", (unsigned long)life_->wifiUploads());
+        const uint32_t idleSecs = life_->idleSecs();
+        const uint32_t days  = idleSecs / 86400;
+        const uint32_t hours = (idleSecs % 86400) / 3600;
+        const uint32_t mins  = (idleSecs % 3600)  / 60;
+        if (days > 0)       snprintf(buf, sizeof(buf), "%ud %02uh",  (unsigned)days, (unsigned)hours);
+        else if (hours > 0) snprintf(buf, sizeof(buf), "%uh %02um",  (unsigned)hours, (unsigned)mins);
+        else                snprintf(buf, sizeof(buf), "%um",         (unsigned)mins);
         field(15, 84, 44, 72, 8, buf, COL_FG, COL_BG, 1);
     }
 
@@ -688,22 +705,27 @@ void Ui::renderLifetime() {
         tft.drawFastHLine(4, 53, 152, COL_DIM);
     }
 
-    // ---- Row 3: ALT GAIN (full width) ---------------------------------------
-    field(16, 4, 56, 152, 8, "ALT GAIN", COL_DIM, COL_BG, 1);
+    // ---- Row 3: ALT GAIN | UPLOADS (side by side) ---------------------------
+    field(16, 4,  56, 76, 8, "ALT GAIN", COL_DIM, COL_BG, 1);
+    field(17, 84, 56, 72, 8, "UPLOADS",  COL_DIM, COL_BG, 1);
     {
         const float m  = life_->altGainM();
         const float ft = m * 3.28084f;
-        if (m < 10000.0f) snprintf(buf, sizeof(buf), "%.0fm  %.0fft", m, ft);
+        if (m < 10000.0f) snprintf(buf, sizeof(buf), "%.0fm %.0fft", m, ft);
         else              snprintf(buf, sizeof(buf), "%.0fm", m);
-        field(17, 4, 64, 152, 8, buf, COL_GREEN, COL_BG, 1);
+        field(18, 4, 64, 76, 8, buf, COL_GREEN, COL_BG, 1);
+    }
+    {
+        snprintf(buf, sizeof(buf), "%lu", (unsigned long)life_->wifiUploads());
+        field(19, 84, 64, 72, 8, buf, COL_FG, COL_BG, 1);
     }
 
     // Footer hint (y=71 → 8px font fits within 80px display)
-    field(18, 4, 71, 156, 8, "Hold: reset all", COL_DIM, COL_BG, 1);
+    field(20, 4, 71, 156, 8, "Hold: reset?", COL_DIM, COL_BG, 1);
 }
 
 // LIFETIME screen 2/2: Spikes, Cells, Data written, Battery cycles.
-// Long-press also emits ACTION_RESET_LIFETIME.
+// Long-press navigates to SCREEN_LIFETIME_CONFIRM before any data is cleared.
 void Ui::renderLifetime2() {
     if (!life_) return;
     char buf[24];
@@ -744,7 +766,35 @@ void Ui::renderLifetime2() {
     }
 
     // Footer hint
-    field(27, 4, 70, 156, 8, "Hold: reset all", COL_DIM, COL_BG, 1);
+    field(27, 4, 70, 156, 8, "Hold: reset?", COL_DIM, COL_BG, 1);
+}
+
+// ---------------------------------------------------------------------------
+// LIFETIME CONFIRM screen: safety gate before wiping all lifetime counters.
+// Short-press = cancel (returns to the LIFETIME screen that triggered it).
+// Long-press  = confirm reset (emits ACTION_RESET_LIFETIME, returns to same screen).
+void Ui::renderLifetimeConfirm() {
+    if (!forceFullRedraw_) return;
+    tft.fillRect(0, HEADER_H, cfg::TFT_W, cfg::TFT_H - HEADER_H, COL_BG);
+
+    // Title
+    tft.setTextSize(1);
+    tft.setTextColor(COL_AMBER, COL_BG);
+    tft.setCursor(4, 14); tft.print("RESET LIFETIME?");
+
+    // Warning body
+    tft.setTextColor(COL_FG, COL_BG);
+    tft.setCursor(4, 26); tft.print("This clears ALL");
+    tft.setCursor(4, 35); tft.print("lifetime counters.");
+
+    // Separator
+    tft.drawFastHLine(4, 46, 152, COL_DIM);
+
+    // Instructions
+    tft.setTextColor(COL_GREEN, COL_BG);
+    tft.setCursor(4, 50); tft.print("Short: cancel");
+    tft.setTextColor(COL_AMBER, COL_BG);
+    tft.setCursor(4, 60); tft.print("Long:  CONFIRM");
 }
 
 // ---------------------------------------------------------------------------

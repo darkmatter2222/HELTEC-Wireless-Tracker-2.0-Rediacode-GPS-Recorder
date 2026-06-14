@@ -225,13 +225,25 @@ entirely private. The data never leaves your server without your action.
 
 ## 3D-Printed Case
 
-A custom three-part enclosure keeps the tracker road-ready and MagSafe-mountable.
+A custom enclosure keeps the tracker road-ready.
+
+### Revision 2 (recommended) — tighter tolerances, radiation icon emboss, no MagSafe
+
+![Tracker V2 case R2 — CAD preview](hardware/img/tracker_v2_case_r2_cad.png)
+
+| Part | STL | Description |
+|------|-----|-------------|
+| Case body R2 | [`hardware/stl/tracker_v2_case_r2.stl`](hardware/stl/tracker_v2_case_r2.stl) | Improved shell — tighter fit, radiation symbol embossed on side |
+| Lid R2 | [`hardware/stl/tracker_v2_lid_r2.stl`](hardware/stl/tracker_v2_lid_r2.stl) | Improved lid — better tolerance, fastens with two M3 screws |
+| Radiation icon | [`hardware/stl/tracker_v2_radio_icon.stl`](hardware/stl/tracker_v2_radio_icon.stl) | Separate radiation symbol insert (optional accent piece) |
+
+### Original (V1) — includes MagSafe adapter cutout
 
 ![Tracker V2 case — CAD preview](hardware/img/tracker_v2_case_cad.png)
 
 | Part | STL | Description |
 |------|-----|-------------|
-| Case body | [`hardware/stl/tracker_v2_case.stl`](hardware/stl/tracker_v2_case.stl) | Main shell — holds the Heltec Tracker, exposes TFT, USB-C, and button |
+| Case body | [`hardware/stl/tracker_v2_case.stl`](hardware/stl/tracker_v2_case.stl) | Original shell — holds the Heltec Tracker, exposes TFT, USB-C, and button |
 | Lid | [`hardware/stl/tracker_v2_lid.stl`](hardware/stl/tracker_v2_lid.stl) | Top cover; fastens with two M3 screws into heat-set inserts |
 | MagSafe adapter | [`hardware/stl/tracker_v2_magsafe_adapter.stl`](hardware/stl/tracker_v2_magsafe_adapter.stl) | Snap-on base; accepts a standard MagSafe puck for dash / bike mount |
 

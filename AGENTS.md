@@ -63,11 +63,15 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 │   ├── partitions_tracker.csv    # V1.2 flash partition table (referenced by platformio.ini)
 │   ├── partitions_tracker_v2.csv # V2 flash partition table (referenced by platformio.ini)
 │   ├── stl/                      # 3D-printable case files
-│   │   ├── tracker_v2_case.stl
-│   │   ├── tracker_v2_lid.stl
-│   │   └── tracker_v2_magsafe_adapter.stl
+│   │   ├── tracker_v2_case.stl           # original case (V1, MagSafe cutout)
+│   │   ├── tracker_v2_lid.stl            # original lid (V1)
+│   │   ├── tracker_v2_magsafe_adapter.stl # MagSafe snap-on base (V1 only)
+│   │   ├── tracker_v2_case_r2.stl        # R2 case — tighter fit, radiation icon emboss
+│   │   ├── tracker_v2_lid_r2.stl         # R2 lid — tighter tolerances
+│   │   └── tracker_v2_radio_icon.stl     # separate radiation symbol insert
 │   └── img/
-│       └── tracker_v2_case_cad.png
+│       ├── tracker_v2_case_cad.png       # original CAD render
+│       └── tracker_v2_case_r2_cad.png    # R2 CAD render
 ├── src/                          # ESP32-S3 firmware (C++)
 │   ├── main.cpp                  # setup() / loop(), serial REPL
 │   ├── config.h                  # ALL pin assignments + feature flags
@@ -380,17 +384,23 @@ namespace secrets {
 - **LIFETIME screens** (v1.0.0): Two new screens (6th and 7th) in the normal cycle
   (STATS→GPS→STORAGE→DOSE→LIFETIME→LIFETIME2→STATS).
   Both display NVS-backed lifetime counters that survive every reboot and reset (~64 bytes in
-  `"life"` NVS namespace). Long-press on **either** screen emits `ACTION_RESET_LIFETIME` →
-  `LifetimeStats::reset()` and zeroes all counters.
-  - **LIFETIME (1/2)** — metrics with full-width rows to prevent value/unit collisions on large numbers:
+  `"life"` NVS namespace). Long-press on **either** screen navigates to a **`SCREEN_LIFETIME_CONFIRM`
+  confirmation gate** — actual reset only fires after confirming on that screen.
+  - **LIFETIME (1/2)** — metrics with half-width side-by-side rows:
     - Row 1 (y=14/22): `DIST` km + mi (full width)
-    - Row 2 (y=34/44): `REC TIME` days+hours  |  `UPLOADS` count (side-by-side)
-    - Row 3 (y=56/64): `ALT GAIN` m + ft (full width)
-    - Footer (y=71): `Hold: reset all`
+    - Row 2 (y=34/44): `REC TIME` days+hours  |  `NOT REC` days+hours (side-by-side)
+    - Row 3 (y=56/64): `ALT GAIN` m + ft  |  `UPLOADS` count (side-by-side)
+    - Footer (y=71): `Hold: reset?`
   - **LIFETIME2 (2/2)** — event counters:
     - Row 1 (y=14/26): `SPIKES` (amber when > 0)  |  `CELLS` unique GPS grid cells
     - Row 2 (y=42/54): `DATA` KB/MB written to flash  |  `BAT CYCLES` charge cycles
-    - Footer (y=70): `Hold: reset all`
+    - Footer (y=70): `Hold: reset?`
+  - **LIFETIME CONFIRM** — safety gate shown when long-pressing either LIFETIME screen:
+    - Title: `RESET LIFETIME?` (amber)
+    - Body: `This clears ALL / lifetime counters.`
+    - Instructions: `Short: cancel` (green) / `Long: CONFIRM` (amber)
+    - Short-press returns to the originating LIFETIME screen without resetting.
+    - Long-press triggers `ACTION_RESET_LIFETIME` → `LifetimeStats::reset()` and returns.
 
 ### Wi-Fi Uploader — `wifi_uploader.{h,cpp}`
 
@@ -403,10 +413,11 @@ namespace secrets {
 
 ### Lifetime Statistics — `lifetime_stats.{h,cpp}` (v1.0.0)
 
-- Eight NVS-backed counters in Preferences namespace `"life"` (~64 bytes total, no flash wear concern).
+- Nine NVS-backed counters in Preferences namespace `"life"` (~72 bytes total, no flash wear concern).
 - All updates run on Core 1 (main loop); no cross-core contention.
 - **Counters**: `distanceKm` (haversine), `altGainM` (positive deltas only), `recordingSecs`
-  (GPS+RC connected time), `wifiUploads` (successful HTTP 2xx), `spikeEvents` (CPS ≥ 50),
+  (GPS+RC connected time), `idleSecs` (powered-on but NOT recording — no GPS fix or RC disconnected),
+  `wifiUploads` (successful HTTP 2xx), `spikeEvents` (CPS ≥ 50),
   `uniqueCells` (distinct 0.01° grid cells visited ≈ 1.1 km resolution), `totalBytes` (CSV
   bytes written to flash), `battCycles` (discharge ≤20% → charge ≥80% cycle count).
 - **`totalBytes` wiring**: `SessionStore::append()` was changed to return `size_t` (bytes written,
@@ -414,6 +425,9 @@ namespace secrets {
   append. Before this fix (v1.0.0 initial), DATA always showed 0.
 - **`battCycles` note**: counter is correct but will show 0 until the battery has been discharged
   to ≤20% and then recharged to ≥80% at least once. This is expected behavior, not a bug.
+- **`idleSecs` wiring**: `main.cpp` calls `gLife.onIdleTick(elapsed)` once per second from the
+  idle else-branch (when no GPS+RC sample arrived that loop iteration). The cap is 10 s/tick
+  (same as `recordingSecs_`) so a long sleep or single missed tick never inflates the counter.
 - **NVS save policy**: flush when any counter exceeds its delta threshold OR 60 s elapsed.
   Typical write rate: a few per hour in active use.
 - **Safety limits**: distance delta capped at 5 km/sample (GPS noise guard); altitude gain capped
