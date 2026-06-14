@@ -110,6 +110,12 @@ void Ui::onShortPress() {
         forceFullRedraw_ = true;     // redraw rows so cursor is visible
         return;
     }
+    if (screen_ == SCREEN_LIFETIME_CONFIRM) {
+        // Short-press on confirm screen = cancel, return to originating screen.
+        screen_          = confirmFromScreen_;
+        forceFullRedraw_ = true;
+        return;
+    }
     // Cycle STATS -> GPS -> STORAGE -> STATS
     screen_ = (Screen)((screen_ + 1) % SCREEN_NORMAL_COUNT);
     forceFullRedraw_ = true;
@@ -136,8 +142,11 @@ void Ui::onLongPress() {
             break;
         case SCREEN_LIFETIME:
         case SCREEN_LIFETIME2:
-            // Long-press on either LIFETIME screen resets all lifetime counters.
-            pendingAction_ = ACTION_RESET_LIFETIME;
+            // Long-press on either LIFETIME screen enters the reset confirmation screen.
+            // Actual reset only happens after the user confirms on SCREEN_LIFETIME_CONFIRM.
+            confirmFromScreen_ = screen_;
+            screen_            = SCREEN_LIFETIME_CONFIRM;
+            forceFullRedraw_   = true;
             break;
         case SCREEN_PICKER:
             if (pickerCursor_ >= (int)pickList_.size()) {
@@ -241,8 +250,9 @@ void Ui::tick() {
         case SCREEN_GPS:      renderGps();      break;
         case SCREEN_STORAGE:  renderStorage();  break;
         case SCREEN_DOSE:     renderDose();     break;
-        case SCREEN_LIFETIME:  renderLifetime();  break;
-        case SCREEN_LIFETIME2: renderLifetime2(); break;
+        case SCREEN_LIFETIME:  renderLifetime();        break;
+        case SCREEN_LIFETIME2: renderLifetime2();       break;
+        case SCREEN_LIFETIME_CONFIRM: renderLifetimeConfirm(); break;
         case SCREEN_PICKER:   renderPicker();   break;
         default: break;
     }
@@ -642,10 +652,10 @@ void Ui::renderDose() {
 //   — sep y=53 —
 //   y=56  "ALT GAIN" | "UPLOADS"   (half-width labels)
 //   y=64  value      | value
-//   y=71  "Hold: reset all"
+//   y=71  "Hold: reset?"
 //
 // LIFETIME screen 1/2: Distance (full width), Rec Time vs Not-Rec Time, Alt Gain | Uploads.
-// Long-press emits ACTION_RESET_LIFETIME handled in main.cpp.
+// Long-press navigates to SCREEN_LIFETIME_CONFIRM before any data is cleared.
 void Ui::renderLifetime() {
     if (!life_) return;
     char buf[24];
@@ -711,11 +721,11 @@ void Ui::renderLifetime() {
     }
 
     // Footer hint (y=71 → 8px font fits within 80px display)
-    field(20, 4, 71, 156, 8, "Hold: reset all", COL_DIM, COL_BG, 1);
+    field(20, 4, 71, 156, 8, "Hold: reset?", COL_DIM, COL_BG, 1);
 }
 
 // LIFETIME screen 2/2: Spikes, Cells, Data written, Battery cycles.
-// Long-press also emits ACTION_RESET_LIFETIME.
+// Long-press navigates to SCREEN_LIFETIME_CONFIRM before any data is cleared.
 void Ui::renderLifetime2() {
     if (!life_) return;
     char buf[24];
@@ -756,7 +766,35 @@ void Ui::renderLifetime2() {
     }
 
     // Footer hint
-    field(27, 4, 70, 156, 8, "Hold: reset all", COL_DIM, COL_BG, 1);
+    field(27, 4, 70, 156, 8, "Hold: reset?", COL_DIM, COL_BG, 1);
+}
+
+// ---------------------------------------------------------------------------
+// LIFETIME CONFIRM screen: safety gate before wiping all lifetime counters.
+// Short-press = cancel (returns to the LIFETIME screen that triggered it).
+// Long-press  = confirm reset (emits ACTION_RESET_LIFETIME, returns to same screen).
+void Ui::renderLifetimeConfirm() {
+    if (!forceFullRedraw_) return;
+    tft.fillRect(0, HEADER_H, cfg::TFT_W, cfg::TFT_H - HEADER_H, COL_BG);
+
+    // Title
+    tft.setTextSize(1);
+    tft.setTextColor(COL_AMBER, COL_BG);
+    tft.setCursor(4, 14); tft.print("RESET LIFETIME?");
+
+    // Warning body
+    tft.setTextColor(COL_FG, COL_BG);
+    tft.setCursor(4, 26); tft.print("This clears ALL");
+    tft.setCursor(4, 35); tft.print("lifetime counters.");
+
+    // Separator
+    tft.drawFastHLine(4, 46, 152, COL_DIM);
+
+    // Instructions
+    tft.setTextColor(COL_GREEN, COL_BG);
+    tft.setCursor(4, 50); tft.print("Short: cancel");
+    tft.setTextColor(COL_AMBER, COL_BG);
+    tft.setCursor(4, 60); tft.print("Long:  CONFIRM");
 }
 
 // ---------------------------------------------------------------------------

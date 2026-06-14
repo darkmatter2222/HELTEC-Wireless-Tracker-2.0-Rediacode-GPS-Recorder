@@ -17,6 +17,7 @@ public:
         SCREEN_DOSE,
         SCREEN_LIFETIME,
         SCREEN_LIFETIME2,
+        SCREEN_LIFETIME_CONFIRM, // confirmation step before resetting lifetime counters
         SCREEN_PICKER,
         SCREEN_NORMAL_COUNT = SCREEN_PICKER, // STATS/GPS/STORAGE/DOSE/LIFETIME/LIFETIME2 cycle
     };
@@ -71,6 +72,7 @@ private:
     void renderDose();
     void renderLifetime();
     void renderLifetime2();
+    void renderLifetimeConfirm();
     void renderPicker();
 
     Screen        screen_ = SCREEN_STATS;
@@ -87,6 +89,7 @@ private:
 
     LongAction         pendingAction_ = ACTION_NONE;
     float              tripDoseMicroSv_ = 0.0f;  // µSv accumulated since last reset
+    Screen             confirmFromScreen_ = SCREEN_LIFETIME; // screen to return to on confirm cancel
     // v0.4.0: recording is always-on whenever RadiaCode + GPS fix are present,
     // so the legacy double-long-press stop-confirmation no longer exists.
     bool               forceFullRedraw_ = true;

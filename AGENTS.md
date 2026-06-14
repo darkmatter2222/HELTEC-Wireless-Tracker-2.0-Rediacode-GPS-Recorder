@@ -63,11 +63,15 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 │   ├── partitions_tracker.csv    # V1.2 flash partition table (referenced by platformio.ini)
 │   ├── partitions_tracker_v2.csv # V2 flash partition table (referenced by platformio.ini)
 │   ├── stl/                      # 3D-printable case files
-│   │   ├── tracker_v2_case.stl
-│   │   ├── tracker_v2_lid.stl
-│   │   └── tracker_v2_magsafe_adapter.stl
+│   │   ├── tracker_v2_case.stl           # original case (V1, MagSafe cutout)
+│   │   ├── tracker_v2_lid.stl            # original lid (V1)
+│   │   ├── tracker_v2_magsafe_adapter.stl # MagSafe snap-on base (V1 only)
+│   │   ├── tracker_v2_case_r2.stl        # R2 case — tighter fit, radiation icon emboss
+│   │   ├── tracker_v2_lid_r2.stl         # R2 lid — tighter tolerances
+│   │   └── tracker_v2_radio_icon.stl     # separate radiation symbol insert
 │   └── img/
-│       └── tracker_v2_case_cad.png
+│       ├── tracker_v2_case_cad.png       # original CAD render
+│       └── tracker_v2_case_r2_cad.png    # R2 CAD render
 ├── src/                          # ESP32-S3 firmware (C++)
 │   ├── main.cpp                  # setup() / loop(), serial REPL
 │   ├── config.h                  # ALL pin assignments + feature flags
@@ -380,17 +384,23 @@ namespace secrets {
 - **LIFETIME screens** (v1.0.0): Two new screens (6th and 7th) in the normal cycle
   (STATS→GPS→STORAGE→DOSE→LIFETIME→LIFETIME2→STATS).
   Both display NVS-backed lifetime counters that survive every reboot and reset (~64 bytes in
-  `"life"` NVS namespace). Long-press on **either** screen emits `ACTION_RESET_LIFETIME` →
-  `LifetimeStats::reset()` and zeroes all counters.
+  `"life"` NVS namespace). Long-press on **either** screen navigates to a **`SCREEN_LIFETIME_CONFIRM`
+  confirmation gate** — actual reset only fires after confirming on that screen.
   - **LIFETIME (1/2)** — metrics with half-width side-by-side rows:
     - Row 1 (y=14/22): `DIST` km + mi (full width)
     - Row 2 (y=34/44): `REC TIME` days+hours  |  `NOT REC` days+hours (side-by-side)
     - Row 3 (y=56/64): `ALT GAIN` m + ft  |  `UPLOADS` count (side-by-side)
-    - Footer (y=71): `Hold: reset all`
+    - Footer (y=71): `Hold: reset?`
   - **LIFETIME2 (2/2)** — event counters:
     - Row 1 (y=14/26): `SPIKES` (amber when > 0)  |  `CELLS` unique GPS grid cells
     - Row 2 (y=42/54): `DATA` KB/MB written to flash  |  `BAT CYCLES` charge cycles
-    - Footer (y=70): `Hold: reset all`
+    - Footer (y=70): `Hold: reset?`
+  - **LIFETIME CONFIRM** — safety gate shown when long-pressing either LIFETIME screen:
+    - Title: `RESET LIFETIME?` (amber)
+    - Body: `This clears ALL / lifetime counters.`
+    - Instructions: `Short: cancel` (green) / `Long: CONFIRM` (amber)
+    - Short-press returns to the originating LIFETIME screen without resetting.
+    - Long-press triggers `ACTION_RESET_LIFETIME` → `LifetimeStats::reset()` and returns.
 
 ### Wi-Fi Uploader — `wifi_uploader.{h,cpp}`
 
