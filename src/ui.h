@@ -17,9 +17,9 @@ public:
         SCREEN_DOSE,
         SCREEN_LIFETIME,
         SCREEN_LIFETIME2,
-        SCREEN_LIFETIME_CONFIRM, // confirmation step before resetting lifetime counters
+        SCREEN_NORMAL_COUNT, // must remain 6 — only these screens cycle via short-press
+        SCREEN_LIFETIME_CONFIRM, // confirmation step before resetting lifetime counters (overlay, not in cycle)
         SCREEN_PICKER,
-        SCREEN_NORMAL_COUNT = SCREEN_PICKER, // STATS/GPS/STORAGE/DOSE/LIFETIME/LIFETIME2 cycle
     };
 
     void begin();
