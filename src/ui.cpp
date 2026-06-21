@@ -315,6 +315,15 @@ void Ui::renderHeader() {
 void Ui::renderStats() {
     field(10, 4, 14, 60, 8, "DOSE nSv/h", COL_DIM, COL_BG, 1);
 
+    // Spectrum indicator badge — small "[spc]" in green when spectrum collection
+    // is active, invisible when off. Placed between the DOSE label and Smp counter.
+    if (spectrumEnabled_) {
+        field(18, 66, 14, 32, 8, " [SPC]", COL_GREEN, COL_BG, 1);
+    } else {
+        // Clear the area so stale text doesn't remain after toggle.
+        field(18, 66, 14, 32, 8, "", COL_DIM, COL_BG, 1);
+    }
+
     // Sample counter — right side of the DOSE label row (96 px free).
     // Shows sampleCount(): rises as samples are recorded; drops to 0 after
     // each upload cycle when the active file is rotated. This gives the user
