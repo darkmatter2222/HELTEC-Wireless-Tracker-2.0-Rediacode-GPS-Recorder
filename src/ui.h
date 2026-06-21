@@ -17,7 +17,8 @@ public:
         SCREEN_DOSE,
         SCREEN_LIFETIME,
         SCREEN_LIFETIME2,
-        SCREEN_NORMAL_COUNT, // must remain 6 — only these screens cycle via short-press
+        SCREEN_ABOUT,
+        SCREEN_NORMAL_COUNT, // must remain here — only screens above cycle via short-press
         SCREEN_LIFETIME_CONFIRM, // confirmation step before resetting lifetime counters (overlay, not in cycle)
         SCREEN_PICKER,
     };
@@ -26,6 +27,7 @@ public:
     void setSources(GpsModule* gps, SessionStore* store, RadiaCode* rc);
     void setWifi(WifiUploader* w) { wifi_ = w; }
     void setLifetimeStats(LifetimeStats* l) { life_ = l; }
+    void setSpectrumMode(bool enabled) { spectrumEnabled_ = enabled; }
 
     void onShortPress();
     void onLongPress();
@@ -72,6 +74,7 @@ private:
     void renderDose();
     void renderLifetime();
     void renderLifetime2();
+    void renderAbout();
     void renderLifetimeConfirm();
     void renderPicker();
 
@@ -94,6 +97,7 @@ private:
     // so the legacy double-long-press stop-confirmation no longer exists.
     bool               forceFullRedraw_ = true;
     Screen             lastDrawnScreen_ = SCREEN_NORMAL_COUNT;
+    bool               spectrumEnabled_ = false;
 
     static constexpr int MAX_FIELDS = 50;
     String   prevText_[MAX_FIELDS];

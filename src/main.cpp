@@ -356,6 +356,7 @@ void setup() {
 
     // Apply spectrum mode from NVS (v1.1.0).
     gRadia.setSpectrumMode(gSpectrumMode);
+    gUi.setSpectrumMode(gSpectrumMode);
 
     Serial.println("Setup complete");
 }
@@ -498,6 +499,7 @@ static void handleSerialCommand(const String& line) {
         saveSpectrumModeToNvs();
         Serial.println("[SPEC] spectrum collection ENABLED");
         gRadia.setSpectrumMode(true);
+        gUi.setSpectrumMode(true);
         return;
     }
     if (upper == "SPOFF") {
@@ -505,6 +507,7 @@ static void handleSerialCommand(const String& line) {
         saveSpectrumModeToNvs();
         Serial.println("[SPEC] spectrum collection DISABLED");
         gRadia.setSpectrumMode(false);
+        gUi.setSpectrumMode(false);
         return;
     }
     if (upper == "SPSTAT") {

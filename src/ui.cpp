@@ -252,6 +252,7 @@ void Ui::tick() {
         case SCREEN_DOSE:     renderDose();     break;
         case SCREEN_LIFETIME:  renderLifetime();        break;
         case SCREEN_LIFETIME2: renderLifetime2();       break;
+        case SCREEN_ABOUT:     renderAbout();           break;
         case SCREEN_LIFETIME_CONFIRM: renderLifetimeConfirm(); break;
         case SCREEN_PICKER:   renderPicker();   break;
         default: break;
@@ -767,6 +768,74 @@ void Ui::renderLifetime2() {
 
     // Footer hint
     field(27, 4, 70, 156, 8, "Hold: reset?", COL_DIM, COL_BG, 1);
+}
+
+// ---------------------------------------------------------------------------
+// ABOUT screen: firmware version, build info, flash/storage stats.
+// No long-press action (read-only informational screen).
+void Ui::renderAbout() {
+    char buf[32];
+
+    // ---- Row 1: FW version + build date -------------------------------------
+    field(50, 4, 14, 152, 8, "FW", COL_DIM, COL_BG, 1);
+    {
+        snprintf(buf, sizeof(buf), "%s %s", cfg::FW_VERSION, __DATE__);
+        field(51, 4, 22, 152, 8, buf, COL_GREEN, COL_BG, 1);
+    }
+
+    // Separator line
+    if (forceFullRedraw_) {
+        tft.drawFastHLine(4, 31, 152, COL_DIM);
+    }
+
+    // ---- Row 2: Flash total | Free heap ------------------------------------
+    field(52, 4,  34, 76, 8, "FLASH",      COL_DIM, COL_BG, 1);
+    field(53, 84, 34, 72, 8, "HEAP FREE",  COL_DIM, COL_BG, 1);
+    {
+        const uint32_t flashBytes = ESP.getFlashChipSize();
+        snprintf(buf, sizeof(buf), "%luKB", (unsigned long)(flashBytes / 1024));
+        field(54, 4, 44, 76, 8, buf, COL_FG, COL_BG, 1);
+    }
+    {
+        const uint32_t heap = ESP.getFreeHeap();
+        if (heap > 100 * 1024)
+            snprintf(buf, sizeof(buf), "%luKB", (unsigned long)(heap / 1024));
+        else
+            snprintf(buf, sizeof(buf), "%luB", (unsigned long)heap);
+        uint16_t heapCol = COL_FG;
+        if (heap < cfg::WIFI_HEAL_MIN_HEAP) heapCol = COL_RED;
+        else if (heap < 80000) heapCol = COL_AMBER;
+        field(55, 84, 44, 72, 8, buf, heapCol, COL_BG, 1);
+    }
+
+    // ---- Row 3: Storage backend + uptime ------------------------------------
+    field(56, 4,  56, 76, 8, "STORAGE",    COL_DIM, COL_BG, 1);
+    field(57, 84, 56, 72, 8, "UPTIME",     COL_DIM, COL_BG, 1);
+    {
+        if (store_) {
+            snprintf(buf, sizeof(buf), "%s", store_->backendName());
+            uint16_t col = store_->storageFailed() ? COL_RED : COL_GREEN;
+            field(58, 4, 64, 76, 8, buf, col, COL_BG, 1);
+        } else {
+            field(58, 4, 64, 76, 8, "none", COL_RED, COL_BG, 1);
+        }
+    }
+    {
+        const uint32_t secs = millis() / 1000;
+        const uint32_t mins = secs / 60;
+        const uint32_t hrs  = mins / 60;
+        if (hrs > 24)       snprintf(buf, sizeof(buf), "%ud %uh", (unsigned)(hrs/24), (unsigned)(hrs%24));
+        else if (hrs > 0)   snprintf(buf, sizeof(buf), "%uh %02um", (unsigned)hrs, (unsigned)(mins%60));
+        else                snprintf(buf, sizeof(buf), "%um %02us", (unsigned)mins, (unsigned)(secs%60));
+        field(59, 84, 64, 72, 8, buf, COL_FG, COL_BG, 1);
+    }
+
+    // Footer: spectrum mode status
+    {
+        snprintf(buf, sizeof(buf), "Spectrum: %s", spectrumEnabled_ ? "ON" : "OFF");
+        uint16_t col = spectrumEnabled_ ? COL_GREEN : COL_DIM;
+        field(60, 4, 71, 156, 8, buf, col, COL_BG, 1);
+    }
 }
 
 // ---------------------------------------------------------------------------
