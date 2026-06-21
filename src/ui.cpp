@@ -148,6 +148,10 @@ void Ui::onLongPress() {
             screen_            = SCREEN_LIFETIME_CONFIRM;
             forceFullRedraw_   = true;
             break;
+        case SCREEN_ABOUT:
+            // Long-press on ABOUT toggles spectrum collection mode.
+            pendingAction_ = ACTION_TOGGLE_SPECTRUM;
+            break;
         case SCREEN_PICKER:
             if (pickerCursor_ >= (int)pickList_.size()) {
                 pendingAction_ = ACTION_CANCEL_PICKER;
@@ -772,7 +776,7 @@ void Ui::renderLifetime2() {
 
 // ---------------------------------------------------------------------------
 // ABOUT screen: firmware version, build info, flash/storage stats.
-// No long-press action (read-only informational screen).
+// Long-press toggles spectrum collection mode.
 void Ui::renderAbout() {
     char buf[32];
 
@@ -830,12 +834,15 @@ void Ui::renderAbout() {
         field(59, 84, 64, 72, 8, buf, COL_FG, COL_BG, 1);
     }
 
-    // Footer: spectrum mode status
+    // Footer: spectrum mode status + toggle hint
     {
         snprintf(buf, sizeof(buf), "Spectrum: %s", spectrumEnabled_ ? "ON" : "OFF");
         uint16_t col = spectrumEnabled_ ? COL_GREEN : COL_DIM;
         field(60, 4, 71, 156, 8, buf, col, COL_BG, 1);
     }
+
+    // Toggle hint
+    field(61, 4, 63, 156, 8, "Hold: toggle spec", COL_DIM, COL_BG, 1);
 }
 
 // ---------------------------------------------------------------------------

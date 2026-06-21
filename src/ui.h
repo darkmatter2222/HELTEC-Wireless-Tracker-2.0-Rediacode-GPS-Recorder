@@ -53,6 +53,7 @@ public:
         ACTION_RESET_DOSE,      // DOSE screen long-press: zero accumulator
         ACTION_RESET_LIFETIME,  // LIFETIME screen long-press: zero all lifetime counters
         ACTION_FORCE_SYNC,      // STORAGE long-press: kick upload cycle now
+        ACTION_TOGGLE_SPECTRUM, // ABOUT screen long-press: toggle spectrum collection
     };
     LongAction lastLongAction() {
         LongAction a = pendingAction_;
@@ -99,7 +100,7 @@ private:
     Screen             lastDrawnScreen_ = SCREEN_NORMAL_COUNT;
     bool               spectrumEnabled_ = false;
 
-    static constexpr int MAX_FIELDS = 50;
+    static constexpr int MAX_FIELDS = 65;
     String   prevText_[MAX_FIELDS];
     uint16_t prevFg_[MAX_FIELDS] = {0};
     uint8_t  prevSize_[MAX_FIELDS] = {0};

@@ -847,6 +847,14 @@ void loop() {
                     Serial.println("[UI] STORAGE long-press: forcing sync now");
                     gWifi.requestNow();
                     break;
+                case Ui::ACTION_TOGGLE_SPECTRUM:
+                    gSpectrumMode = !gSpectrumMode;
+                    saveSpectrumModeToNvs();
+                    gRadia.setSpectrumMode(gSpectrumMode);
+                    gUi.setSpectrumMode(gSpectrumMode);
+                    Serial.printf("[SPEC] %sed (about screen toggle)\n",
+                                  gSpectrumMode ? "enabled" : "disabled");
+                    break;
                 default: break;
             }
             break;
