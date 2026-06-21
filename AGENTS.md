@@ -265,7 +265,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `1.0.3`.
+Current: `1.1.0`.
 
 ---
 
@@ -328,6 +328,13 @@ namespace secrets {
 - Pinned-target address (NVS key `pinned_peer`) prevents reconnect to wrong peer
 - Name auto-grab pattern (NVS key `grab_pat`) connects immediately to any peer whose name matches
 - Call `secureConnection()` immediately after connect for RC-110
+- **Spectrum collection mode** (v1.1.0): Optional parsing of RC-110 CsI(Tl) scintillator
+  spectrometer data from DATA_BUF TLV eid=1 segments. Disabled by default.
+  NVS-backed in Preferences namespace `"rctracker"`, key `"spec_en"`.
+  Toggle via REPL (`SPCON`/`SPOFF`/`SPSTAT`) or long-press on About screen.
+  When enabled, up to `SPECTRUM_MAX_CHANNELS=64` channels are decoded per reading
+  at `SPECTRUM_POLL_INTERVAL_MS=5000ms`. Appends pipe-delimited channel counts
+  to the 13th CSV column (`spectrumData`).
 
 ### GPS — `gps_module.{h,cpp}`
 
@@ -343,20 +350,27 @@ namespace secrets {
 - Primary: SdFat on FSPI (GPIO 4-7)
 - Fallback: LittleFS (5.9 MB partition) — currently disabled
   (`cfg::SD_REQUIRED = true`), failure is a hard error on screen
-- CSV schema: `timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event`
+- CSV schema: `timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event,accuracyM,spectrumData`
+  (v1.1.0 added 13th column `spectrumData` — pipe-delimited gamma energy channel counts
+  when spectrum collection is enabled; empty string when disabled or unsupported peer)
 - Sessions are append-only; `removeSession()` refuses to delete active session
 - Serial log on start/stop: `[REC] START: id=...` / `[REC] STOP: id=... samples=N`
 
 ### TFT UI — `ui.{h,cpp}`
 
 - ST7735 landscape rotation=1; 160×80; colors: GREEN `#00E676`, RED, DIM_GREY
-- Screens cycled by short-press: STATS → GPS → STORAGE → DOSE → STATS; PICKER entered via long-press on STATS
+- Screens cycled by short-press: STATS → GPS → STORAGE → DOSE → LIFETIME → LIFETIME2 → ABOUT → STATS;
+  PICKER entered via long-press on STATS (on other screens, long-press triggers feature-specific actions)
+- **MAX_FIELDS = 65** (v1.1.0): Flicker-free field redraw array in `ui.{h,cpp}`.
+  Increased from 50 to accommodate About screen fields (indices 50–61) without OOB rejection.
 - **Header status bar** (v0.3.5): RC state badge (GREEN=OK, AMBER=scanning/init, RED=disconnected);
   GPS badge (GREEN=3D fix, RED=no fix); battery with color threshold; recording dot always visible
   (dim outline = idle, filled red = recording)
-- **STATS screen** (v0.9.4): top row has "DOSE nSv/h" label (x=4..63) AND "Smp NNNNN" sample
-  counter (x=100..157). Counter shows `sampleCount()` — samples in the current active recording
-  file. Counts UP as samples are recorded; RESETS to 0 after each upload cycle (file rotated).
+- **STATS screen** (v0.9.4): top row has "DOSE nSv/h" label (x=4..63).
+  When spectrum collection is enabled, a baby-blue `SPC` badge appears at x=68
+  (BGR-corrected color `0xFDA3`). "Smp NNNNN" sample counter at x=100..157.
+  Counter shows `sampleCount()` — samples in the current active recording file.
+  Counts UP as samples are recorded; RESETS to 0 after each upload cycle (file rotated).
   Gives user a live "buffered / awaiting upload" indicator. Color: COL_GREEN when recording + RC
   Ready (actively filling); COL_DIM otherwise.
 - **STATS screen footer** (v0.3.5): Shows GPS positional accuracy `+/- X.Xm  hdop Y.Y` (green)
@@ -401,6 +415,17 @@ namespace secrets {
     - Instructions: `Short: cancel` (green) / `Long: CONFIRM` (amber)
     - Short-press returns to the originating LIFETIME screen without resetting.
     - Long-press triggers `ACTION_RESET_LIFETIME` → `LifetimeStats::reset()` and returns.
+- **ABOUT screen** (v1.1.0): 8th screen in normal cycle, displays firmware diagnostics:
+    - Field 50-51: `FW` + version string (`config.h FW_VERSION`) + `__DATE__` compile date (green)
+    - Separator line at y=31
+    - Fields 52-55: `FLASH` chip size in KB | `HEAP FREE` with color threshold
+      (green > 100 KB, amber < 80 KB, red < `WIFI_HEAL_MIN_HEAP` = 50 KB)
+    - Fields 56-59: `STORAGE` backend name (SdFat/LittleFS, green/red based on `storageFailed()`)
+      | `UPTIME` formatted as d/h/m/s
+    - Field 60: `Spectrum: ON/OFF` status (green when active, dim grey when off)
+    - Field 61: `Hold: toggle spec` hint at y=63
+    - Long-press emits `ACTION_TOGGLE_SPECTRUM` → toggles spectrum collection,
+      persists to NVS, updates both RadiaCode and UI state immediately
 
 ### Wi-Fi Uploader — `wifi_uploader.{h,cpp}`
 
@@ -467,6 +492,9 @@ Connection: 115200 baud, USB-CDC. Type `?` for the live list on device.
 | `GREBAUD`         | re-probe GPS baud rates |
 | `SYNC`            | force immediate Wi-Fi upload cycle |
 | `WIFISTAT`        | Wi-Fi uploader diagnostics (enabled, busy, net=home\|remote\|none, counts, last HTTP status, heap_free) |
+| `SPCON`           | enable spectrum collection mode (RC-110 CsI(Tl) scintillator data) |
+| `SPOFF`           | disable spectrum collection mode |
+| `SPSTAT`          | report current spectrum mode status |
 | `REBOOT`          | soft-reset device; LittleFS/SD data is safe (use to force self-heal manually) |
 
 Commands that **do not exist** (do not add them):
@@ -1066,12 +1094,13 @@ python scripts\capture_boot.py
 
 ## Data Schema
 
-CSV on device (and what gets POSTed to the API) — firmware v0.8.0 12-column schema:
+CSV on device (and what gets POSTed to the API) — firmware v1.1.0 13-column schema:
 ```
-timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event,accuracyM
-1746114660123,0.142,12.0,47.6062,-122.3321,5243066020F4,48.23,267.3,12.4,1.20,,6.00
-1746114673500,,,,,5243066020F4,,,,,GPS_LOST,
-1746114692100,,,,,5243066020F4,,,,,GPS_REGAINED,
+timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event,accuracyM,spectrumData
+1746114660123,0.142,12.0,47.6062,-122.3321,5243066020F4,48.23,267.3,12.4,1.20,,6.00,
+1746114660123,0.142,12.0,47.6062,-122.3321,5243066020F4,48.23,267.3,12.4,1.20,,6.00,0|2|5|12|8|3|1
+1746114673500,,,,,5243066020F4,,,,,GPS_LOST,,
+1746114692100,,,,,5243066020F4,,,,,GPS_REGAINED,,
 ```
 
 - `timestampMs`: Unix epoch ms (GPS-derived via `bestEpochMs()`)
@@ -1091,9 +1120,14 @@ timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altit
   rows this is `hdop * cfg::GPS_UERE_M` (UERE=5.0). On RadiaCode track imports
   this is the measured value from the app export; hdop on those rows is derived
   by `/admin/backfill-accuracy` (`hdopEstimated:true`).
+- `spectrumData`: pipe-delimited gamma energy channel counts from RC-110 CsI(Tl)
+  scintillator spectrometer (v1.1.0+). Empty when spectrum collection is disabled
+  or the peer does not support DATA_BUF eid=1 segments.
+  Format: `chan0|chan1|chan2|...|chanN` where each value is the count in that
+  energy channel bin (typically 64 channels for RC-110).
 
-Pre-0.3.0 uploads have 6 columns; pre-0.7.0 have 10; pre-0.8.0 have 11. The
-ingest API handles all four formats. New columns are always appended at the
+Pre-0.3.0 uploads have 6 columns; pre-0.7.0 have 10; pre-0.8.0 have 11; v1.1.0+ have 12.
+The ingest API handles all five formats. New columns are always appended at the
 end so older row counts are positionally compatible.
 
 MongoDB stores the same fields plus:
