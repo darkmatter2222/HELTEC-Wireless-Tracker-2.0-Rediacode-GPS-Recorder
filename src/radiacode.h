@@ -3,6 +3,7 @@
 #include <functional>
 #include <vector>
 #include <string>
+#include "config.h"
 
 // RadiaCode BLE central client.
 // Mirrors the Android `RadiacodeBleClient` / `RadiacodeProtocol` / `RadiacodeDataBuf`
@@ -30,6 +31,12 @@ public:
         float    tempC = 0.0f;
         bool     hasMetadata = false;
         uint32_t timestampMs = 0; // millis() when received
+        // Spectrum data (v1.1.0):
+        // Valid when spectrumMode_ is enabled AND the device returned eid=1 records.
+        // channel_count is in [1, cfg::SPECTRUM_MAX_CHANNELS].
+        bool            hasSpectrum = false;
+        uint8_t         spectrumChannelCount = 0;
+        uint16_t        spectrumChannels[cfg::SPECTRUM_MAX_CHANNELS] = {0};
     };
 
     struct ScanResult {
@@ -72,6 +79,11 @@ public:
     // insensitive). Designed to race the brief connectable window of
     // bonded RadiaCode-110 units. Empty pattern = clear the grab.
     void setNameGrabPattern(const std::string& pattern);
+
+    // Spectrum collection mode (v1.1.0).
+    // When enabled, eid=1 spectrum segments from DATA_BUF are parsed into Reading.
+    void setSpectrumMode(bool enable);
+    bool getSpectrumMode() const;
 
     State          state();
     const String&  peerAddress();

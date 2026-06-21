@@ -118,6 +118,9 @@ struct Internal {
     bool              autoScanActive = false;
     uint32_t          autoScanDeadline = 0;
 
+    // Spectrum collection mode (v1.1.0)
+    bool              spectrumMode = false;
+
     Preferences       prefs;
 };
 static Internal g;
@@ -556,13 +559,47 @@ static void decodeDataBuf(const uint8_t* p, size_t len) {
         } else if (eid == 0 && (gid == 8 || gid == 9)) {
             if (i + 6 > len) break; i += 6;
         } else if (eid == 1 && gid >= 1 && gid <= 3) {
+            // Spectrum segment: <I samples_num><I smpl_time_ms> + samples_num × bps bytes
             if (i + 6 > len) break;
             const uint16_t samples = readU16LE(p + i);
             i += 6;
-            const size_t bps = (gid == 1) ? 8 : (gid == 2 ? 16 : 14);
-            const size_t skip = (size_t)samples * bps;
-            if (i + skip > len) break;
-            i += skip;
+            if (g.spectrumMode && samples > 0 && samples <= cfg::SPECTRUM_MAX_CHANNELS) {
+                const size_t bps = (gid == 1) ? 8 : (gid == 2 ? 16 : 14);
+                const size_t skip = (size_t)samples * bps;
+                if (i + skip > len) break;
+                // Parse channel counts according to bytes-per-sample
+                if (!out.hasSpectrum || gid == 1) {
+                    // First spectrum segment received — reset accumulator
+                    out.hasSpectrum = true;
+                    out.spectrumChannelCount = 0;
+                    for (size_t ch = 0; ch < cfg::SPECTRUM_MAX_CHANNELS; ch++)
+                        out.spectrumChannels[ch] = 0;
+                }
+                for (uint16_t s = 0; s < samples && out.spectrumChannelCount < cfg::SPECTRUM_MAX_CHANNELS; s++) {
+                    uint16_t count = 0;
+                    if (bps == 8) {
+                        // U8LE: single byte count
+                        count = p[i];
+                        i += 1;
+                    } else if (bps == 16) {
+                        // U16LE: 2-byte count
+                        count = readU16LE(p + i);
+                        i += 2;
+                    } else {
+                        // bps == 14: channel index U8 + count U16LE
+                        i += 1; // skip channel index
+                        count = readU16LE(p + i);
+                        i += 2;
+                    }
+                    out.spectrumChannels[out.spectrumChannelCount++] = count;
+                }
+            } else {
+                // Skip spectrum data when mode disabled or too many channels
+                const size_t bps = (gid == 1) ? 8 : (gid == 2 ? 16 : 14);
+                const size_t skip = (size_t)samples * bps;
+                if (i + skip > len) break;
+                i += skip;
+            }
         } else {
             break; // unknown -> stop, don't desync
         }
@@ -1345,6 +1382,15 @@ void RadiaCode::disconnectKeepPin() {
     log_i("disconnectKeepPin(): dropping link, pin retained (%s)", g.pinnedAddr.c_str());
     if (g.client && g.client->isConnected()) g.client->disconnect();
     setState(State::Disconnected);
+}
+
+void RadiaCode::setSpectrumMode(bool enable) {
+    g.spectrumMode = enable;
+    log_i("SPECTRUM mode %s", enable ? "ENABLED" : "DISABLED");
+}
+
+bool RadiaCode::getSpectrumMode() const {
+    return g.spectrumMode;
 }
 
 RadiaCode::State  RadiaCode::state()       { return g.state; }

@@ -30,6 +30,25 @@ Ui            gUi;
 WifiUploader  gWifi;
 
 // ---------------------------------------------------------------------------
+// Spectrum collection mode (v1.1.0)
+// When enabled, eid=1 spectrum segments from DATA_BUF are parsed and stored.
+bool     gSpectrumMode = false;
+
+static void loadSpectrumModeFromNvs() {
+    Preferences p;
+    p.begin("rctracker", true);  // read-only
+    gSpectrumMode = p.getBool("spec_en", cfg::SPECTRUM_COLLECT_DEFAULT);
+    p.end();
+    Serial.printf("[SPEC] mode=%s\n", gSpectrumMode ? "on" : "off");
+}
+static void saveSpectrumModeToNvs() {
+    Preferences p;
+    p.begin("rctracker", false);  // read-write
+    p.putBool("spec_en", gSpectrumMode);
+    p.end();
+}
+
+// ---------------------------------------------------------------------------
 // Cumulative trip dose accumulator (v0.5.0)
 // Integrates uSv/hr * dt to produce total µSv since last user reset.
 // Persisted to NVS every DOSE_NVS_SAVE_INTERVAL_MS so a crash loses at most
@@ -86,6 +105,9 @@ struct PendingSample {
     double    lat = 0.0, lng = 0.0;
     String    deviceId;
     float     speed = -1.f, bearing = -1.f, alt = -9999.f, hdop = -1.f, acc = -1.f;
+    // Spectrum data (v1.1.0): pipe-delimited channel counts
+    bool      hasSpectrum = false;
+    String    spectrumData;  // "count1|count2|..." or empty
 };
 portMUX_TYPE  gSampleMux = portMUX_INITIALIZER_UNLOCKED;
 PendingSample gPendingSample;
@@ -267,6 +289,9 @@ void setup() {
     // already mounted and the NVS partition is accessible.
     loadDoseFromNvs();
 
+    // Load spectrum collection mode from NVS (v1.1.0).
+    loadSpectrumModeFromNvs();
+
     // Load lifetime statistics from NVS (v1.0.0).
     gLife.begin();
 
@@ -310,6 +335,14 @@ void setup() {
             snap.alt      = cfg::FIELD_ALTITUDE_M  ? (float)gGps.altitudeMeters()     : -9999.f;
             snap.hdop     = cfg::FIELD_HDOP        ? (float)gGps.hdop()               : -1.f;
             snap.acc      = cfg::FIELD_ACCURACY_M  ? (float)gGps.accuracyMeters()     : -1.f;
+            // Spectrum data (v1.1.0): copy channel counts into pipe-delimited string
+            snap.hasSpectrum = r.hasSpectrum;
+            if (r.hasSpectrum) {
+                for (uint8_t ch = 0; ch < r.spectrumChannelCount; ch++) {
+                    if (ch > 0) snap.spectrumData += '|';
+                    snap.spectrumData += String(r.spectrumChannels[ch]);
+                }
+            }
             portENTER_CRITICAL(&gSampleMux);
             gPendingSample = snap;
             portEXIT_CRITICAL(&gSampleMux);
@@ -320,6 +353,9 @@ void setup() {
             Serial.printf("[RC] state=%d addr=%s\n", (int)s, addr.c_str());
         }
     );
+
+    // Apply spectrum mode from NVS (v1.1.0).
+    gRadia.setSpectrumMode(gSpectrumMode);
 
     Serial.println("Setup complete");
 }
@@ -353,6 +389,9 @@ static void handleSerialCommand(const String& line) {
         Serial.println("[CMD]           SDSTAT              - SD/LittleFS backend status");
         Serial.println("[CMD]           LOG                 - dump persistent event log");
         Serial.println("[CMD]           LOGCLEAR            - erase persistent event log");
+        Serial.println("[CMD]           SPCON               - enable spectrum collection");
+        Serial.println("[CMD]           SPOFF               - disable spectrum collection");
+        Serial.println("[CMD]           SPSTAT              - show spectrum mode status");
         Serial.println("[CMD]           REBOOT              - soft-reset device (data safe)");
         return;
     }
@@ -452,6 +491,24 @@ static void handleSerialCommand(const String& line) {
         Serial.println("[REBOOT] soft-resetting device — LittleFS data is safe");
         vTaskDelay(pdMS_TO_TICKS(500)); // let serial flush
         ESP.restart();
+        return;
+    }
+    if (upper == "SPCON") {
+        gSpectrumMode = true;
+        saveSpectrumModeToNvs();
+        Serial.println("[SPEC] spectrum collection ENABLED");
+        gRadia.setSpectrumMode(true);
+        return;
+    }
+    if (upper == "SPOFF") {
+        gSpectrumMode = false;
+        saveSpectrumModeToNvs();
+        Serial.println("[SPEC] spectrum collection DISABLED");
+        gRadia.setSpectrumMode(false);
+        return;
+    }
+    if (upper == "SPSTAT") {
+        Serial.printf("[SPSTAT] enabled=%d\n", (int)gSpectrumMode);
         return;
     }
     if (upper.startsWith("WIPE")) {
@@ -694,7 +751,8 @@ void loop() {
         event_log::markPhase("MAIN_APPEND");
         const size_t appendedBytes = gStore.append(0, s.ts, s.uSv, s.cps,
                       s.hasGps, s.lat, s.lng, s.deviceId,
-                      s.speed, s.bearing, s.alt, s.hdop, s.acc);
+                      s.speed, s.bearing, s.alt, s.hdop, s.acc,
+                      s.spectrumData);
         if (appendedBytes > 0 && gLife.ready()) gLife.onBytesWritten(appendedBytes);
 
         // Integrate dose: µSv/hr × dt_ms / 3 600 000 = µSv accumulated.

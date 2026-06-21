@@ -27,9 +27,9 @@
 // deletes the rotated file. On failure the .up.csv is retried next cycle.
 // At no point are duplicate sample rows kept on the device.
 //
-// Schema (12 columns, firmware v0.8.0+):
+// Schema (13 columns, firmware v1.1.0+):
 //   timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,
-//   speedKph,bearingDeg,altitudeM,hdop,event,accuracyM
+//   speedKph,bearingDeg,altitudeM,hdop,event,accuracyM,spectrumData
 //
 // Column 11 `event` (added v0.7.0) holds GPS_LOST / GPS_REGAINED transition
 // tags on dedicated event rows -- empty on normal samples.
@@ -37,6 +37,9 @@
 // metres, computed as `hdop * cfg::GPS_UERE_M`. Stored alongside the raw
 // HDOP so downstream consumers (viewer, exports, historical RadiaCode track
 // data that only has metres) can use either value uniformly.
+// Column 13 `spectrumData` (added v1.1.0) holds pipe-delimited energy-channel
+// counts "c0|c1|c2|..." when spectrum collection mode is enabled, empty
+// otherwise. Up to SPECTRUM_MAX_CHANNELS channels per reading.
 // =============================================================================
 
 class SessionStore {
@@ -97,7 +100,8 @@ public:
                 float bearingDeg = -1.f,
                 float altitudeM  = -9999.f,
                 float hdop       = -1.f,
-                float accuracyM  = -1.f);
+                float accuracyM  = -1.f,
+                const String& spectrumData = ""); // v1.1.0: pipe-delimited channel counts
 
     // v0.7.0: Append a GPS-state-transition event row to the active day file.
     // Event rows occupy the 11th CSV column (`event`); all other fields

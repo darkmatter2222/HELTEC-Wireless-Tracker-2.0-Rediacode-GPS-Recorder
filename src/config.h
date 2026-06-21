@@ -132,7 +132,7 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "1.0.3";
+constexpr const char* FW_VERSION = "1.1.0";
 
 // ---------------- Battery / Wi-Fi safety gate (v0.4.2) -----------------------
 // Skip the Wi-Fi upload cycle entirely if VBAT is below this threshold (V).
@@ -246,5 +246,27 @@ constexpr size_t   GPS_RX_BUFFER_BYTES = 2048;
 // If the GPS has reported bytes but no NEW fix update for this long, run a
 // baud re-probe to recover from a wedged UC6580 (rare but observed in field).
 constexpr uint32_t GPS_FROZEN_FIX_RECOVERY_MS = 120000;  // 2 min
+
+// ---------------- Spectrum collection (v1.1.0) --------------------------------
+// When enabled, the firmware also decodes spectrum segments (eid=1) from the
+// DATA_BUF TLV ring buffer in addition to real-time dose/cps records (eid=0).
+// Spectrum data arrives with every normal ~1 Hz DATA_BUF poll — no additional
+// BLE traffic required. The DataBuf decoder already skips eid=1 records; setting
+// this flag causes them to be parsed and passed via the onReading callback.
+// Persists in NVS under namespace "rctracker" key "spec_en".
+// Threshold for marking a spectrum as "high" (uploaded with priority rather than
+// waiting for normal upload cycle): cps exceeds this factor × the running median.
+constexpr bool     SPECTRUM_COLLECT_DEFAULT = false;   // off by default
+// Maximum number of energy channels in a spectrum record. The CsI(Tl) crystal in
+// the RC-110 produces ~500–2048 channels depending on firmware and integration
+// time. 64 is enough for a meaningful shape at minimal storage cost; full spectra
+// can be restored by reading SPECTRUM VS directly if needed for debugging.
+constexpr uint16_t SPECTRUM_MAX_CHANNELS    = 64;
+// Spectrum polling interval when active (in addition to the normal DATA_BUF poll).
+// Set via WR_VIRT_SFR(MS_CTRL) or polled independently. Higher values reduce BLE
+// throughput impact. The dataBuf already includes eid=1 segments at gid 1/2/3 — we
+// parse those whenever they appear regardless of this knob. This only governs the
+// explicit VS_SPECTRUM poll when enabled.
+constexpr uint32_t SPECTRUM_POLL_INTERVAL_MS = 5000;   // 5 s
 
 } // namespace cfg
