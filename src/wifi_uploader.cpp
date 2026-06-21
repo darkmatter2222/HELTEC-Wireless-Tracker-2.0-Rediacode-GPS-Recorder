@@ -317,22 +317,47 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
     // primary URL as a safety net (should never be needed in normal flow).
     const char* url = activeIngestUrl_ ? activeIngestUrl_ : secrets::INGEST_URL;
 
-    Serial.printf("[UPLOAD] %s (file=%s): file_bytes=%u heap_free=%u net=%s url=%s\n",
+    Serial.printf("[UPLOAD] %s (file=%s): file_bytes=%u heap_free=%u net=%s\n",
                   sessionId.c_str(), filename.c_str(), (unsigned)expectedBytes,
                   (unsigned)ESP.getFreeHeap(),
-                  activeNet_ == (uint8_t)ActiveNet::Remote ? "remote" : "home",
-                  url);
+                  activeNet_ == (uint8_t)ActiveNet::Remote ? "remote" : "home");
 
-    // --- Stream directly from the file into HTTPClient ---------------------
+    // --- Open the file stream ----------------------------------------------
+    size_t fileSize = 0;
+    Stream* fileStream = store_->openPendingUploadStream(filename, fileSize);
+
+    // --- v1.0.3: chunked upload for large files ----------------------------
+    // Root cause of the field crash: posting a 9 MB day-file (60,000 samples)
+    // as a single HTTP request over a mobile hotspot at ~1 Mbps takes ~72s.
+    // With the WDT timeout at 60s and no way to call esp_task_wdt_reset()
+    // inside HTTPClient::sendRequest(), the WiFi task starved the WDT and
+    // crashed with TASK_WDT (raw0=12, wifiInFlight=1). The device then
+    // boot-looped until it returned to home Wi-Fi where LAN speed made the
+    // single-POST fast enough.
+    //
+    // Fix: for any file >= UPLOAD_LARGE_FILE_THRESHOLD, read the CSV row by
+    // row and POST UPLOAD_CHUNK_ROWS rows at a time. WDT is petted between
+    // every chunk so no single HTTP operation can exceed the WDT window.
+    // The API's (sessionId, timestampMs) unique index makes re-sent rows on
+    // a partial-failure retry completely harmless (they land as dup=N).
+    if (fileStream && fileSize >= cfg::UPLOAD_LARGE_FILE_THRESHOLD) {
+        Serial.printf("[UPLOAD] %s: large file (%u bytes >= %u threshold), "
+                      "using chunked mode (%u rows/chunk)\n",
+                      sessionId.c_str(), (unsigned)fileSize,
+                      (unsigned)cfg::UPLOAD_LARGE_FILE_THRESHOLD,
+                      (unsigned)cfg::UPLOAD_CHUNK_ROWS);
+        bool ok = uploadChunked(sessionId, url, fileStream);
+        store_->closeSessionStream();
+        return ok;
+    }
+
+    // --- Small file: stream directly into a single HTTP POST ---------------
     // Avoids loading the whole CSV into a heap String. On a 320 KB DRAM
     // device a file with >~1500 rows (~225 KB) would exhaust the heap
     // mid-String, silently truncate the upload, and the partial 2xx response
     // would cause the file to be deleted with data permanently lost.
     // Using HTTPClient::sendRequest(type, Stream*, size) bypasses the heap
     // entirely: the HTTP stack reads the file in small chunks as it sends.
-    size_t fileSize = 0;
-    Stream* fileStream = store_->openPendingUploadStream(filename, fileSize);
-
     String body;  // only used as fallback for SdFat backend
     if (!fileStream) {
         // SdFat backend (V1.2): fall back to buffered read.
@@ -399,7 +424,8 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
     // slow link; without these resets a slow upload would WDT-panic. We do
     // not (and cannot) pet during the request itself because HTTPClient
     // does not yield a callback hook. The 60 s WDT timeout in config.h is
-    // sized to cover the worst-case 30 s POST cleanly.
+    // sized to cover the worst-case 30 s POST cleanly. For large files that
+    // would exceed 60 s, see the chunked path above.
     esp_task_wdt_reset();
     if (fileStream) {
         // Stream path: no heap allocation for body.
@@ -427,6 +453,127 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
                   sessionId.c_str(), code, (unsigned)(millis() - t0),
                   resp.length() > 200 ? "<truncated>" : resp.c_str());
     return false;
+}
+
+
+// v1.0.3: Post a pre-built CSV body string to the ingest endpoint.
+// Used by both uploadChunked() (for large-file chunks) and can be used by
+// any future path that needs a helper that creates its own HTTPClient.
+// Adds all required headers. Returns true on HTTP 2xx.
+bool WifiUploader::postBody(const String& sessionId, const char* url, const String& body) {
+    WiFiClientSecure* secureClient = nullptr;
+    HTTPClient http;
+    bool beginOk;
+    if (isHttpsUrl(url)) {
+        secureClient = new WiFiClientSecure();
+        secureClient->setInsecure();
+        beginOk = http.begin(*secureClient, url);
+    } else {
+        beginOk = http.begin(url);
+    }
+    if (!beginOk) {
+        Serial.printf("[UPLOAD] %s: postBody http.begin failed\n", sessionId.c_str());
+        delete secureClient;
+        return false;
+    }
+    http.setTimeout(30000);
+    http.addHeader("Content-Type", "text/csv");
+    http.addHeader("X-Session-Id", sessionId);
+    http.addHeader("X-Tracker-Id", chipIdString());
+    http.addHeader("X-Firmware",   cfg::FW_VERSION);
+    if (activeIngestUser_ && activeIngestUser_[0] != '\0') {
+        http.setAuthorization(activeIngestUser_, activeIngestPass_ ? activeIngestPass_ : "");
+    }
+    int code = http.POST((uint8_t*)body.c_str(), body.length());
+    lastHttpStatus_ = code;
+    http.end();
+    delete secureClient;
+    return (code >= 200 && code < 300);
+}
+
+
+// v1.0.3: Chunked upload for large pending-upload files.
+//
+// Reads the open file stream row by row, building chunks of at most
+// cfg::UPLOAD_CHUNK_ROWS data rows. Each chunk (header + N rows) is
+// posted as an independent HTTP request. The WDT is reset between every
+// chunk so no single network operation can approach the 60 s WDT window.
+//
+// The API's (sessionId, timestampMs) unique index makes retries safe:
+// if the upload fails mid-file and is retried from the start, rows that
+// were already ingested on the previous attempt are silently deduplicated
+// (dup=N in the API log) rather than inserted twice.
+//
+// Caller must close the stream after this returns (via closeSessionStream()).
+// Returns true only if at least one chunk was posted successfully AND no
+// chunk returned a failure code. Returns false on the first chunk failure.
+bool WifiUploader::uploadChunked(const String& sessionId, const char* url, Stream* fileStream) {
+    // Read the CSV header line. Every chunk must include it so the API can
+    // parse the column schema regardless of which firmware version wrote the
+    // file. The header is typically 90-120 bytes.
+    String headerLine = fileStream->readStringUntil('\n');
+    headerLine.trim();
+    if (headerLine.isEmpty()) {
+        Serial.printf("[UPLOAD] %s: chunked -- empty or missing CSV header\n",
+                      sessionId.c_str());
+        return false;
+    }
+
+    uint32_t chunkIndex = 0;
+    uint32_t totalRows  = 0;
+    const uint32_t t0   = millis();
+
+    while (fileStream->available()) {
+        // Build one chunk: the header line + up to UPLOAD_CHUNK_ROWS data rows.
+        // Pre-sizing with reserve() avoids O(N^2) reallocation cost as we
+        // append rows. The rough estimate of 160 bytes/row is conservative;
+        // actual rows average ~110 bytes at current firmware column count.
+        String chunk;
+        chunk.reserve((cfg::UPLOAD_CHUNK_ROWS + 1) * 160);
+        chunk  = headerLine;
+        chunk += '\n';
+
+        uint32_t rowsInChunk = 0;
+        while (rowsInChunk < cfg::UPLOAD_CHUNK_ROWS && fileStream->available()) {
+            String line = fileStream->readStringUntil('\n');
+            line.trim();
+            if (line.length() < 4) continue;  // skip blank / corrupt lines
+            chunk += line;
+            chunk += '\n';
+            ++rowsInChunk;
+        }
+        if (rowsInChunk == 0) break;  // no data rows left
+
+        Serial.printf("[UPLOAD] %s chunk %u: %u rows, %u bytes, heap=%u\n",
+                      sessionId.c_str(), chunkIndex, rowsInChunk,
+                      (unsigned)chunk.length(), (unsigned)ESP.getFreeHeap());
+
+        // Pet WDT before the HTTP round-trip (postBody includes its own
+        // 30 s timeout so any single request is bounded). Pet again after
+        // so the inter-chunk processing doesn't accidentally starve the WDT.
+        esp_task_wdt_reset();
+        bool ok = postBody(sessionId, url, chunk);
+        esp_task_wdt_reset();
+
+        if (!ok) {
+            Serial.printf("[UPLOAD] %s chunk %u FAILED -- aborting chunked upload "
+                          "(%u rows delivered so far)\n",
+                          sessionId.c_str(), chunkIndex, totalRows);
+            return false;
+        }
+
+        totalRows += rowsInChunk;
+        ++chunkIndex;
+
+        // Brief yield between chunks so BLE / UI tasks keep running and
+        // the TCP stack can flush any outstanding ACKs.
+        vTaskDelay(pdMS_TO_TICKS(100));
+        esp_task_wdt_reset();
+    }
+
+    Serial.printf("[UPLOAD] %s: chunked complete -- %u chunk(s), %u rows, %ums\n",
+                  sessionId.c_str(), chunkIndex, totalRows, (unsigned)(millis() - t0));
+    return (chunkIndex > 0);  // false only if the file had no data rows at all
 }
 
 

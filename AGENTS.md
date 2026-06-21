@@ -265,7 +265,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.9.5`.
+Current: `1.0.3`.
 
 ---
 
@@ -1152,6 +1152,54 @@ Otherwise, iterate to completion.
 ---
 
 ## Lessons Learned — Do Not Re-Litigate
+
+### Large-File TASK_WDT Crash When Uploading via Mobile Hotspot (v1.0.3) — CRITICAL
+
+- **User-reported symptom**: device crashed and boot-looped when the user turned on their
+  phone's mobile hotspot after a 2-day offline recording trip (~60,000 samples/day, ~9 MB
+  per day file). The device showed "connecting to Wi-Fi" then rebooted. It created a new
+  session each time. When the user got home and connected to home Wi-Fi, it uploaded
+  everything successfully after two cycles.
+- **Root cause**: `uploadOne()` posted the entire pending-upload file as a single
+  `http.sendRequest("POST", stream, fileSize)` call. For a 9 MB file over a mobile hotspot
+  at ~1 Mbps, this blocks for ~72 seconds. The Task Watchdog Timeout is 60 s.
+  `esp_task_wdt_reset()` is called before AND after `sendRequest()` but there is NO way to
+  pet the WDT during the call — HTTPClient has no yield/callback hook. The WiFi task starved
+  the WDT and triggered `TASK_WDT` (raw0=12) with `wifiInFlight=1`. Confirmed in device log:
+  ```
+  43956535,43956535,WIFI,vbatMv=3900,cycle_start
+  5421,5421,BOOT,TASK_WDT,raw0=12,raw1=12,vbatMv=-1,lastUptimeMs=43956535,wifiInFlight=1,lastPhase=MAIN_LOOP
+  ```
+  On home Wi-Fi (LAN, ~100 Mbps), the same file uploads in <1 second — well within the WDT
+  window — which is why it always worked at home.
+- **Why no data was lost**: the crash happened before the HTTP server received the full
+  request (TCP connection dropped mid-send). LittleFS is non-volatile; the `.up.csv` file
+  survived the reboot. On the next boot at home, the files were uploaded cleanly. MongoDB
+  duplicate check confirmed zero duplicates.
+- **Fix (v1.0.3)** in `src/wifi_uploader.cpp` + `src/wifi_uploader.h` + `src/config.h`:
+  - New config constants: `UPLOAD_CHUNK_ROWS = 300` (rows per chunk, ~33 KB at 110 B/row)
+    and `UPLOAD_LARGE_FILE_THRESHOLD = 32768` (32 KB; files above this use chunked mode).
+  - `uploadOne()` now checks `fileSize >= cfg::UPLOAD_LARGE_FILE_THRESHOLD` right after
+    opening the file stream. If true, it calls the new `uploadChunked()` helper and returns.
+  - `uploadChunked(sessionId, url, fileStream)`: reads the CSV header line once, then loops
+    reading up to `UPLOAD_CHUNK_ROWS` data rows at a time into a String, calling
+    `postBody()` for each chunk. `esp_task_wdt_reset()` is called before and after each
+    `postBody()` call, so no single HTTP operation can exceed the WDT window.
+  - `postBody(sessionId, url, body)`: shared helper that creates an `HTTPClient`, adds all
+    required headers (Content-Type, X-Session-Id, X-Tracker-Id, X-Firmware, Basic Auth),
+    POSTs the String body, and returns true on HTTP 2xx.
+  - Files below the threshold (normal 60-second rotation files, typically <2 KB) continue
+    to use the existing single-stream POST path unchanged.
+  - For a 60,000-row file: 200 chunks × ~0.7 s each = ~2.3 min total over hotspot, with
+    the WDT petted every ~0.7 s. Completely safe.
+  - The API's `(sessionId, timestampMs)` unique index makes chunked retry idempotent:
+    previously-ingested rows on a partial-failure retry land as `dup=N` (not duplicates).
+- **No MongoDB duplicates**: confirmed via aggregate query after the incident — zero
+  `(sessionId, timestampMs)` collisions in `tracker_samples`.
+- **Rule**: any upload of variable-length data to a slow network MUST pet the WDT between
+  logical units (rows, chunks, etc.). Never assume `http.setTimeout(N)` bounds the total
+  transfer time for large outgoing bodies — it only governs the TCP response read timeout,
+  not how long `sendRequest()` blocks while flushing the send buffer over a slow link.
 
 ### WiFi.mode(WIFI_OFF) While BLE Active Causes PANIC + INT_WDT on Any Cycle (v0.9.5) — CRITICAL
 
