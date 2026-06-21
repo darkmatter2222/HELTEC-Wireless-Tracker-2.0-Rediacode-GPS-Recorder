@@ -45,7 +45,7 @@ constexpr uint16_t COL_AMBER    = 0x053F;
 constexpr uint16_t COL_CYAN     = 0xFFE0;     // BGR-corrected cyan
 constexpr uint16_t COL_HEADER   = 0x10A2;     // dark blue band
 constexpr uint16_t COL_PICK     = 0x041F;     // selected row highlight
-constexpr uint16_t COL_LIGHT_BLUE = 0x1C9F;   // baby blue for spectrum indicator
+constexpr uint16_t COL_LIGHT_BLUE = 0xFDA3;   // baby blue (BGR-corrected: blue=31, green=45, red=3)
 
 constexpr int HEADER_H = 12;
 
