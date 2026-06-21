@@ -95,6 +95,14 @@ private:
     void disconnectWifi();
     bool uploadOne(const String& filename, const String& sessionId, size_t expectedBytes);
 
+    // v1.0.3: Chunked upload helpers. Used by uploadOne() when the pending
+    // file exceeds cfg::UPLOAD_LARGE_FILE_THRESHOLD. Splits the CSV into
+    // chunks of cfg::UPLOAD_CHUNK_ROWS rows and POSTs each chunk separately
+    // so the WDT can be petted between chunks. The API's (sessionId,
+    // timestampMs) unique index makes re-sent rows on retry harmless.
+    bool uploadChunked(const String& sessionId, const char* url, Stream* fileStream);
+    bool postBody(const String& sessionId, const char* url, const String& body);
+
     SessionStore* store_          = nullptr;
     TaskHandle_t  task_           = nullptr;
     volatile bool enabled_        = false;

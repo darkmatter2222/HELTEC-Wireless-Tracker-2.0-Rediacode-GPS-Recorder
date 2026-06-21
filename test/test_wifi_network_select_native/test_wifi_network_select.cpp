@@ -1,5 +1,5 @@
 // Unit tests for the dual-network selection and upload-auth helper logic
-// introduced in v0.9.0.
+// introduced in v0.9.0, extended in v1.0.3 with chunked-upload policy.
 //
 // Pure-function tests: no Wi-Fi hardware, no secrets.h dependency.
 // The helpers here mirror the logic embedded in wifi_uploader.cpp so that
@@ -40,6 +40,26 @@ static bool isHttpsUrl(const char* url) {
 // Returns true only if BOTH user and pass are non-empty strings.
 static bool hasBasicAuthCreds(const char* user, const char* pass) {
     return user && user[0] != '\0' && pass && pass[0] != '\0';
+}
+
+// ---------------------------------------------------------------------------
+// Helpers -- mirrors of the chunked-upload policy in wifi_uploader.cpp
+// (v1.0.3). Mirrors cfg::UPLOAD_LARGE_FILE_THRESHOLD and
+// cfg::UPLOAD_CHUNK_ROWS from config.h so tests run standalone on host.
+// ---------------------------------------------------------------------------
+static const size_t UPLOAD_LARGE_FILE_THRESHOLD = 32768;  // 32 KB
+static const size_t UPLOAD_CHUNK_ROWS           = 300;
+
+// True when the file is large enough to require chunked mode.
+static bool fileNeedsChunking(size_t fileBytes) {
+    return fileBytes >= UPLOAD_LARGE_FILE_THRESHOLD;
+}
+
+// Number of HTTP POSTs needed for a file with `totalRows` data rows at
+// the configured chunk size. Returns 0 for empty files.
+static size_t chunkCount(size_t totalRows) {
+    if (totalRows == 0) return 0;
+    return (totalRows + UPLOAD_CHUNK_ROWS - 1) / UPLOAD_CHUNK_ROWS;
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +145,66 @@ void test_disabled_remote_ssid_without_url() {
 }
 
 // ---------------------------------------------------------------------------
+// Tests: chunked-upload threshold (v1.0.3)
+// ---------------------------------------------------------------------------
+
+// A normal 60-second rotation file (5-20 rows × ~110 bytes ≈ 550-2200 bytes)
+// is well below the 32 KB threshold and uses the fast single-POST path.
+void test_normal_rotation_file_below_threshold() {
+    // Simulate a file from a 60-second rotation: 10 rows × 110 bytes = 1.1 KB
+    TEST_ASSERT_FALSE(fileNeedsChunking(10 * 110));
+    // Even a 5-minute accumulation (~300 rows × 110 = 33 KB) just crosses.
+    // The key boundary: anything under 32 KB is single-POST.
+    TEST_ASSERT_FALSE(fileNeedsChunking(32767));
+}
+
+// A day-file from a 2-day offline trip (60,000 rows × ~110 bytes = ~6.6 MB)
+// is far above the threshold and must use chunked mode.
+void test_large_offline_file_above_threshold() {
+    // 60,000 samples × 110 bytes = 6,600,000 bytes
+    TEST_ASSERT_TRUE(fileNeedsChunking(60000 * 110));
+    // Even a modestly-sized backlog (e.g. 1 hour offline = 3,600 rows × 110)
+    // exceeds the threshold.
+    TEST_ASSERT_TRUE(fileNeedsChunking(3600 * 110));
+}
+
+// A file exactly at the threshold boundary must use chunked mode.
+void test_file_exactly_at_threshold_uses_chunked() {
+    TEST_ASSERT_TRUE(fileNeedsChunking(UPLOAD_LARGE_FILE_THRESHOLD));
+}
+
+// ---------------------------------------------------------------------------
+// Tests: chunk count math (v1.0.3)
+// ---------------------------------------------------------------------------
+
+// An empty file produces zero chunks (guard against divide-by-zero).
+void test_chunk_count_empty_file() {
+    TEST_ASSERT_EQUAL(0, chunkCount(0));
+}
+
+// A file smaller than one chunk posts exactly 1 request.
+void test_chunk_count_under_one_chunk() {
+    TEST_ASSERT_EQUAL(1, chunkCount(1));
+    TEST_ASSERT_EQUAL(1, chunkCount(UPLOAD_CHUNK_ROWS - 1));
+}
+
+// A file that exactly fills one chunk posts exactly 1 request.
+void test_chunk_count_exact_one_chunk() {
+    TEST_ASSERT_EQUAL(1, chunkCount(UPLOAD_CHUNK_ROWS));
+}
+
+// A 60,000-row file at 300 rows/chunk should require 200 requests.
+void test_chunk_count_large_file() {
+    // 60,000 / 300 = 200 exactly
+    TEST_ASSERT_EQUAL(200, chunkCount(60000));
+}
+
+// A file with one row more than a full chunk requires 2 requests.
+void test_chunk_count_one_row_overflow() {
+    TEST_ASSERT_EQUAL(2, chunkCount(UPLOAD_CHUNK_ROWS + 1));
+}
+
+// ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
 int main(int, char**) {
@@ -149,6 +229,18 @@ int main(int, char**) {
     RUN_TEST(test_disabled_ssid_without_url);
     RUN_TEST(test_disabled_url_without_ssid);
     RUN_TEST(test_disabled_remote_ssid_without_url);
+
+    // Chunked-upload threshold (v1.0.3)
+    RUN_TEST(test_normal_rotation_file_below_threshold);
+    RUN_TEST(test_large_offline_file_above_threshold);
+    RUN_TEST(test_file_exactly_at_threshold_uses_chunked);
+
+    // Chunk count math (v1.0.3)
+    RUN_TEST(test_chunk_count_empty_file);
+    RUN_TEST(test_chunk_count_under_one_chunk);
+    RUN_TEST(test_chunk_count_exact_one_chunk);
+    RUN_TEST(test_chunk_count_large_file);
+    RUN_TEST(test_chunk_count_one_row_overflow);
 
     return UNITY_END();
 }

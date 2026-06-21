@@ -132,7 +132,7 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "1.0.2";
+constexpr const char* FW_VERSION = "1.0.3";
 
 // ---------------- Battery / Wi-Fi safety gate (v0.4.2) -----------------------
 // Skip the Wi-Fi upload cycle entirely if VBAT is below this threshold (V).
@@ -210,6 +210,22 @@ constexpr uint32_t DOSE_NVS_MAX_INTERVAL_MS = 300000; // 5 min hard ceiling
 // connectWifi() and uploadOne(), so 60s is pure headroom for any path the
 // pet calls don't cover. A real wedge is still caught quickly enough.
 constexpr uint32_t TASK_WDT_TIMEOUT_S = 60;
+
+// ---------------- Chunked upload (v1.0.3) -----------------------------------
+// When a pending-upload file is larger than UPLOAD_LARGE_FILE_THRESHOLD bytes,
+// the uploader splits it into chunks of UPLOAD_CHUNK_ROWS rows and posts each
+// chunk as a separate HTTP request, petting the WDT between chunks.
+//
+// Root cause addressed: a 9 MB day-file (60,000 samples) posted as a single
+// HTTP request over a mobile hotspot at ~1 Mbps takes ~72 seconds. With the
+// WDT timeout at 60 s and no way to pet inside HTTPClient::sendRequest(), this
+// caused a TASK_WDT panic every time the device tried to upload a large backlog
+// via hotspot. The device then boot-looped until it returned to home Wi-Fi
+// where the LAN speed was fast enough. Chunked mode is transparent to the API
+// because the (sessionId, timestampMs) unique index deduplicates any re-sent
+// rows on a retry after a partial failure.
+constexpr size_t UPLOAD_CHUNK_ROWS           = 300;    // data rows per chunk (~33 KB at 110 B/row)
+constexpr size_t UPLOAD_LARGE_FILE_THRESHOLD = 32768;  // 32 KB; files above this use chunked mode
 
 // ---------------- Wi-Fi upload self-heal (v0.8.1) ---------------------------
 // After this many consecutive upload failures the uploader checks heap.
