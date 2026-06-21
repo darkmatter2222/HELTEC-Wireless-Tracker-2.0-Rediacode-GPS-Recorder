@@ -876,7 +876,7 @@ Seven test suites live under `test/`:
 | `test_dose_persistence_native`   |  9    | `shouldSaveDose` NVS write-gate decision logic |
 | `test_gps_transition_native`     |  9    | GPS fix transition detector (first-obs, steady-state, flap) |
 | `test_link_health_native`        |  7    | BLE link-stall watchdog, including millis() wraparound |
-| `test_wifi_network_select_native`| 14    | Dual-network profile enable/disable, HTTPS URL detection, Basic Auth cred check |
+| `test_wifi_network_select_native`| 22    | Dual-network profile enable/disable, HTTPS URL detection, Basic Auth cred check, chunked-upload threshold and chunk-count math |
 
 **Prerequisites on Windows**: PlatformIO's native env calls `gcc`/`g++`/`ar` which
 are not in PATH by default. If VS Build Tools 2022 is installed, create one-time
@@ -897,7 +897,7 @@ Then run all seven host-side suites:
 
 ```powershell
 pio test -e native
-# Expected: 83 test cases: 83 succeeded
+# Expected: 115 test cases: 115 succeeded
 ```
 
 ### Integration tests (requires device on serial port)
