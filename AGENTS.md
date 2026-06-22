@@ -265,7 +265,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `1.1.0`.
+Current: `1.2.2`.
 
 ---
 
@@ -329,12 +329,20 @@ namespace secrets {
 - Name auto-grab pattern (NVS key `grab_pat`) connects immediately to any peer whose name matches
 - Call `secureConnection()` immediately after connect for RC-110
 - **Spectrum collection mode** (v1.1.0): Optional parsing of RC-110 CsI(Tl) scintillator
-  spectrometer data from DATA_BUF TLV eid=1 segments. Disabled by default.
+  spectrometer data. Disabled by default.
   NVS-backed in Preferences namespace `"rctracker"`, key `"spec_en"`.
   Toggle via REPL (`SPCON`/`SPOFF`/`SPSTAT`) or long-press on About screen.
-  When enabled, up to `SPECTRUM_MAX_CHANNELS=64` channels are decoded per reading
+  When enabled, up to `SPECTRUM_MAX_CHANNELS=1024` channels are decoded per reading
   at `SPECTRUM_POLL_INTERVAL_MS=5000ms`. Appends pipe-delimited channel counts
   to the 13th CSV column (`spectrumData`).
+- **Spectrum architecture** (v1.2.2): All spectrum processing runs on Core 1
+  (main loop, 8KB stack), NOT the NimBLE host task (Core 0, ~4KB stack).
+  VS_SPECTRUM decode writes to a static shared cache (`gSpectrumCache`) under spinlock.
+  The main loop consumes via `getSpectrumCache()` and builds the pipe-delimited String there.
+  The `Reading` struct contains NO spectrum fields — any code reading `r.hasSpectrum`,
+  `r.spectrumChannelCount`, or `r.spectrumChannels[]` is using a pre-1.2.2 API.
+  **CRITICAL**: Never allocate arrays or Strings inside the BLE callback path
+  (onReading, onNotify, ScanCb) — it runs on Core 0 with ~4KB stack.
 
 ### GPS — `gps_module.{h,cpp}`
 
