@@ -2721,7 +2721,6 @@ export default function App() {
           rowsBySession={rowsBySession}
           onRowsLoaded={(newRows) => setRows(prev => ({ ...prev, ...newRows }))}
         />
-        />
       )}
 
       {/* === LIVE TRACKING OVERLAY === */}
