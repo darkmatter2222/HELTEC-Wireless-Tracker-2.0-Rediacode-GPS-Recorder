@@ -225,6 +225,11 @@ static bool         gSpecMeta_valid    = false;
 static uint16_t     gSpecMeta_channels = 0;
 static uint16_t     gSpectrumCache[cfg::SPECTRUM_MAX_CHANNELS];
 
+// Temporary parse buffer — allocated statically to avoid stack overflow on the
+// NimBLE host task (Core 0, ~4 KB stack). A 2 KB local array in decodeSpectrum()
+// would exceed half that budget and silently corrupt FreeRTOS control blocks.
+static uint16_t     gSpectrumParseBuf[cfg::SPECTRUM_MAX_CHANNELS];
+
 // ----------------- BLE callbacks ----------------------------------------------
 static bool nameLooksLikeRadiaCode(const std::string& nIn) {
     if (nIn.empty()) return false;
@@ -609,19 +614,10 @@ static void decodeDataBuf(const uint8_t* p, size_t len) {
         }
     }
 
-    // Merge spectrum from shared cache into this reading (if VS_SPECTRUM response
-    // arrived since the last DATA_BUF reading consumed it).  The spinlock protects
-    // against the BLE callback writing while we read on the same thread.
-    portENTER_CRITICAL(&gSpectrumMux);
-    if (gSpecMeta_valid && out.valid) {
-        out.hasSpectrum = true;
-        out.spectrumChannelCount = gSpecMeta_channels;
-        for (uint16_t ch = 0; ch < gSpecMeta_channels && ch < cfg::SPECTRUM_MAX_CHANNELS; ch++)
-            out.spectrumChannels[ch] = gSpectrumCache[ch];
-        gSpecMeta_valid = false; // consumed — only one reading gets this snapshot
-    }
-    portEXIT_CRITICAL(&gSpectrumMux);
-
+    // Spectrum cache is accessible from main loop via RadiaCode::getSpectrumCache().
+    // Do NOT copy spectrum channels into Reading struct here — the BLE callback
+    // runs on the NimBLE host task (Core 0, ~4 KB stack) and copying 1024 uint16_t
+    // values would overflow that stack. Main loop (Core 1, 8KB stack) copies instead.
     if (out.valid && g.onReading) {
         g.lastReadingMs = millis();
         g.onReading(out);
@@ -645,7 +641,8 @@ static void decodeSpectrum(const uint8_t* p, size_t len) {
     size_t i = 16;
 
     // Parse U32LE channel counts (v0 format matches Python SDK decode_counts_v0)
-    uint16_t localCount[cfg::SPECTRUM_MAX_CHANNELS] = {0};
+    // Use static buffer gSpectrumParseBuf to avoid stack overflow on NimBLE host task (~4KB stack)
+    memset(gSpectrumParseBuf, 0, cfg::SPECTRUM_MAX_CHANNELS * sizeof(uint16_t));
     uint16_t nCh = 0;
 
     while (i + 4 <= len) {
@@ -653,7 +650,7 @@ static void decodeSpectrum(const uint8_t* p, size_t len) {
         i += 4;
         if (nCh < cfg::SPECTRUM_MAX_CHANNELS) {
             // Clamp U32 to U16 for storage
-            localCount[nCh++] = (count > 65535) ? 65535 : (uint16_t)count;
+            gSpectrumParseBuf[nCh++] = (count > 65535) ? 65535 : (uint16_t)count;
         }
     }
 
@@ -664,7 +661,7 @@ static void decodeSpectrum(const uint8_t* p, size_t len) {
 
     // Store in shared cache protected by spinlock.
     portENTER_CRITICAL(&gSpectrumMux);
-    memcpy(gSpectrumCache, localCount, nCh * sizeof(uint16_t));
+    memcpy(gSpectrumCache, gSpectrumParseBuf, nCh * sizeof(uint16_t));
     gSpecMeta_channels = nCh;
     gSpecMeta_valid = true;
     portEXIT_CRITICAL(&gSpectrumMux);
@@ -1256,7 +1253,17 @@ void RadiaCode::loop() {
         return;
     }
 
-    // Request timeout. Don't disconnect on a single timeout -- the 110 is\n    // observed to take 5-9 s for the first VS_DATA_BUF response after\n    // Ready, and an idle slot or two is normal. Just clear the flag and\n    // let the next poll fire. The peer will close the link itself if it\n    // really has gone away.\n    if (g.awaitingResponse && (int32_t)(now - g.activeDeadlineMs) >= 0) {\n        log_w("Request 0x%04X timed out (cmd will be retried by next poll)", g.activeCmd);\n        g.awaitingResponse = false;\n        g.expectedLen = -1;\n        g.respBuffer.clear();\n    }
+    // Request timeout. Don't disconnect on a single timeout -- the 110 is
+    // observed to take 5-9 s for the first VS_DATA_BUF response after
+    // Ready, and an idle slot or two is normal. Just clear the flag and
+    // let the next poll fire. The peer will close the link itself if it
+    // really has gone away.
+    if (g.awaitingResponse && (int32_t)(now - g.activeDeadlineMs) >= 0) {
+        log_w("Request 0x%04X timed out (cmd will be retried by next poll)", g.activeCmd);
+        g.awaitingResponse = false;
+        g.expectedLen = -1;
+        g.respBuffer.clear();
+    }
 
     // Drive scan/reconnect when not connected (non-blocking async auto-mode).
     // Previously doScan() blocked the main loop for RADIACODE_SCAN_MS (8 s)
@@ -1462,6 +1469,20 @@ void RadiaCode::setSpectrumMode(bool enable) {
 
 bool RadiaCode::getSpectrumMode() const {
     return g.spectrumMode;
+}
+
+bool RadiaCode::getSpectrumCache(uint16_t* outBuf, uint16_t bufSize, uint16_t* channel_count) {
+    portENTER_CRITICAL(&gSpectrumMux);
+    if (!gSpecMeta_valid) {
+        portEXIT_CRITICAL(&gSpectrumMux);
+        return false;
+    }
+    const uint16_t n = (gSpecMeta_channels < bufSize) ? gSpecMeta_channels : bufSize;
+    memcpy(outBuf, gSpectrumCache, n * sizeof(uint16_t));
+    *channel_count = n;
+    gSpecMeta_valid = false;  // consumed — only one consumer gets this snapshot
+    portEXIT_CRITICAL(&gSpectrumMux);
+    return true;
 }
 
 RadiaCode::State  RadiaCode::state()       { return g.state; }

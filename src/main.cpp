@@ -10,6 +10,7 @@
 #include <esp_system.h>
 #include <esp_task_wdt.h>
 #include <Preferences.h>
+#include <cmath>
 #include "config.h"
 #include "button.h"
 #include "event_log.h"
@@ -63,8 +64,15 @@ static void loadDoseFromNvs() {
     p.begin("dose", true);  // read-only
     gTripDoseMicroSv = p.getFloat("usv", 0.0f);
     p.end();
+    // ESP32 NVS can return NaN/inf if the float was corrupted or partially written.
+    // Reset to 0 to prevent infinite dose from poisoning the accumulator.
+    if (std::isnan(gTripDoseMicroSv) || std::isinf(gTripDoseMicroSv) || gTripDoseMicroSv < 0.0f) {
+        gTripDoseMicroSv = 0.0f;
+        Serial.printf("[DOSE] NVS corrupt, reset to 0\n");
+    } else {
+        Serial.printf("[DOSE] loaded %.4f uSv from NVS\n", gTripDoseMicroSv);
+    }
     gLastSavedDoseUSv = gTripDoseMicroSv;
-    Serial.printf("[DOSE] loaded %.4f uSv from NVS\n", gTripDoseMicroSv);
 }
 static void saveDoseToNvs() {
     Preferences p;
@@ -105,8 +113,9 @@ struct PendingSample {
     double    lat = 0.0, lng = 0.0;
     String    deviceId;
     float     speed = -1.f, bearing = -1.f, alt = -9999.f, hdop = -1.f, acc = -1.f;
-    // Spectrum data (v1.1.0): pipe-delimited channel counts
-    bool      hasSpectrum = false;
+    // Spectrum data (v1.2.2): working buffer for getSpectrumCache() + built string
+    uint16_t  specBuf[cfg::SPECTRUM_MAX_CHANNELS];
+    uint16_t  specCount = 0;
     String    spectrumData;  // "count1|count2|..." or empty
 };
 portMUX_TYPE  gSampleMux = portMUX_INITIALIZER_UNLOCKED;
@@ -335,14 +344,9 @@ void setup() {
             snap.alt      = cfg::FIELD_ALTITUDE_M  ? (float)gGps.altitudeMeters()     : -9999.f;
             snap.hdop     = cfg::FIELD_HDOP        ? (float)gGps.hdop()               : -1.f;
             snap.acc      = cfg::FIELD_ACCURACY_M  ? (float)gGps.accuracyMeters()     : -1.f;
-            // Spectrum data (v1.1.0): copy channel counts into pipe-delimited string
-            snap.hasSpectrum = r.hasSpectrum;
-            if (r.hasSpectrum) {
-                for (uint16_t ch = 0; ch < r.spectrumChannelCount; ch++) {
-                    if (ch > 0) snap.spectrumData += '|';
-                    snap.spectrumData += String(r.spectrumChannels[ch]);
-                }
-            }
+            // Spectrum data is NOT built here — the callback runs on the NimBLE
+            // host task (Core 0, ~4 KB stack). String + pipe-delimited building
+            // is deferred to the main loop (Core 1, 8 KB stack) below.
             portENTER_CRITICAL(&gSampleMux);
             gPendingSample = snap;
             portEXIT_CRITICAL(&gSampleMux);
@@ -752,10 +756,23 @@ void loop() {
     portEXIT_CRITICAL(&gSampleMux);
     if (have) {
         event_log::markPhase("MAIN_APPEND");
+
+        // Try to consume the latest spectrum snapshot from the shared cache
+        // (v1.2.2: moved from NimBLE callback on Core 0 to here on Core 1
+        // to avoid stack overflow — String building needs >4 KB stack).
+        if (gRadia.getSpectrumCache(s.specBuf, cfg::SPECTRUM_MAX_CHANNELS, &s.specCount)) {
+            for (uint16_t ch = 0; ch < s.specCount; ch++) {
+                if (ch > 0) s.spectrumData += '|';
+                s.spectrumData += String(s.specBuf[ch]);
+            }
+        }
+
         const size_t appendedBytes = gStore.append(0, s.ts, s.uSv, s.cps,
                       s.hasGps, s.lat, s.lng, s.deviceId,
                       s.speed, s.bearing, s.alt, s.hdop, s.acc,
                       s.spectrumData);
+        // Clear spectrumData for next iteration to avoid String lingering
+        s.spectrumData = "";
         if (appendedBytes > 0 && gLife.ready()) gLife.onBytesWritten(appendedBytes);
 
         // Integrate dose: µSv/hr × dt_ms / 3 600 000 = µSv accumulated.

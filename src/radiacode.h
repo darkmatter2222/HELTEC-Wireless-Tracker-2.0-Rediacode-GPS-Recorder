@@ -31,12 +31,6 @@ public:
         float    tempC = 0.0f;
         bool     hasMetadata = false;
         uint32_t timestampMs = 0; // millis() when received
-        // Spectrum data (v1.1.0):
-        // Valid when spectrumMode_ is enabled AND the device returned eid=1 records.
-        // channel_count is in [1, cfg::SPECTRUM_MAX_CHANNELS].
-        bool            hasSpectrum = false;
-        uint16_t        spectrumChannelCount = 0;
-        uint16_t        spectrumChannels[cfg::SPECTRUM_MAX_CHANNELS] = {0};
     };
 
     struct ScanResult {
@@ -84,6 +78,13 @@ public:
     // When enabled, eid=1 spectrum segments from DATA_BUF are parsed into Reading.
     void setSpectrumMode(bool enable);
     bool getSpectrumMode() const;
+
+    // Spectrum shared cache access (v1.2.1):
+    // Returns true if a VS_SPECTRUM snapshot is available and copies up to
+    // `bufSize` channels into `outBuf`.  Consumes the snapshot on success
+    // so only one main-loop sample gets the data.  channel_count is set to
+    // the actual number of valid channels (may be < bufSize).
+    bool getSpectrumCache(uint16_t* outBuf, uint16_t bufSize, uint16_t* channel_count);
 
     State          state();
     const String&  peerAddress();
