@@ -85,7 +85,7 @@ constexpr uint32_t RADIACODE_LINK_STALL_MS = 15000;
 // ---------------- Storage -----------------------------------------------------
 constexpr const char* SESSIONS_DIR    = "/sessions";
 constexpr const char* ACTIVE_FILE     = "/active.txt";   // current session id
-constexpr size_t      MAX_LINE_BYTES  = 160;
+constexpr size_t      MAX_LINE_BYTES  = 4096;   // 1024-channel spectrum (~3 KB) + GPS/header fields
 
 // ---------------- SD card (HW-125 micro-SD breakout, SPI mode) ----------------
 // Wiring (see heltec_tracker/AGENTS.md for the full table):
@@ -132,7 +132,7 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "1.1.0";
+constexpr const char* FW_VERSION = "1.2.0";
 
 // ---------------- Battery / Wi-Fi safety gate (v0.4.2) -----------------------
 // Skip the Wi-Fi upload cycle entirely if VBAT is below this threshold (V).
@@ -258,15 +258,11 @@ constexpr uint32_t GPS_FROZEN_FIX_RECOVERY_MS = 120000;  // 2 min
 // waiting for normal upload cycle): cps exceeds this factor × the running median.
 constexpr bool     SPECTRUM_COLLECT_DEFAULT = false;   // off by default
 // Maximum number of energy channels in a spectrum record. The CsI(Tl) crystal in
-// the RC-110 produces ~500–2048 channels depending on firmware and integration
-// time. 64 is enough for a meaningful shape at minimal storage cost; full spectra
-// can be restored by reading SPECTRUM VS directly if needed for debugging.
-constexpr uint16_t SPECTRUM_MAX_CHANNELS    = 64;
-// Spectrum polling interval when active (in addition to the normal DATA_BUF poll).
-// Set via WR_VIRT_SFR(MS_CTRL) or polled independently. Higher values reduce BLE
-// throughput impact. The dataBuf already includes eid=1 segments at gid 1/2/3 — we
-// parse those whenever they appear regardless of this knob. This only governs the
-// explicit VS_SPECTRUM poll when enabled.
+// the RC-110 produces up to 1024 channels per integration cycle.
+// v1.2.0: increased from 64 to 1024 to capture full spectra via VS_SPECTRUM poll.
+constexpr uint16_t SPECTRUM_MAX_CHANNELS    = 1024;
+// Spectrum polling interval when active. Polled via RD_VIRT_STRING(VS_SPECTRUM)
+// every N ms while Ready + spectrumMode enabled.
 constexpr uint32_t SPECTRUM_POLL_INTERVAL_MS = 5000;   // 5 s
 
 } // namespace cfg

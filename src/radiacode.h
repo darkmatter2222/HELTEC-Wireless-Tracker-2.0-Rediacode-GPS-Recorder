@@ -35,7 +35,7 @@ public:
         // Valid when spectrumMode_ is enabled AND the device returned eid=1 records.
         // channel_count is in [1, cfg::SPECTRUM_MAX_CHANNELS].
         bool            hasSpectrum = false;
-        uint8_t         spectrumChannelCount = 0;
+        uint16_t        spectrumChannelCount = 0;
         uint16_t        spectrumChannels[cfg::SPECTRUM_MAX_CHANNELS] = {0};
     };
 

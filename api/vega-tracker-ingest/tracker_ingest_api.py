@@ -313,6 +313,15 @@ def _parse_csv(body: str, session_id: str, header_device_id: str | None,
         if hdop_val    is not None: doc["hdop"]        = hdop_val
         if event_tag   is not None: doc["event"]       = event_tag
         if accuracy_m  is not None: doc["accuracyM"]   = accuracy_m
+        # Column 12 (spectrumData) added in firmware 1.1.0 — pipe-delimited energy-
+        # channel counts from RC-110 CsI(Tl) spectrometer (up to 1024 channels).
+        # Stored as a MongoDB array of ints for efficient range queries and avoids
+        # blowing out string storage for every document.
+        if len(row) > 12 and row[12].strip():
+            try:
+                doc["spectrumData"] = [int(x) for x in row[12].split("|") if x.strip()]
+            except (ValueError, TypeError):
+                pass  # malformed spectrum string — discard silently
         if lat is not None and lng is not None and not (lat == 0.0 and lng == 0.0):
             doc["loc"] = {"type": "Point", "coordinates": [lng, lat]}
         out.append(doc)

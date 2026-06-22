@@ -644,9 +644,8 @@ size_t SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
     if (hdop       >= 0.f)     snprintf(hdp, sizeof(hdp), "%.2f", hdop);
     if (accuracyM  >= 0.f)     snprintf(acc, sizeof(acc), "%.2f", accuracyM);
 
-    char line[cfg::MAX_LINE_BYTES];
-    // v1.1.0: 13-column schema. Column 13 (spectrumData) is pipe-delimited
-    // channel counts when spectrum mode is enabled, empty otherwise.
+    // Static to avoid ~4 KB stack blow-up (1024-channel spectrum lines).
+    static char line[cfg::MAX_LINE_BYTES];
     int len = snprintf(line, sizeof(line), "%llu,%.6f,%.3f,%.7f,%.7f,%s,%s,%s,%s,%s,,%s,%s\n",
                        (unsigned long long)timestampMsFull,
                        uSvPerHour, cps, lat, lng, deviceId.c_str(),
@@ -714,10 +713,8 @@ void SessionStore::appendEvent(uint64_t timestampMsFull,
     if (!recording_ || activeId_ != day) return;
 
     // Schema: timestamp, uSv, cps, lat, lng, deviceId, speed, bearing, alt,
-    // hdop, event, accuracyM, spectrumData. Numerics are 0/empty; deviceId is preserved so
-    // the row can be associated with the same tracker. accuracyM and spectrumData
-    // trailing fields are empty on event rows (no GPS fix at the time of transition).
-    char line[cfg::MAX_LINE_BYTES];
+    // static buffer reused for event rows (much smaller than spectrum rows).
+    static char line[cfg::MAX_LINE_BYTES];
     int len = snprintf(line, sizeof(line), "%llu,,,,,%s,,,,,%s,,\n",
                        (unsigned long long)timestampMsFull,
                        deviceId.c_str(), eventTag);

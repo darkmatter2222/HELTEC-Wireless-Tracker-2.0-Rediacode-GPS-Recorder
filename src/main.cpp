@@ -338,7 +338,7 @@ void setup() {
             // Spectrum data (v1.1.0): copy channel counts into pipe-delimited string
             snap.hasSpectrum = r.hasSpectrum;
             if (r.hasSpectrum) {
-                for (uint8_t ch = 0; ch < r.spectrumChannelCount; ch++) {
+                for (uint16_t ch = 0; ch < r.spectrumChannelCount; ch++) {
                     if (ch > 0) snap.spectrumData += '|';
                     snap.spectrumData += String(r.spectrumChannels[ch]);
                 }

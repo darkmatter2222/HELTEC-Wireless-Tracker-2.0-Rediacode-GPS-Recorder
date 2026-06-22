@@ -26,6 +26,7 @@ constexpr uint16_t CMD_WR_VIRT_SFR    = 0x0825;
 constexpr uint16_t CMD_RD_VIRT_STRING = 0x0826;
 
 constexpr uint32_t VS_DATA_BUF        = 0x00000100;
+constexpr uint32_t VS_SPECTRUM        = 0x00000200;
 constexpr uint32_t VSFR_DEVICE_TIME   = 0x00000504;
 
 constexpr uint16_t BLE_CHUNK = 18;
@@ -121,6 +122,15 @@ struct Internal {
     // Spectrum collection mode (v1.1.0)
     bool              spectrumMode = false;
 
+    // Spectrum poll tracking (v1.2.0): VS_SPECTRUM is polled at a lower
+    // rate than VS_DATA_BUF to avoid starving the BLE bus.
+    uint32_t          lastSpectrumPollMs = 0;
+
+    // Which VS address was last requested via RD_VIRT_STRING?
+    // Used by onResponseComplete to route the payload to decodeDataBuf
+    // vs. decodeSpectrum (v1.2.0).
+    uint32_t          requestedVsAddr = VS_DATA_BUF;
+
     Preferences       prefs;
 };
 static Internal g;
@@ -205,7 +215,15 @@ static void handleNotify(NimBLERemoteCharacteristic*, uint8_t* data, size_t len,
 static bool sendCommand(uint16_t cmd, const uint8_t* args, size_t argLen);
 static void onResponseComplete(const uint8_t* payload, size_t len);
 static void decodeDataBuf(const uint8_t* p, size_t len);
+static void decodeSpectrum(const uint8_t* p, size_t len);
 static void advanceInit();
+
+// Shared cache so VS_SPECTRUM responses (decoded by decodeSpectrum) can feed
+// the next DATA_BUF reading (in decodeDataBuf).  Protected by spinlock.
+static portMUX_TYPE gSpectrumMux       = portMUX_INITIALIZER_UNLOCKED;
+static bool         gSpecMeta_valid    = false;
+static uint16_t     gSpecMeta_channels = 0;
+static uint16_t     gSpectrumCache[cfg::SPECTRUM_MAX_CHANNELS];
 
 // ----------------- BLE callbacks ----------------------------------------------
 static bool nameLooksLikeRadiaCode(const std::string& nIn) {
@@ -489,7 +507,12 @@ static void onResponseComplete(const uint8_t* payload, size_t len) {
             size_t dlen = flen;
             // Trim trailing 0x00 like Android does.
             if (dlen > 0 && data[dlen - 1] == 0) --dlen;
-            decodeDataBuf(data, dlen);
+            // Route to correct decoder based on which VS was requested (v1.2.0)
+            if (g.requestedVsAddr == VS_SPECTRUM) {
+                decodeSpectrum(data, dlen);
+            } else {
+                decodeDataBuf(data, dlen);
+            }
             break;
         }
         case CMD_SET_EXCHANGE:
@@ -564,35 +587,16 @@ static void decodeDataBuf(const uint8_t* p, size_t len) {
             const uint16_t samples = readU16LE(p + i);
             i += 6;
             if (g.spectrumMode && samples > 0 && samples <= cfg::SPECTRUM_MAX_CHANNELS) {
+                // Skip DATA_BUF spectrum data — VS_SPECTRUM poll (v1.2.0)
+                // provides full 1024-channel spectra directly. DATA_BUF
+                // eid=1 segments are compressed summaries that desync easily
+                // and the Python reference SDK skips them with \"# ???\" too.
+                log_w("spectrum from DATA_BUF skipped (gid=%u, samples=%u), use VS_SPECTRUM poll",
+                      (unsigned)gid, (unsigned)samples);
                 const size_t bps = (gid == 1) ? 8 : (gid == 2 ? 16 : 14);
                 const size_t skip = (size_t)samples * bps;
                 if (i + skip > len) break;
-                // Parse channel counts according to bytes-per-sample
-                if (!out.hasSpectrum || gid == 1) {
-                    // First spectrum segment received — reset accumulator
-                    out.hasSpectrum = true;
-                    out.spectrumChannelCount = 0;
-                    for (size_t ch = 0; ch < cfg::SPECTRUM_MAX_CHANNELS; ch++)
-                        out.spectrumChannels[ch] = 0;
-                }
-                for (uint16_t s = 0; s < samples && out.spectrumChannelCount < cfg::SPECTRUM_MAX_CHANNELS; s++) {
-                    uint16_t count = 0;
-                    if (bps == 8) {
-                        // U8LE: single byte count
-                        count = p[i];
-                        i += 1;
-                    } else if (bps == 16) {
-                        // U16LE: 2-byte count
-                        count = readU16LE(p + i);
-                        i += 2;
-                    } else {
-                        // bps == 14: channel index U8 + count U16LE
-                        i += 1; // skip channel index
-                        count = readU16LE(p + i);
-                        i += 2;
-                    }
-                    out.spectrumChannels[out.spectrumChannelCount++] = count;
-                }
+                i += skip;
             } else {
                 // Skip spectrum data when mode disabled or too many channels
                 const size_t bps = (gid == 1) ? 8 : (gid == 2 ? 16 : 14);
@@ -605,10 +609,67 @@ static void decodeDataBuf(const uint8_t* p, size_t len) {
         }
     }
 
+    // Merge spectrum from shared cache into this reading (if VS_SPECTRUM response
+    // arrived since the last DATA_BUF reading consumed it).  The spinlock protects
+    // against the BLE callback writing while we read on the same thread.
+    portENTER_CRITICAL(&gSpectrumMux);
+    if (gSpecMeta_valid && out.valid) {
+        out.hasSpectrum = true;
+        out.spectrumChannelCount = gSpecMeta_channels;
+        for (uint16_t ch = 0; ch < gSpecMeta_channels && ch < cfg::SPECTRUM_MAX_CHANNELS; ch++)
+            out.spectrumChannels[ch] = gSpectrumCache[ch];
+        gSpecMeta_valid = false; // consumed — only one reading gets this snapshot
+    }
+    portEXIT_CRITICAL(&gSpectrumMux);
+
     if (out.valid && g.onReading) {
         g.lastReadingMs = millis();
         g.onReading(out);
     }
+}
+
+// ----------------- Spectrum decoder (v1.2.0, VS_SPECTRUM poll) --------------
+// Decodes the RD_VIRT_STRING(VS_SPECTRUM) response payload.
+// Format v0 (used by RC-110): <Ifff> header + array of <I> (U32LE counts).
+// Shared cache so VS_SPECTRUM responses can feed the next DATA_BUF reading:
+static void decodeSpectrum(const uint8_t* p, size_t len) {
+    // Header: ts U32LE + a0 F32LE + a1 F32LE + a2 F32LE = 16 bytes
+    if (len < 16) {
+        log_w("spectrum response too short (%zu bytes)", len);
+        return;
+    }
+    // const uint32_t spectrumTs = readU32LE(p);        // integration timestamp (secs since device boot)
+    // const float a0   = readF32LE(p + 4);              // calibration coeff a0
+    // const float a1   = readF32LE(p + 8);              // calibration coeff a1
+    // const float a2   = readF32LE(p + 12);             // calibration coeff a2
+    size_t i = 16;
+
+    // Parse U32LE channel counts (v0 format matches Python SDK decode_counts_v0)
+    uint16_t localCount[cfg::SPECTRUM_MAX_CHANNELS] = {0};
+    uint16_t nCh = 0;
+
+    while (i + 4 <= len) {
+        const uint32_t count = readU32LE(p + i);
+        i += 4;
+        if (nCh < cfg::SPECTRUM_MAX_CHANNELS) {
+            // Clamp U32 to U16 for storage
+            localCount[nCh++] = (count > 65535) ? 65535 : (uint16_t)count;
+        }
+    }
+
+    if (nCh == 0) {
+        log_w("VS_SPECTRUM returned no channels");
+        return;
+    }
+
+    // Store in shared cache protected by spinlock.
+    portENTER_CRITICAL(&gSpectrumMux);
+    memcpy(gSpectrumCache, localCount, nCh * sizeof(uint16_t));
+    gSpecMeta_channels = nCh;
+    gSpecMeta_valid = true;
+    portEXIT_CRITICAL(&gSpectrumMux);
+
+    log_i("vs_spectrum: %u channels cached", (unsigned)nCh);
 }
 
 // ----------------- init state machine -----------------------------------------
@@ -1265,10 +1326,20 @@ void RadiaCode::loop() {
     }
 
     if (g.state == State::Ready && !g.awaitingResponse) {
+        // VS_DATA_BUF poll (~1 Hz) — primary realtime readings
         if ((now - g.lastPollMs) >= cfg::RADIACODE_POLL_MS) {
             g.lastPollMs = now;
+            g.requestedVsAddr = VS_DATA_BUF;
             std::vector<uint8_t> args;
             putU32LE(args, VS_DATA_BUF);
+            sendCommand(CMD_RD_VIRT_STRING, args.data(), args.size());
+        }
+        // VS_SPECTRUM poll (every 5 s) — full 1024-channel spectrum
+        if (g.spectrumMode && (now - g.lastSpectrumPollMs) >= cfg::SPECTRUM_POLL_INTERVAL_MS) {
+            g.lastSpectrumPollMs = now;
+            g.requestedVsAddr = VS_SPECTRUM;
+            std::vector<uint8_t> args;
+            putU32LE(args, VS_SPECTRUM);
             sendCommand(CMD_RD_VIRT_STRING, args.data(), args.size());
         }
     }
