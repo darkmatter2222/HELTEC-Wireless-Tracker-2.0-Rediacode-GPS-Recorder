@@ -113,9 +113,9 @@ struct PendingSample {
     double    lat = 0.0, lng = 0.0;
     String    deviceId;
     float     speed = -1.f, bearing = -1.f, alt = -9999.f, hdop = -1.f, acc = -1.f;
-    // Spectrum data (v1.2.2): working buffer for getSpectrumCache() + built string
-    uint16_t  specBuf[cfg::SPECTRUM_MAX_CHANNELS];
-    uint16_t  specCount = 0;
+    // Spectrum data (v1.2.2): only a built string here.
+    // The uint16_t[1024] working buffer lives as static storage in the main loop
+    // on Core 1 — never on the NimBLE callback stack.
     String    spectrumData;  // "count1|count2|..." or empty
 };
 portMUX_TYPE  gSampleMux = portMUX_INITIALIZER_UNLOCKED;
@@ -757,13 +757,16 @@ void loop() {
     if (have) {
         event_log::markPhase("MAIN_APPEND");
 
-        // Try to consume the latest spectrum snapshot from the shared cache
+        // Try to consume the latest spectrum snapshot from the shared cache.
+        // Static buffer avoids allocating 2KB on stack each iteration.
         // (v1.2.2: moved from NimBLE callback on Core 0 to here on Core 1
         // to avoid stack overflow — String building needs >4 KB stack).
-        if (gRadia.getSpectrumCache(s.specBuf, cfg::SPECTRUM_MAX_CHANNELS, &s.specCount)) {
-            for (uint16_t ch = 0; ch < s.specCount; ch++) {
+        static uint16_t specBuf[cfg::SPECTRUM_MAX_CHANNELS];
+        uint16_t specCount = 0;
+        if (gRadia.getSpectrumCache(specBuf, cfg::SPECTRUM_MAX_CHANNELS, &specCount)) {
+            for (uint16_t ch = 0; ch < specCount; ch++) {
                 if (ch > 0) s.spectrumData += '|';
-                s.spectrumData += String(s.specBuf[ch]);
+                s.spectrumData += String(specBuf[ch]);
             }
         }
 

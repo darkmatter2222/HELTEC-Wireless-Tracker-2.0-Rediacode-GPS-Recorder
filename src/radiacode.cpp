@@ -1473,14 +1473,19 @@ bool RadiaCode::getSpectrumMode() const {
 
 bool RadiaCode::getSpectrumCache(uint16_t* outBuf, uint16_t bufSize, uint16_t* channel_count) {
     portENTER_CRITICAL(&gSpectrumMux);
-    if (!gSpecMeta_valid) {
+    if (gSpecMeta_channels == 0 || !gSpecMeta_valid) {
         portEXIT_CRITICAL(&gSpectrumMux);
         return false;
     }
     const uint16_t n = (gSpecMeta_channels < bufSize) ? gSpecMeta_channels : bufSize;
-    memcpy(outBuf, gSpectrumCache, n * sizeof(uint16_t));
-    *channel_count = n;
-    gSpecMeta_valid = false;  // consumed — only one consumer gets this snapshot
+    if (outBuf && n > 0) {
+        memcpy(outBuf, gSpectrumCache, n * sizeof(uint16_t));
+    }
+    if (channel_count != nullptr) {
+        *channel_count = n;
+    }
+    // Mark as consumed — copy or bust.
+    gSpecMeta_valid = false;
     portEXIT_CRITICAL(&gSpectrumMux);
     return true;
 }
