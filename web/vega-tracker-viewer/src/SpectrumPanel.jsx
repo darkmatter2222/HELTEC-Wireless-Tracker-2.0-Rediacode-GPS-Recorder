@@ -84,7 +84,10 @@ function paletteColor(key, t) {
 function avgSpectrum(spectra) {
   const valid = spectra.filter(s => Array.isArray(s) && s.length > 0);
   if (valid.length === 0) return null;
-  const maxLen = Math.max(...valid.map(s => s.length));
+  let maxLen = 0;
+  for (const s of valid) {
+    if (s.length > maxLen) maxLen = s.length;
+  }
   const result = new Float64Array(maxLen);
   for (const ch of valid) {
     for (let i = 0; i < ch.length; i++) {
@@ -189,20 +192,25 @@ function SpectrumWaterfall({ points, palette, maxChannels, autoSort }) {
     const cellW = W / rowCount;
     const cellH = H / chCount;
 
-    // Compute max value for normalization per row
-    const maxVal = Math.max(
-      ...spectralPoints.map(p => {
-        const spec = p.spectrumData.slice(0, chCount);
-        return spec.reduce((mx, v) => Math.max(mx, Number(v) || 0), 0);
-      }),
-      1
-    );
+    // Compute max value for normalization per row (avoid spread operator to prevent stack overflow)
+    let maxVal = 1;
+    for (const p of spectralPoints) {
+      const spec = p.spectrumData.slice(0, chCount);
+      for (let j = 0; j < spec.length; j++) {
+        const v = Number(spec[j]) || 0;
+        if (v > maxVal) maxVal = v;
+      }
+    }
 
-    // Also compute a global max for better contrast
-    const globalMax = Math.max(
-      ...spectralPoints.flatMap(p => p.spectrumData.slice(0, chCount).map(v => Number(v) || 0)),
-      1
-    );
+    // Also compute a global max for better contrast (same safe loop-based approach)
+    let globalMax = 1;
+    for (const p of spectralPoints) {
+      const spec = p.spectrumData.slice(0, chCount);
+      for (let j = 0; j < spec.length; j++) {
+        const v = Number(spec[j]) || 0;
+        if (v > globalMax) globalMax = v;
+      }
+    }
 
     for (let row = 0; row < rowCount; row++) {
       const spec = spectralPoints[row].spectrumData.slice(0, chCount);
@@ -507,12 +515,22 @@ function SpectrumView({ sessions, selectedSessions, onSessionToggle, rowsBySessi
   // Sidebar tab
   const [sideTab, setSideTab] = useState('sessions'); // 'sessions' | 'display' | 'analysis'
 
-  // Load rows when session selection changes
+  // Stable key derived from selected session IDs to avoid unnecessary re-fetches
+  const sessionsKey = useMemo(
+    () => [...selectedSessionIds].sort().join(','),
+    [selectedSessionIds]
+  );
+
+  // Load rows when session selection actually changes (not just reference changes)
   useEffect(() => {
-    if (selectedSessionIds.size === 0) return;
+    if (sessionsKey.length === 0) return;
     setLoading(true);
+    // Reset date range so auto-detect recalculates for the new session set
+    setDateRangeStart(null);
+    setDateRangeEnd(null);
     const promises = [];
-    for (const id of selectedSessionIds) {
+    const ids = sessionsKey.split(',');
+    for (const id of ids) {
       if (!rowsBySession[id]) {
         promises.push(
           fetchSessionRows(id).then(raw => {
@@ -523,7 +541,7 @@ function SpectrumView({ sessions, selectedSessions, onSessionToggle, rowsBySessi
       }
     }
     Promise.all(promises).finally(() => setLoading(false));
-  }, [selectedSessionIds]); // eslint-disable-line
+  }, [sessionsKey, rowsBySession]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Compact all selected session rows
   const allSpectrumPoints = useMemo(() => {
@@ -539,7 +557,7 @@ function SpectrumView({ sessions, selectedSessions, onSessionToggle, rowsBySessi
       }
     }
     return pts;
-  }, [selectedSessionIds, rowsBySession, dateRangeStart, dateRangeEnd]);
+  }, [sessionsKey, rowsBySession, dateRangeStart, dateRangeEnd]);
 
   const spectralStats = useMemo(
     () => computeSpectralStats(allSpectrumPoints),
@@ -560,9 +578,15 @@ function SpectrumView({ sessions, selectedSessions, onSessionToggle, rowsBySessi
   // Auto-detect date range from data
   useEffect(() => {
     if (allSpectrumPoints.length > 0 && !dateRangeStart) {
-      const timestamps = allSpectrumPoints.map(p => p.timestampMs);
-      setDateRangeStart(Math.min(...timestamps));
-      setDateRangeEnd(Math.max(...timestamps));
+      let minTs = Infinity;
+      let maxTs = -Infinity;
+      for (const p of allSpectrumPoints) {
+        const ts = p.timestampMs;
+        if (ts < minTs) minTs = ts;
+        if (ts > maxTs) maxTs = ts;
+      }
+      setDateRangeStart(minTs);
+      setDateRangeEnd(maxTs);
     }
   }, [allSpectrumPoints]); // eslint-disable-line
 
@@ -944,10 +968,16 @@ function SpectrumBinFlyout({ binData, palette, maxChannels, onClose }) {
   // Date range for this bin's data
   const dateRange = useMemo(() => {
     if (!binData.points || binData.points.length === 0) return null;
-    const timestamps = binData.points.map(p => p.timestampMs);
+    let minTs = Infinity;
+    let maxTs = -Infinity;
+    for (const p of binData.points) {
+      const ts = p.timestampMs;
+      if (ts < minTs) minTs = ts;
+      if (ts > maxTs) maxTs = ts;
+    }
     return {
-      start: new Date(Math.min(...timestamps)).toLocaleString(),
-      end: new Date(Math.max(...timestamps)).toLocaleString(),
+      start: new Date(minTs).toLocaleString(),
+      end: new Date(maxTs).toLocaleString(),
     };
   }, [binData.points]);
 
