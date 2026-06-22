@@ -3132,3 +3132,179 @@ canvas {
   max-width: 100%;
   height: auto;
 }
+
+/* =====================================================================
+   Spectrum Mode — Gamma energy spectrum exploration UI
+   ===================================================================== */
+
+.spectrum-view {
+  display: flex;
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+.spectrum-sidebar {
+  border-right: 1px solid var(--border);
+  background: var(--panel);
+  display: flex;
+  flex-direction: column;
+  z-index: 10;
+}
+
+.spectrum-map {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+}
+
+.spectrum-map-info {
+  position: absolute;
+  bottom: 12px;
+  left: 12px;
+  z-index: 500;
+  background: rgba(17, 20, 24, 0.88);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 11px;
+  color: var(--muted);
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  backdrop-filter: blur(4px);
+}
+
+/* Waterfall panel — bottom of the spectrum view */
+.spectrum-waterfall-panel {
+  position: absolute;
+  bottom: 0;
+  left: 301px; /* sidebar width + 1px border */
+  right: 0;
+  height: 280px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.spectrum-waterfall-header {
+  padding: 8px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel2);
+  flex-shrink: 0;
+}
+
+.spectrum-waterfall-container {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  padding: 8px;
+}
+
+.spectrum-waterfall-canvas {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  border-radius: 4px;
+  cursor: crosshair;
+}
+
+.spectrum-waterfall-hover {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: rgba(17, 20, 24, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: 11px;
+  color: var(--text);
+  display: flex;
+  gap: 12px;
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+
+.spectrum-waterfall-hover span {
+  color: var(--muted);
+}
+
+.spectrum-waterfall-hover span:last-child {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+/* Legend row (bar chart at bottom of waterfall) */
+.spectrum-legend-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 12px 8px;
+  flex-shrink: 0;
+}
+
+.spectrum-bar-canvas {
+  flex: 1;
+  max-height: 120px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+/* Spectrum bin flyout panel */
+.spectrum-bin-flyout {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  bottom: 292px; /* waterfall panel height + gap */
+  width: 340px;
+  z-index: 50;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+  overflow-y: auto;
+}
+
+/* Spectrum-specific panel styling reuse */
+.spectrum-bin-flyout .hex-panel-body {
+  padding: 12px;
+}
+
+.spectrum-bin-flyout .section-head {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  margin-bottom: 8px;
+  margin-top: 12px;
+}
+
+.spectrum-bin-flyout .section-head:first-child {
+  margin-top: 0;
+}
+
+/* Spectrum sessions badge for spectral count */
+.session-meta .badge[style*="CE93D8"] {
+  border-color: rgba(206, 147, 216, 0.3);
+}
+
+/* Scrollbar styling for spectrum panels */
+.spectrum-bin-flyout::-webkit-scrollbar {
+  width: 6px;
+}
+
+.spectrum-bin-flyout::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.spectrum-bin-flyout::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}

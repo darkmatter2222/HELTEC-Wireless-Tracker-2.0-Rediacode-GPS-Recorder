@@ -20,6 +20,7 @@ import { ExportPanel } from './ExportPanel.jsx';
 import { ThreeDView } from './ThreeDView.jsx';
 import { ExplorerPanel } from './ExplorerPanel.jsx';
 import { LiveTrackingPanel } from './LiveTrackingPanel.jsx';
+import SpectrumView from './SpectrumPanel.jsx';
 
 // ---- constants -------------------------------------------------------------
 
@@ -1463,6 +1464,10 @@ function compactRows(raw) {
       // Event rows have no lat/lng so they're filtered out of `points`,
       // but their timestamps are used to break track polylines.
       event: r.event ?? null,
+      // Gamma energy spectrum channel counts from RC-110 CsI(Tl) scintillator.
+      // Array of uint16 channel counts (typically 64-379 channels). Null when
+      // spectrum collection is disabled or the peer doesn't support DATA_BUF.
+      spectrum: r.spectrumData ?? null,
     }));
 }
 
@@ -1994,6 +1999,11 @@ export default function App() {
             className={`nav-mode-btn ${appMode === 'export' ? 'active' : ''}`}
             onClick={() => setAppMode('export')}>
             Export
+          </button>
+          <button
+            className={`nav-mode-btn ${appMode === 'spectrum' ? 'active' : ''}`}
+            onClick={() => setAppMode('spectrum')}>
+            Spectrum
           </button>
         </div>
         <div className="nav-meta">
@@ -2693,6 +2703,15 @@ export default function App() {
       {/* === EXPORT MODE === */}
       {appMode === 'export' && (
         <ExportPanel />
+      )}
+
+      {/* === SPECTRUM MODE === */}
+      {appMode === 'spectrum' && (
+        <SpectrumView
+          sessions={sessions}
+          rowsBySession={rowsBySession}
+          onRowsLoaded={(newRows) => setRows(prev => ({ ...prev, ...newRows }))}
+        />
       )}
 
       {/* === LIVE TRACKING OVERLAY === */}
