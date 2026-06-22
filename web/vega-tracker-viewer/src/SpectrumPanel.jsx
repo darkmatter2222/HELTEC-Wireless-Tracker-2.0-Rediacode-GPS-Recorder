@@ -115,10 +115,10 @@ function totalCounts(spectrum) {
 
 /** Compute cumulative dose proxy from CPS * dt for spectral data ordering. */
 function computeSpectralStats(points) {
-  const withSpectrum = points.filter(p => p.spectrum != null && Array.isArray(p.spectrum));
+  const withSpectrum = points.filter(p => p.spectrumData != null && Array.isArray(p.spectrumData));
   if (withSpectrum.length === 0) return null;
 
-  const avgSpec = avgSpectrum(withSpectrum.map(p => p.spectrum));
+  const avgSpec = avgSpectrum(withSpectrum.map(p => p.spectrumData));
   const peakCh = avgSpec != null ? peakChannel(avgSpec) : 0;
   const totalAvg = avgSpec != null ? avgSpec.reduce((a, b) => a + b, 0) : 0;
 
@@ -161,9 +161,9 @@ function SpectrumWaterfall({ points, palette, maxChannels, autoSort }) {
   const [hoverInfo, setHoverInfo] = useState(null);
 
   const spectralPoints = useMemo(() => {
-    let pts = points.filter(p => p.spectrum != null && Array.isArray(p.spectrum));
+    let pts = points.filter(p => p.spectrumData != null && Array.isArray(p.spectrumData));
     if (autoSort) {
-      pts = [...pts].sort((a, b) => a.ts - b.ts);
+      pts = [...pts].sort((a, b) => a.timestampMs - b.timestampMs);
     }
     return pts;
   }, [points, autoSort]);
@@ -184,7 +184,7 @@ function SpectrumWaterfall({ points, palette, maxChannels, autoSort }) {
       return;
     }
 
-    const chCount = Math.min(maxChannels, spectralPoints[0].spectrum.length || DEFAULT_MAX_CHANNELS);
+    const chCount = Math.min(maxChannels, spectralPoints[0].spectrumData.length || DEFAULT_MAX_CHANNELS);
     const rowCount = spectralPoints.length;
     const cellW = W / rowCount;
     const cellH = H / chCount;
@@ -192,7 +192,7 @@ function SpectrumWaterfall({ points, palette, maxChannels, autoSort }) {
     // Compute max value for normalization per row
     const maxVal = Math.max(
       ...spectralPoints.map(p => {
-        const spec = p.spectrum.slice(0, chCount);
+        const spec = p.spectrumData.slice(0, chCount);
         return spec.reduce((mx, v) => Math.max(mx, Number(v) || 0), 0);
       }),
       1
@@ -200,12 +200,12 @@ function SpectrumWaterfall({ points, palette, maxChannels, autoSort }) {
 
     // Also compute a global max for better contrast
     const globalMax = Math.max(
-      ...spectralPoints.flatMap(p => p.spectrum.slice(0, chCount).map(v => Number(v) || 0)),
+      ...spectralPoints.flatMap(p => p.spectrumData.slice(0, chCount).map(v => Number(v) || 0)),
       1
     );
 
     for (let row = 0; row < rowCount; row++) {
-      const spec = spectralPoints[row].spectrum.slice(0, chCount);
+      const spec = spectralPoints[row].spectrumData.slice(0, chCount);
       for (let ch = 0; ch < chCount; ch++) {
         const val = Number(spec[ch]) || 0;
         const t = Math.min(1, val / globalMax);
@@ -232,7 +232,7 @@ function SpectrumWaterfall({ points, palette, maxChannels, autoSort }) {
       const rect = canvas.getBoundingClientRect();
       const mx = e.clientX - rect.left;
       const my = e.clientY - rect.top;
-      const chCount = Math.min(maxChannels, spectralPoints[0].spectrum.length || DEFAULT_MAX_CHANNELS);
+      const chCount = Math.min(maxChannels, spectralPoints[0].spectrumData.length || DEFAULT_MAX_CHANNELS);
       const rowCount = spectralPoints.length;
       const cellW = canvas.width / rowCount;
       const cellH = canvas.height / chCount;
@@ -241,9 +241,9 @@ function SpectrumWaterfall({ points, palette, maxChannels, autoSort }) {
       const ch = Math.floor(my / cellH);
 
       if (row >= 0 && row < rowCount && ch >= 0 && ch < chCount) {
-        const spec = spectralPoints[row].spectrum;
+        const spec = spectralPoints[row].spectrumData;
         setHoverInfo({
-          time: new Date(spectralPoints[row].ts).toLocaleTimeString(),
+          time: new Date(spectralPoints[row].timestampMs).toLocaleTimeString(),
           channel: Math.min(ch, spec.length - 1),
           value: Number(spec[ch]) || 0,
         });
@@ -357,7 +357,7 @@ function SpectrumHexLayer({ points, hexZoom, colorMetric }) {
       ctx.clearRect(0, 0, size.x, size.y);
 
       // Collect points with spectrum data
-      const specPoints = points.filter(p => p.lat != null && p.lng != null && p.spectrum != null);
+      const specPoints = points.filter(p => p.latitude != null && p.longitude != null && p.spectrumData != null);
       if (specPoints.length === 0) return;
 
       // Bin size in meters at equator for a given zoom level
@@ -367,12 +367,12 @@ function SpectrumHexLayer({ points, hexZoom, colorMetric }) {
       // Grid bins by lattice key
       const bins = new Map();
       for (const p of specPoints) {
-        const key = binKey(p.lat, p.lng, HEX_SIZE_M);
+        const key = binKey(p.latitude, p.longitude, HEX_SIZE_M);
         if (!bins.has(key)) {
-          bins.set(key, { lat: p.lat, lng: p.lng, spectra: [], points: [] });
+          bins.set(key, { lat: p.latitude, lng: p.longitude, spectra: [], points: [] });
         }
         const bin = bins.get(key);
-        bin.spectra.push(p.spectrum);
+        bin.spectra.push(p.spectrumData);
         bin.points.push(p);
       }
 
@@ -529,7 +529,7 @@ function SpectrumView({ sessions, rowsBySession, onRowsLoaded }) {
 
   // Spectral points limited for waterfall display
   const waterfallPoints = useMemo(() => {
-    const specPts = allSpectrumPoints.filter(p => p.spectrum != null);
+    const specPts = allSpectrumPoints.filter(p => p.spectrumData != null);
     return specPts.slice(0, waterfallPointLimit);
   }, [allSpectrumPoints, waterfallPointLimit]);
 
@@ -541,7 +541,7 @@ function SpectrumView({ sessions, rowsBySession, onRowsLoaded }) {
   // Auto-detect date range from data
   useEffect(() => {
     if (allSpectrumPoints.length > 0 && !dateRangeStart) {
-      const timestamps = allSpectrumPoints.map(p => p.ts);
+      const timestamps = allSpectrumPoints.map(p => p.timestampMs);
       setDateRangeStart(Math.min(...timestamps));
       setDateRangeEnd(Math.max(...timestamps));
     }
@@ -565,7 +565,7 @@ function SpectrumView({ sessions, rowsBySession, onRowsLoaded }) {
   };
 
   const specPointCount = useMemo(
-    () => allSpectrumPoints.filter(p => p.spectrum != null).length,
+    () => allSpectrumPoints.filter(p => p.spectrumData != null).length,
     [allSpectrumPoints]
   );
 
@@ -841,12 +841,12 @@ function SpectrumView({ sessions, rowsBySession, onRowsLoaded }) {
           )}
 
           {/* Circle markers for each spectral point location (fallback / complement) */}
-          {allSpectrumPoints.filter(p => p.spectrum != null).length > 0 && allSpectrumPoints.length <= 5000 && (
+          {allSpectrumPoints.filter(p => p.spectrumData != null).length > 0 && allSpectrumPoints.length <= 5000 && (
             <>
-              {allSpectrumPoints.filter(p => p.spectrum != null).map((p, i) => (
+              {allSpectrumPoints.filter(p => p.spectrumData != null).map((p, i) => (
                 <CircleMarker
                   key={`spec-${i}`}
-                  center={[p.lat, p.lng]}
+                  center={[p.latitude, p.longitude]}
                   radius={3}
                   pathOptions={{
                     color: 'transparent',
@@ -855,12 +855,12 @@ function SpectrumView({ sessions, rowsBySession, onRowsLoaded }) {
                     weight: 0,
                   }}
                 >
-                  {p.spectrum && (
+                  {p.spectrumData && (
                     <Tooltip direction="top" opacity={0.9}>
                       <div style={{ fontSize: 11, lineHeight: 1.4 }}>
-                        <div>{new Date(p.ts).toLocaleString()}</div>
-                        <div>Channels: {p.spectrum.length}</div>
-                        <div>Total: {totalCounts(p.spectrum).toLocaleString()}</div>
+                        <div>{new Date(p.timestampMs).toLocaleString()}</div>
+                        <div>Channels: {p.spectrumData.length}</div>
+                        <div>Total: {totalCounts(p.spectrumData).toLocaleString()}</div>
                       </div>
                     </Tooltip>
                   )}
@@ -942,7 +942,7 @@ function SpectrumBinFlyout({ binData, palette, maxChannels, onClose }) {
   // Date range for this bin's data
   const dateRange = useMemo(() => {
     if (!binData.points || binData.points.length === 0) return null;
-    const timestamps = binData.points.map(p => p.ts);
+    const timestamps = binData.points.map(p => p.timestampMs);
     return {
       start: new Date(Math.min(...timestamps)).toLocaleString(),
       end: new Date(Math.max(...timestamps)).toLocaleString(),
