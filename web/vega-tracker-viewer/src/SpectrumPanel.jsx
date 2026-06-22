@@ -459,9 +459,28 @@ function binKey(lat, lng, sizeM) {
 // SPECTRUM PANEL — main full-screen spectrum exploration mode
 // ============================================================
 
-function SpectrumView({ sessions, rowsBySession, onRowsLoaded }) {
-  // Session selection
-  const [selectedSessionIds, setSelectedSessionIds] = useState(new Set());
+function SpectrumView({ sessions, selectedSessions, onSessionToggle, rowsBySession, onRowsLoaded }) {
+  // Session selection — shared with Explore mode via App.jsx
+  const selectedSessionIds = selectedSessions;
+
+  const handleSessionToggle = (id) => {
+    onSessionToggle?.(id);
+  };
+
+  const handleSelectAll = () => {
+    for (const s of sessions) {
+      if (!selectedSessionIds.has(s.sessionId)) {
+        onSessionToggle?.(s.sessionId);
+      }
+    }
+  };
+
+  const handleSelectNone = () => {
+    for (const id of selectedSessionIds) {
+      onSessionToggle?.(id);
+    }
+  };
+
   const [loading, setLoading] = useState(false);
 
   // Map state
@@ -546,23 +565,6 @@ function SpectrumView({ sessions, rowsBySession, onRowsLoaded }) {
       setDateRangeEnd(Math.max(...timestamps));
     }
   }, [allSpectrumPoints]); // eslint-disable-line
-
-  const handleSessionToggle = (id) => {
-    setSelectedSessionIds(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  const handleSelectAll = () => {
-    setSelectedSessionIds(new Set(sessions.map(s => s.sessionId)));
-  };
-
-  const handleSelectNone = () => {
-    setSelectedSessionIds(new Set());
-  };
 
   const specPointCount = useMemo(
     () => allSpectrumPoints.filter(p => p.spectrumData != null).length,

@@ -2709,8 +2709,18 @@ export default function App() {
       {appMode === 'spectrum' && (
         <SpectrumView
           sessions={sessions}
+          selectedSessions={selected}
+          onSessionToggle={(id) => {
+            setSelected(prev => {
+              const next = new Set(prev);
+              if (next.has(id)) next.delete(id);
+              else next.add(id);
+              return next;
+            });
+          }}
           rowsBySession={rowsBySession}
           onRowsLoaded={(newRows) => setRows(prev => ({ ...prev, ...newRows }))}
+        />
         />
       )}
 
