@@ -415,7 +415,12 @@ function SpectrumHexLayer({ points, hexZoom, colorMetric }) {
 
         const pt = map.latLngToContainerPoint([bin.lat, bin.lng]);
         // HEX_R in meters -> screen pixels
-        const hexScreenR = (pt.distanceFrom(map.latLngToContainerPoint([bin.lat - HEX_R / 111320, bin.lng]))) ;
+        // Compute screen distance without relying on L.LatLng.distanceFrom()
+        // (Vite-bundled Leaflet may return plain {x,y} objects without .distanceFrom)
+        const refPt = map.latLngToContainerPoint([bin.lat - HEX_R / 111320, bin.lng]);
+        const dx = pt.x - refPt.x;
+        const dy = pt.y - refPt.y;
+        const hexScreenR = Math.sqrt(dx * dx + dy * dy);
         intensityValues.push(intensity);
         binData.set(key, { pt, intensity, radius: Math.max(hexScreenR, 8) });
       }
