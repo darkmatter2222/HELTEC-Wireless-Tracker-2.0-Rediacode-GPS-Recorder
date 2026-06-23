@@ -422,9 +422,9 @@ function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges, rada
 
         // Spider-radar overlay — only when enabled and hex is large enough
         // Precomputes avg spectrum per-bin via _avgSpec cache (lazy, computed once)
-        if (radarEnabled \u0026\u0026 DR >= 30 \u0026\u0026 b.spec \u0026\u0026 b.spec.length > 0) {
+        if (radarEnabled && DR >= 30 && b.spec && b.spec.length > 0) {
           const avgSpec = b._avgSpec || (b._avgSpec = avgSpectrum(b.spec));
-          if (avgSpec \u0026\u0026 avgSpec.length >= 3) {
+          if (avgSpec && avgSpec.length >= 3) {
             ctx.save();
             // Downsample spectrum for radar spokes — use up to 12 channels
             const nSpokes = Math.min(avgSpec.length, 12);
@@ -1206,7 +1206,7 @@ function HexBinPanel({ data, onClose }) {
         </>)}
 
         {/* ── Spectrum (gamma energy channels) ── */}
-        {spectrum \u0026\u0026 spectrum.avgSpectrum \u0026\u0026 spectrum.avgSpectrum.length > 0 ? (
+        {spectrum && spectrum.avgSpectrum && spectrum.avgSpectrum.length > 0 ? (
           <Section label={`Spectrum (${spectrum.channels} channels · ${spectrum.count} readings)`}>
             <div className="hex-panel-stat-row">
               <HexStatCard label="peak ch" val={String(spectrum.peakChannel)} />
@@ -1219,7 +1219,7 @@ function HexBinPanel({ data, onClose }) {
             </div>
           </Section>
         ) : (
-          spectrum \u0026\u0026 !spectrum.avgSpectrum \u0026\u0026 (
+          spectrum && !spectrum.avgSpectrum && (
             <Section label="Spectrum">
               <div style={{ color: 'rgba(255,255,255,0.35)', fontSize: '12px' }}>
                 No spectrum data in this hex bin
