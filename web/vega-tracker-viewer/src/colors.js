@@ -113,6 +113,91 @@ export function sessionColor(idx) {
   return `hsl(${hue},70%,58%)`;
 }
 
+// ============================================================
+// SPECTROGRAM COLOR CHANNELS — for spectrum-based hex binning
+// Each maps a derived metric from the gamma energy spectrum
+// channel counts to an HSL gradient color.
+// ============================================================
+
+// ---- total channel counts: dark teal -> bright cyan -> white ----------
+// Total counting rate across all spectrum channels; indicator of overall
+// detector activity. Higher = more radiation detected in the bin.
+export function totalCountsColor(value, lo, hi) {
+  const t = norm(value, lo, hi);
+  if (t === null) return '#555';
+  return gradientHsl(t, [
+    [0.00, 170, 50, 25],   // dark teal
+    [0.40, 180, 80, 45],   // medium cyan
+    [0.70, 190, 90, 65],   // bright cyan
+    [1.00, 200, 60, 90],   // near white (very active)
+  ]);
+}
+
+// ---- peak channel index: purple (low/ambient) -> orange (high/gamma) --
+// Which energy bin has the most counts; lower = more background radiation,
+// higher = more energetic events detected.
+export function peakChannelColor(value, lo, hi) {
+  const t = norm(value, lo, hi);
+  if (t === null) return '#555';
+  return gradientHsl(t, [
+    [0.00, 280, 60, 45],   // purple (low-energy dominant)
+    [0.50, 310, 70, 55],   // magenta
+    [1.00,  30, 90, 55],   // orange (high-energy events)
+  ]);
+}
+
+// ---- low energy band intensity: navy -> green -------------------------
+// Sum of counts in channels 0-24 (ambient/background radiation).
+// Lower intensity = cleaner environment.
+export function lowEnergyColor(value, lo, hi) {
+  const t = norm(value, lo, hi);
+  if (t === null) return '#555';
+  return gradientHsl(t, [
+    [0.00, 230, 60, 30],   // navy (minimal ambient)
+    [0.50, 150, 70, 45],   // green
+    [1.00, 100, 85, 55],   // lime-green (high ambient background)
+  ]);
+}
+
+// ---- high energy band intensity: blue -> red --------------------------
+// Sum of counts in tail channels (gamma radiation indicator).
+// Higher = more penetrating radiation detected.
+export function highEnergyColor(value, lo, hi) {
+  const t = norm(value, lo, hi);
+  if (t === null) return '#555';
+  return gradientHsl(t, [
+    [0.00, 220, 70, 45],   // blue (low gamma presence)
+    [0.50,  30, 85, 55],   // orange
+    [1.00,   0, 90, 50],   // red (elevated gamma radiation)
+  ]);
+}
+
+// ---- spectral centroid: cool blue -> warm amber -----------------------
+// Center of mass of the spectrum distribution; higher = broader/harder
+// spectrum indicating more energetic events on average.
+export function spectralCentroidColor(value, lo, hi) {
+  const t = norm(value, lo, hi);
+  if (t === null) return '#555';
+  return gradientHsl(t, [
+    [0.00, 210, 70, 50],   // blue (soft/low-energy spectrum)
+    [0.50, 160, 60, 50],   // teal
+    [1.00,  40, 90, 55],   // amber (hard/higher-energy spectrum)
+  ]);
+}
+
+// ---- spectral entropy: indigo (uniform/noise) -> gold (peaked) --------
+// Spread/complexity in bits; higher entropy = flatter distribution,
+// lower entropy = narrow peaked spectrum. Useful for detecting anomalies.
+export function spectralEntropyColor(value, lo, hi) {
+  const t = norm(value, lo, hi);
+  if (t === null) return '#555';
+  return gradientHsl(t, [
+    [0.00, 260, 60, 45],   // indigo
+    [0.50, 180, 70, 55],   // spring green
+    [1.00,  50, 95, 55],   // gold (high entropy / uniform spread)
+  ]);
+}
+
 // ---- formatters --------------------------------------------------------
 
 export function fmtTs(ms) {

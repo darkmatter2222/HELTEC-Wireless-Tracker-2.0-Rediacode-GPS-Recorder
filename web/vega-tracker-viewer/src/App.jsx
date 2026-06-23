@@ -9,6 +9,7 @@ import { fetchSessions, fetchSessionRows, fetchAreaSessions } from './api.js';
 import {
   doseColor, cpsColor, speedColor, altColor, hdopColor, accColor, dosePerCountColor,
   sessionColor, fmtTs, fmtDose,
+  totalCountsColor, peakChannelColor, lowEnergyColor, highEnergyColor, spectralCentroidColor, spectralEntropyColor,
 } from './colors.js';
 import { SparkChart } from './SparkChart.jsx';
 import { ManagePanel } from './ManagePanel.jsx';
@@ -20,7 +21,7 @@ import { ExportPanel } from './ExportPanel.jsx';
 import { ThreeDView } from './ThreeDView.jsx';
 import { ExplorerPanel } from './ExplorerPanel.jsx';
 import { LiveTrackingPanel } from './LiveTrackingPanel.jsx';
-import SpectrumView from './SpectrumPanel.jsx';
+
 
 // ---- constants -------------------------------------------------------------
 
@@ -39,6 +40,18 @@ const COLOR_CHANNELS = [
   { key: 'accM',    label: 'Accuracy (m)' },
   { key: 'dpc',     label: 'Dose/Count' },
   { key: 'session', label: 'Session' },
+];
+
+// Spectrogram color channels — derive metrics from gamma energy spectrum
+// channel counts stored in CSV column `spectrumData` (pipe-delimited uint16).
+// Null when spectrum collection is disabled or the peer doesn't support DATA_BUF.
+const SPECTROGRAM_CHANNELS = [
+  { key: 'totalcounts', label: 'Total Counts' },
+  { key: 'peakchannel', label: 'Peak Channel' },
+  { key: 'lowenergy',   label: 'Low Energy' },
+  { key: 'highenergy',  label: 'High Energy' },
+  { key: 'centroid',    label: 'Spectral Centroid' },
+  { key: 'entropy',     label: 'Spectral Entropy' },
 ];
 
 // Tile layers
@@ -165,6 +178,76 @@ function MapZoomSync({ onZoomChange }) {
 // The pixel scale factor 2^(mapZoom-binZoom) converts bin pixel coords from
 // binZoom space to the current screen space on every draw, so geography is
 // always correct regardless of the zoom mismatch.
+
+// ---- Spectrum analysis helpers (for HexLayer bin accumulation + HexBinPanel) ----
+
+/** Compute the average spectrum across an array of channel-count arrays. */
+function avgSpectrum(spectra) {
+  const valid = spectra.filter(s => Array.isArray(s) && s.length > 0);
+  if (valid.length === 0) return null;
+  let maxLen = 0;
+  for (const s of valid) { if (s.length > maxLen) maxLen = s.length; }
+  const result = new Float64Array(maxLen);
+  for (const ch of valid) { for (let i = 0; i < ch.length; i++) result[i] += Number(ch[i]) || 0; }
+  for (let i = 0; i < maxLen; i++) result[i] /= valid.length;
+  return Array.from(result);
+}
+
+/** Total counts in a spectrum reading. */
+function totalCounts(spectrum) {
+  if (!Array.isArray(spectrum)) return 0;
+  return spectrum.reduce((sum, v) => sum + (Number(v) || 0), 0);
+}
+
+/** Peak channel index in a spectrum array. */
+function peakChannelIdx(spectrum) {
+  if (!Array.isArray(spectrum)) return 0;
+  let maxIdx = 0, maxVal = 0;
+  for (let i = 0; i < spectrum.length; i++) { if (spectrum[i] > maxVal) { maxVal = spectrum[i]; maxIdx = i; } }
+  return maxIdx;
+}
+
+/** Low-energy band sum (channels 0-24, ambient/background). */
+function lowEnergySum(spectrum) {
+  if (!Array.isArray(spectrum)) return 0;
+  let sum = 0; for (let i = 0; i < Math.min(25, spectrum.length); i++) sum += Number(spectrum[i]) || 0;
+  return sum;
+}
+
+/** High-energy band sum (tail channels, gamma). */
+function highEnergySum(spectrum) {
+  if (!Array.isArray(spectrum)) return 0;
+  let sum = 0; for (let i = Math.max(0, spectrum.length - 25); i < spectrum.length; i++) sum += Number(spectrum[i]) || 0;
+  return sum;
+}
+
+/** Spectral centroid — center of mass of the spectrum. */
+function spectralCentroid(spectrum) {
+  if (!Array.isArray(spectrum) || spectrum.length === 0) return 0;
+  let weightedSum = 0, total = 0;
+  for (let i = 0; i < spectrum.length; i++) { const v = Number(spectrum[i]) || 0; weightedSum += i * v; total += v; }
+  return total > 0 ? weightedSum / total : 0;
+}
+
+/** Spectral entropy — spread/complexity (bits). */
+function spectralEntropy(spectrum) {
+  if (!Array.isArray(spectrum) || spectrum.length === 0) return 0;
+  const total = totalCounts(spectrum);
+  if (total === 0) return 0;
+  let entropy = 0;
+  for (let i = 0; i < spectrum.length; i++) { const p = (Number(spectrum[i]) || 0) / total; if (p > 0) entropy -= p * Math.log2(p); }
+  return entropy;
+}
+
+/** Compute aggregate spectrum stats from a bin's raw pts array. */
+function computeBinSpectrumStats(pts) {
+  const specPts = pts.filter(p => p.spectrum != null && Array.isArray(p.spectrum));
+  if (specPts.length === 0) return null;
+  const avgSpec = avgSpectrum(specPts.map(p => p.spectrum));
+  if (!avgSpec) return null;
+  return { count: specPts.length, avgSpectrum: avgSpec, peakChannel: peakChannelIdx(avgSpec), totalAverage: totalCounts(avgSpec), channels: avgSpec.length };
+}
+
 function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges }) {
   const map = useMap();
 
@@ -213,6 +296,8 @@ function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges }) {
         if (p.hdop != null) { b.hdopSum += p.hdop; b.hdopN++; if (p.hdop < b.hdopMin) b.hdopMin = p.hdop; if (p.hdop > b.hdopMax) b.hdopMax = p.hdop; }
         if (p.accM != null) { b.accMSum += p.accM; b.accMN++; if (p.accM < b.accMMin) b.accMMin = p.accM; if (p.accM > b.accMMax) b.accMMax = p.accM; }
         if (p._sid) b.sessionIds.add(p._sid);
+        // Collect spectrum data for per-bin spectral analysis
+        if (p.spectrum != null && Array.isArray(p.spectrum)) b.spec.push(p.spectrum);
         b.pts.push(p);
       } else {
         bins.set(key, {
@@ -227,6 +312,7 @@ function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges }) {
           accMSum: p.accM ?? 0, accMN: p.accM != null ? 1 : 0, accMMin: p.accM ?? Infinity, accMMax: p.accM ?? -Infinity,
           sessionIds: new Set(p._sid ? [p._sid] : []),
           pts: [p],
+          spec: p.spectrum != null && Array.isArray(p.spectrum) ? [p.spectrum] : [],
         });
       }
     }
@@ -251,6 +337,7 @@ function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges }) {
       // Per-bin field average: uses only non-null data points for the active channel.
       // This prevents null values (e.g., missing speedKph in RC track imports) from
       // dragging all bin averages toward zero and producing uniform coloring.
+      // Spectrum fields derive metrics from the bin's accumulated spectrum arrays.
       function binFieldAvg(b) {
         if (field === 'cps')   return b.cpsN  ? b.cpsSum  / b.cpsN  : 0;
         if (field === 'speed') return b.spdN  ? b.spdSum  / b.spdN  : 0;
@@ -258,6 +345,25 @@ function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges }) {
         if (field === 'dpc')   return b.dpcN  ? b.dpcSum  / b.dpcN  : 0;
         if (field === 'hdop')  return b.hdopN ? b.hdopSum / b.hdopN : 0;
         if (field === 'accM')  return b.accMN ? b.accMSum / b.accMN : 0;
+        // Spectrum-derived channels — computed per-bin from avg spectrum
+        if (b.spec && b.spec.length > 0) {
+          const avgSpec = b._avgSpec || (b._avgSpec = avgSpectrum(b.spec));
+          if (avgSpec) {
+            if      (field === 'totalcounts') return totalCounts(avgSpec);
+            if      (field === 'peakchannel') return peakChannelIdx(avgSpec);
+            if      (field === 'lowenergy')   return lowEnergySum(avgSpec);
+            if      (field === 'highenergy')  return highEnergySum(avgSpec);
+            if      (field === 'centroid')    return spectralCentroid(avgSpec);
+            if      (field === 'entropy')     return spectralEntropy(avgSpec);
+          }
+        }
+        // For spectrum fields with no data in this bin, return 0 (will render dim)
+        if      (field === 'totalcounts') return 0;
+        if      (field === 'peakchannel') return 0;
+        if      (field === 'lowenergy')   return 0;
+        if      (field === 'highenergy')  return 0;
+        if      (field === 'centroid')    return 0;
+        if      (field === 'entropy')     return 0;
         return b.uSvN ? b.uSvSum / b.uSvN : 0; // dose + session fallback
       }
 
@@ -287,6 +393,13 @@ function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges }) {
         else if (field === 'alt')   color = altColor(fa,           ranges.altMin,  ranges.altMax);
         else if (field === 'hdop')  color = hdopColor(fa,          ranges.hdopMin, ranges.hdopMax);
         else if (field === 'accM')  color = accColor(fa,           ranges.accMin,  ranges.accMax);
+        // Spectrogram color channels — use pre-computed per-bin lo/hi for normalization
+        else if (field === 'totalcounts') color = totalCountsColor(fa,        ranges.specTotalLow,   ranges.specTotalHigh);
+        else if (field === 'peakchannel') color = peakChannelColor(fa,        ranges.specPeakLow,    ranges.specPeakHigh);
+        else if (field === 'lowenergy')   color = lowEnergyColor(fa,          ranges.specLowELow,    ranges.specLowEHigh);
+        else if (field === 'highenergy')  color = highEnergyColor(fa,         ranges.specHighELow,   ranges.specHighEHigh);
+        else if (field === 'centroid')    color = spectralCentroidColor(fa,   ranges.specCentLow,    ranges.specCentHigh);
+        else if (field === 'entropy')     color = spectralEntropyColor(fa,    ranges.specEntLow,     ranges.specEntHigh);
         else if (field === 'dose' || field == null) color = doseColor(fa, ranges.doseMin, ranges.doseMax);
         else                        color = heatGradientColor(Math.min(1, fa / maxAvg));
         const DR    = visR * 0.94;  // 94% — tight gap between neighbours
@@ -360,6 +473,7 @@ function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges }) {
         spd:  { avg: b.spdN ? b.spdSum / b.spdN : null, min: b.spdN ? b.spdMin : null, max: b.spdN ? b.spdMax : null },
         alt:  { avg: b.altN ? b.altSum / b.altN : null, min: b.altN ? b.altMin : null, max: b.altN ? b.altMax : null },
         dpc:  { avg: b.dpcN ? b.dpcSum / b.dpcN : null, min: b.dpcN ? b.dpcMin : null, max: b.dpcN ? b.dpcMax : null },
+        spectrum: computeBinSpectrumStats(b.pts),
         points: chartPts,
       });
     }
@@ -811,6 +925,36 @@ function _drawHexScatter(canvas, pts, getX, getY, xLabel, yLabel) {
   ctx.fillText(yLabel, 0, 0); ctx.restore();
 }
 
+function _drawHexSpectrum(canvas, spectrum) {
+  if (!canvas || !spectrum || spectrum.length === 0) return;
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(255,255,255,0.03)'; ctx.fillRect(0, 0, W, H);
+
+  const PL = 8, PR = 4, PT = 4, PB = 16;
+  const cw = W - PL - PR, ch = H - PT - PB;
+  const n = spectrum.length;
+  const maxVal = Math.max(...spectrum, 1);
+  const barW = Math.max(1, (cw / n) - 1);
+
+  // Draw bars with a rainbow gradient (low energy = blue, high energy = red)
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);  // 0..1 position in spectrum
+    const barH = (spectrum[i] / maxVal) * ch;
+    const x = PL + (i * cw) / n;
+    const y = PT + ch - barH;
+    ctx.fillStyle = `hsla(${240*t},${85-t*40}%,${55+30*(1-Math.abs(2*t-1))}%,0.7)`;
+    ctx.fillRect(x, y, barW, barH);
+  }
+
+  // Axis labels (channel index)
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.font = '9px monospace';
+  ctx.textAlign = 'left';  ctx.fillText('0', PL, H - 2);
+  ctx.textAlign = 'right'; ctx.fillText(`${n-1}`, PL + cw, H - 2);
+}
+
 // StatCard and Section MUST live at module level — not inside the
 // HexBinPanel function body.  If they were inner functions, every re-render
 // of HexBinPanel (triggered by an inline onClose arrow changing reference)
@@ -849,7 +993,7 @@ function HexBinPanel({ data, onClose }) {
   const doseRef    = useRef(null), cpsRef   = useRef(null);
   const spdRef     = useRef(null), altRef   = useRef(null);
   const corrRef    = useRef(null), altCorrRef = useRef(null);
-  const dpcRef     = useRef(null);
+  const dpcRef     = useRef(null), specRef  = useRef(null);
   const [chartModal, setChartModal] = useState(null);
 
   useEffect(() => {
@@ -864,10 +1008,13 @@ function HexBinPanel({ data, onClose }) {
       _drawHexScatter(corrRef.current,    pts, p => p.cps, p => p.uSv, 'CPS', 'µSv/h');
     if (data.uSv.avg != null && data.alt.avg != null)
       _drawHexScatter(altCorrRef.current, pts, p => p.alt, p => p.uSv, 'Alt (m)', 'µSv/h');
+    // Draw spectrum bar chart when spectrum data available
+    if (data.spectrum && data.spectrum.avgSpectrum)
+      _drawHexSpectrum(specRef.current, data.spectrum.avgSpectrum);
   }, [data]);
 
   if (!data) return null;
-  const { lat, lng, count, sessionIds, uSv, cps, spd, alt, dpc, points } = data;
+  const { lat, lng, count, sessionIds, uSv, cps, spd, alt, dpc, spectrum, points } = data;
 
   // Date range header from raw points
   let dateRange = null;
@@ -999,6 +1146,29 @@ function HexBinPanel({ data, onClose }) {
             </Section>
           )}
         </>)}
+
+        {/* ── Spectrum (gamma energy channels) ── */}
+        {spectrum \u0026\u0026 spectrum.avgSpectrum \u0026\u0026 spectrum.avgSpectrum.length > 0 ? (
+          <Section label={`Spectrum (${spectrum.channels} channels · ${spectrum.count} readings)`}>
+            <div className="hex-panel-stat-row">
+              <HexStatCard label="peak ch" val={String(spectrum.peakChannel)} />
+              <HexStatCard label="avg counts" val={`${spectrum.totalAverage.toFixed(0)}`} />
+              <HexStatCard label="channels" val={String(spectrum.channels)} />
+            </div>
+            <canvas ref={specRef} className="hex-chart" width={560} height={120} />
+            <div className="hex-panel-chart-note">
+              blue = low energy · green = mid · red = high energy · bar height = counts
+            </div>
+          </Section>
+        ) : (
+          spectrum \u0026\u0026 !spectrum.avgSpectrum \u0026\u0026 (
+            <Section label="Spectrum">
+              <div style={{ color: 'rgba(255,255,255,0.35)', fontSize: '12px' }}>
+                No spectrum data in this hex bin
+              </div>
+            </Section>
+          )
+        )}
 
         {/* ── Session IDs ── */}
         {sessionIds.length > 0 && (
@@ -1513,6 +1683,13 @@ export default function App() {
   const [hdopMin, setHdopMin]   = useState(0);    const [hdopMax, setHdopMax]   = useState(5);     const [hdopManual, setHdopManual]   = useState(false);
   const [accMin,  setAccMin]    = useState(0);    const [accMax,  setAccMax]    = useState(25);    const [accManual,  setAccManual]    = useState(false);
   const [dpcMin,  setDpcMin]    = useState(0);    const [dpcMax,  setDpcMax]    = useState(0.05);  const [dpcManual,  setDpcManual]    = useState(false);
+  // Spectrogram channel scale state + manual-override flags
+  const [specTotalLow,  setSpecTotalLow]  = useState(0);      const [specTotalHigh,  setSpecTotalHigh]  = useState(500);    const [specTotalManual,  setSpecTotalManual]  = useState(false);
+  const [specPeakLow,   setSpecPeakLow]   = useState(0);      const [specPeakHigh,   setSpecPeakHigh]   = useState(128);    const [specPeakManual,   setSpecPeakManual]   = useState(false);
+  const [specLowELow,   setSpecLowELow]   = useState(0);      const [specLowEHigh,   setSpecLowEHigh]   = useState(200);    const [specLowEManual,   setSpecLowEManual]   = useState(false);
+  const [specHighELow,  setSpecHighELow]  = useState(0);     const [specHighEHigh,  setSpecHighEHigh]  = useState(200);   const [specHighEManual,  setSpecHighEManual]  = useState(false);
+  const [specCentLow,   setSpecCentLow]   = useState(0);      const [specCentHigh,   setSpecCentHigh]   = useState(64);     const [specCentManual,   setSpecCentManual]   = useState(false);
+  const [specEntLow,    setSpecEntLow]    = useState(0);      const [specEntHigh,    setSpecEntHigh]    = useState(6);        const [specEntManual,    setSpecEntManual]    = useState(false);
   // stable track bounds for sliders — derived from raw data, never from the scale handles
   const [doseDataMax, setDoseDataMax] = useState(2.0);
   const [cpsDataMax,  setCpsDataMax]  = useState(100);
@@ -1524,7 +1701,7 @@ export default function App() {
   const setDoseScaleManual = setDoseManual;
 
   // Map / display mode
-  const [mapMode, setMapMode]         = useState('Track');  // Track | Dots | Hex | Arrows
+  const [mapMode, setMapMode]         = useState('Hex');   // Track | Dots | Hex | Arrows
   const [colorChannel, setColorChannel] = useState('dose'); // dose | cps | speed | alt | hdop | session
   const [nanoMode, setNanoMode]         = useState(false);
   const [tileIdx, setTileIdx]           = useState(1);       // default CartoDB Dark
@@ -2000,11 +2177,7 @@ export default function App() {
             onClick={() => setAppMode('export')}>
             Export
           </button>
-          <button
-            className={`nav-mode-btn ${appMode === 'spectrum' ? 'active' : ''}`}
-            onClick={() => setAppMode('spectrum')}>
-            Spectrum
-          </button>
+
         </div>
         <div className="nav-meta">
           <span>{sessions.length} session{sessions.length !== 1 ? 's' : ''}</span>
@@ -2705,23 +2878,7 @@ export default function App() {
         <ExportPanel />
       )}
 
-      {/* === SPECTRUM MODE === */}
-      {appMode === 'spectrum' && (
-        <SpectrumView
-          sessions={sessions}
-          selectedSessions={selected}
-          onSessionToggle={(id) => {
-            setSelected(prev => {
-              const next = new Set(prev);
-              if (next.has(id)) next.delete(id);
-              else next.add(id);
-              return next;
-            });
-          }}
-          rowsBySession={rowsBySession}
-          onRowsLoaded={(newRows) => setRows(prev => ({ ...prev, ...newRows }))}
-        />
-      )}
+
 
       {/* === LIVE TRACKING OVERLAY === */}
       {/* Renders on top of everything when a mission is active.           */}
