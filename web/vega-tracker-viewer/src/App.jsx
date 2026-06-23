@@ -248,7 +248,7 @@ function computeBinSpectrumStats(pts) {
   return { count: specPts.length, avgSpectrum: avgSpec, peakChannel: peakChannelIdx(avgSpec), totalAverage: totalCounts(avgSpec), channels: avgSpec.length };
 }
 
-function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges }) {
+function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges, radarEnabled = false }) {
   const map = useMap();
 
   useEffect(() => {
@@ -419,6 +419,64 @@ function HexLayer({ traces, field, binZoom, onBinClick, onBinHover, ranges }) {
         ctx.strokeStyle = 'rgba(255,255,255,0.25)';
         ctx.lineWidth   = 0.8;
         ctx.stroke();
+
+        // Spider-radar overlay — only when enabled and hex is large enough
+        // Precomputes avg spectrum per-bin via _avgSpec cache (lazy, computed once)
+        if (radarEnabled \u0026\u0026 DR >= 30 \u0026\u0026 b.spec \u0026\u0026 b.spec.length > 0) {
+          const avgSpec = b._avgSpec || (b._avgSpec = avgSpectrum(b.spec));
+          if (avgSpec \u0026\u0026 avgSpec.length >= 3) {
+            ctx.save();
+            // Downsample spectrum for radar spokes — use up to 12 channels
+            const nSpokes = Math.min(avgSpec.length, 12);
+            const step = Math.max(1, Math.floor(avgSpec.length / nSpokes));
+            const maxSpc = Math.max(...avgSpec, 1);
+            // Concentric rings at 33%, 66%, 100% of DR radius
+            for (let r = 1; r <= 3; r++) {
+              ctx.beginPath();
+              const rr = DR * 0.85 * (r / 3);
+              for (let i = 0; i < nSpokes; i++) {
+                // Start from top (-PI/2), go clockwise
+                const angle = -Math.PI / 2 + (2 * Math.PI / nSpokes) * i - Math.PI / (nSpokes * 2);
+                const rx = cx + rr * Math.cos(angle);
+                const ry = cy + rr * Math.sin(angle);
+                i === 0 ? ctx.moveTo(rx, ry) : ctx.lineTo(rx, ry);
+              }
+              ctx.closePath();
+              ctx.globalAlpha = 0.15;
+              ctx.fillStyle = '#fcf0e8'; // White rings
+            }
+            // Draw data spider shape
+            ctx.beginPath();
+            for (let i = 0; i < nSpokes; i++) {
+              const chIdx = i * step;
+              const val = avgSpec[chIdx] / maxSpc;
+              const rr = DR * 0.88 * Math.max(0.1, val);
+              const angle = -Math.PI / 2 + (2 * Math.PI / nSpokes) * i - Math.PI / (nSpokes * 2);
+              // Start from top (-PI/2), go clockwise
+              const rx = cx + rr * Math.cos(angle);
+              const ry = cy + rr * Math.sin(angle);
+              i === 0 ? ctx.moveTo(rx, ry) : ctx.lineTo(rx, ry);
+            }
+            ctx.closePath();
+            ctx.globalAlpha = 0.5;
+            ctx.fillStyle = '#4fffc2'; // Bright cyan-green data overlay
+            ctx.fill();
+            ctx.globalAlpha = 1;
+
+            // Also draw the spokes lines for readability
+            for (let i = 0; i < nSpokes; i++) {
+              const angle = -Math.PI / 2 + (2 * Math.PI / nSpokes) * i - Math.PI / (nSpokes * 2);
+              ctx.beginPath();
+              ctx.moveTo(cx, cy);
+              ctx.lineTo(cx + DR * 0.90 * Math.cos(angle), cy + DR * 0.90 * Math.sin(angle));
+              ctx.globalAlpha = 0.1;
+              ctx.strokeStyle = '#fff';
+              ctx.lineWidth = 0.5;
+              ctx.stroke();
+            }
+            ctx.restore();
+          }
+        }
 
         if (b.count > 1 && DR >= 18) {
           ctx.globalAlpha  = 0.9;
@@ -1714,6 +1772,7 @@ export default function App() {
   const [hexBinAuto, setHexBinAuto]         = useState(true); // auto-follow map zoom
   const [hexFlyout,  setHexFlyout]          = useState(null); // clicked hex bin stats | null
   const [hexHover,   setHexHover]           = useState(null); // hovered hex bin stats | null
+  const [radarEnabled, setRadarEnabled]     = useState(false); // spider-radar spectrum overlay on hexagons
   const [trackShowDots, setTrackShowDots]   = useState(false);
   const [trackDotOpacity, setTrackDotOpacity] = useState(0.5);
   const [arrowDotOpacity, setArrowDotOpacity] = useState(0.12);
@@ -2432,6 +2491,83 @@ export default function App() {
               />
             )}
 
+            {/* Spectrogram color channels scales */}
+            {SPECTROGRAM_CHANNELS.some(ch => ch.key === colorChannel) && (
+              <SectionHead>Spectrogram Scale</SectionHead>
+            )}
+            {colorChannel === 'totalcounts' && (
+              <DualRangeSlider
+                lo={0} hi={specTotalHigh || 1}
+                low={specTotalLow} high={specTotalHigh}
+                onLowChange={v => { setSpecTotalManual(true); setSpecTotalLow(parseFloat(v.toFixed(0))); }}
+                onHighChange={v => { setSpecTotalManual(true); setSpecTotalHigh(parseFloat(v.toFixed(0))); }}
+                colorFn={t => totalCountsColor(t, 0, 1)}
+                label="Total counts scale"
+                fmtVal={v => v.toFixed(0) + ' cnt'}
+                onAuto={() => setSpecTotalManual(false)}
+              />
+            )}
+            {colorChannel === 'peakchannel' && (
+              <DualRangeSlider
+                lo={0} hi={379}
+                low={specPeakLow} high={specPeakHigh}
+                onLowChange={v => { setSpecTotalManual(true); setSpecPeakLow(parseFloat(v.toFixed(0))); }}
+                onHighChange={v => { setSpecTotalManual(true); setSpecPeakHigh(parseFloat(v.toFixed(0))); }}
+                colorFn={t => peakChannelColor(t, 0, 1)}
+                label="Peak channel scale"
+                fmtVal={v => `ch ${v.toFixed(0)}`}
+                onAuto={() => setSpecTotalManual(false)}
+              />
+            )}
+            {colorChannel === 'lowenergy' && (
+              <DualRangeSlider
+                lo={0} hi={specLowEHigh || 1}
+                low={specLowELow} high={specLowEHigh}
+                onLowChange={v => { setSpecLowEManual(true); setSpecLowELow(parseFloat(v.toFixed(0))); }}
+                onHighChange={v => { setSpecLowEManual(true); setSpecLowEHigh(parseFloat(v.toFixed(0))); }}
+                colorFn={t => lowEnergyColor(t, 0, 1)}
+                label="Low energy scale"
+                fmtVal={v => v.toFixed(0) + ' cnt'}
+                onAuto={() => setSpecLowEManual(false)}
+              />
+            )}
+            {colorChannel === 'highenergy' && (
+              <DualRangeSlider
+                lo={0} hi={specHighELow || 1}
+                low={specHighELow} high={specHighEHigh || 1}
+                onLowChange={v => { setSpecTotalManual(true); setSpecHighELow(parseFloat(v.toFixed(0))); }}
+                onHighChange={v => { setSpecTotalManual(true); setSpecHighEHigh(parseFloat(v.toFixed(0))); }}
+                colorFn={t => highEnergyColor(t, 0, 1)}
+                label="High energy scale"
+                fmtVal={v => v.toFixed(0) + ' cnt'}
+                onAuto={() => setSpecLowEManual(false)}
+              />
+            )}
+            {colorChannel === 'centroid' && (
+              <DualRangeSlider
+                lo={0} hi={64}
+                low={specCentLow} high={specCentHigh}
+                onLowChange={v => { setSpecCentManual(true); setSpecCentLow(parseFloat(v.toFixed(0))); }}
+                onHighChange={v => { setSpecCentManual(true); setSpecCentHigh(parseFloat(v.toFixed(0))); }}
+                colorFn={t => spectralCentroidColor(t, 0, 1)}
+                label="Spectral centroid scale"
+                fmtVal={v => `ch ${v.toFixed(0)}`}
+                onAuto={() => setSpecCentManual(false)}
+              />
+            )}
+            {colorChannel === 'entropy' && (
+              <DualRangeSlider
+                lo={0} hi={6.5}
+                low={specEntLow} high={specEntHigh}
+                onLowChange={v => { setSpecTotalManual(true); setSpecEntLow(parseFloat(v.toFixed(2))); }}
+                onHighChange={v => { setSpecTotalManual(true); setSpecEntHigh(parseFloat(v.toFixed(2))); }}
+                colorFn={t => spectralEntropyColor(t, 0, 1)}
+                label="Spectral entropy scale"
+                fmtVal={v => v.toFixed(2)}
+                onAuto={() => setSpecLowEManual(false)}
+              />
+            )}
+
             <SectionHead>Map Tiles</SectionHead>
             <div className="tile-grid">
               {TILES.map((tile, i) => (
@@ -2522,6 +2658,12 @@ export default function App() {
                     <span>coarse</span><span>fine</span>
                   </div>
                 </div>
+                <label className="toggle-pill">
+                  <input type="checkbox" checked={radarEnabled}
+                    onChange={e => setRadarEnabled(e.target.checked)} />
+                  <span className="toggle-track"><span className="toggle-thumb" /></span>
+                  <span className="toggle-label">Spectrum radar overlay</span>
+                </label>
               </div>
             )}
             {mapMode === 'Arrows' && (
@@ -2633,6 +2775,7 @@ export default function App() {
               onBinClick={handleBinClick}
               onBinHover={handleBinHover}
               ranges={ranges}
+              radarEnabled={radarEnabled}
             />
           )}
 
