@@ -811,6 +811,7 @@ The viewer has a persistent top navigation bar with **Explore**, **Data Manageme
 - Map modes: Track (colored polyline), Dots (circle markers), Hex (hex-bin canvas), Arrows (bearing arrows + dot underlay)
 - Map zoom: `maxZoom=22`; per-tile `maxNativeZoom` (OSM=19, CartoDB=20, OpenTopoMap=17, Esri Satellite=18) for graceful over-zoom; initial zoom=6
 - Color channels: Dose rate, CPS, Speed, Altitude, HDOP, Accuracy (m), Session index
+- **Spectrogram color channels** (v1.2.3+): Six spectrum-derived channels when RC-110 data is present — Total Counts, Peak Channel, Low Energy (ch 0–15), High Energy (ch 48–63), Spectral Centroid, Spectral Entropy. Each has its own dual-range slider (lo/hi) in the Display tab under a "Spectrogram" section header. Color functions in `colors.js` use HSL gradients tuned per-channel.
 - Per-mode display controls (Display tab) — rendered as **ctrl-cards** (label + accent value + range slider) and **toggle-pills** (iOS-style switch):
   - Track: track width ctrl-card; dot overlay toggle-pill + dot opacity ctrl-card
   - Dots: point radius ctrl-card
