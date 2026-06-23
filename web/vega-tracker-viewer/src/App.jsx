@@ -990,27 +990,383 @@ function _drawHexSpectrum(canvas, spectrum) {
   ctx.clearRect(0, 0, W, H);
   ctx.fillStyle = 'rgba(255,255,255,0.03)'; ctx.fillRect(0, 0, W, H);
 
-  const PL = 8, PR = 4, PT = 4, PB = 16;
+  const PL = 4, PR = 4, PT = 4, PB = 14;
   const cw = W - PL - PR, ch = H - PT - PB;
   const n = spectrum.length;
   const maxVal = Math.max(...spectrum, 1);
-  const barW = Math.max(1, (cw / n) - 1);
 
-  // Draw bars with a rainbow gradient (low energy = blue, high energy = red)
+  // Multi-layer gamma spectrum: filled area + smooth line + energy color gradient
+  // Energy increases left to right (channel 0 = low E, channel N-1 = high E)
+
+  // Filled area under curve with subtle gradient
+  const gradFill = ctx.createLinearGradient(0, PT, 0, PT + ch);
+  gradFill.addColorStop(0, 'rgba(100,200,255,0.35)');
+  gradFill.addColorStop(0.5, 'rgba(0,230,118,0.20)');
+  gradFill.addColorStop(1, 'rgba(255,60,60,0.35)');
+
+  ctx.beginPath();
   for (let i = 0; i < n; i++) {
-    const t = i / (n - 1);  // 0..1 position in spectrum
-    const barH = (spectrum[i] / maxVal) * ch;
-    const x = PL + (i * cw) / n;
-    const y = PT + ch - barH;
-    ctx.fillStyle = `hsla(${240*t},${85-t*40}%,${55+30*(1-Math.abs(2*t-1))}%,0.7)`;
-    ctx.fillRect(x, y, barW, barH);
+    const x = PL + (i / (n - 1)) * cw;
+    const y = PT + ch - (spectrum[i] / maxVal) * ch;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.lineTo(PL + cw, PT + ch);
+  ctx.lineTo(PL, PT + ch);
+  ctx.closePath();
+  ctx.fillStyle = gradFill;
+  ctx.fill();
+
+  // Line on top with energy color (blue→green→red)
+  for (let i = 1; i < n; i++) {
+    const t0 = (i - 1) / (n - 1), t1 = i / (n - 1);
+    const x0 = PL + t0 * cw, y0 = PT + ch - (spectrum[i - 1] / maxVal) * ch;
+    const x1 = PL + t1 * cw, y1 = PT + ch - (spectrum[i] / maxVal) * ch;
+    // Color based on energy position (low=blue, high=red via green transition)
+    const hue = 240 * (1 - (t0 + t1) / 2); // 240(blue) → 120(green) → 0(red)
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.strokeStyle = `hsla(${hue},80%,55%,0.8)`;
+    ctx.lineWidth = 1.2;
+    ctx.stroke();
   }
 
-  // Axis labels (channel index)
+  // X-axis labels as approximate keV (RC-110: ~0-3000 keV range)
   ctx.fillStyle = 'rgba(255,255,255,0.35)';
   ctx.font = '9px monospace';
-  ctx.textAlign = 'left';  ctx.fillText('0', PL, H - 2);
-  ctx.textAlign = 'right'; ctx.fillText(`${n-1}`, PL + cw, H - 2);
+  ctx.textAlign = 'left';   ctx.fillText('0 keV', PL, H - 2);
+  ctx.textAlign = 'center'; ctx.fillText('~1.5 MeV', PL + cw / 2, H - 2);
+  ctx.textAlign = 'right';  ctx.fillText('~3 MeV', PL + cw, H - 2);
+}
+
+// ============================================================
+// SPECTROGRAM MODAL — full gamma spectroscopy analysis view
+// Triggered by clicking ⤢ on the Spectrum section in HexBinPanel.
+// Shows proper MCA-style spectrum chart with energy axis, peak
+// annotations, interactive hover crosshair, and educational context.
+// ============================================================
+
+function SpectrogramModal({ avgSpectrum, numReadings, onClose }) {
+  const canvasRef = useRef(null);
+  const savedRef  = useRef(null);
+  const [zoom, setZoom] = useState(1);
+
+  useEffect(() => { setZoom(1); }, [avgSpectrum]);
+
+  // RC-110 CsI(Tl) approximate energy calibration.
+  // Channel index maps to energy; typical range is ~0-3 MeV.
+  // We estimate keV = channel * (MAX_KEV / num_channels).
+  const NUM_CH = avgSpectrum.length;
+  const MAX_KEV = 3000; // ~3 MeV upper range for CsI(Tl)
+  const keVForCh = (ch) => (ch / (NUM_CH - 1)) * MAX_KEV;
+
+  // Known natural background radiation peaks to annotate
+  const KNOWN_PEAKS = [
+    { name: 'Pb-210/Bi-214', energy: 465, halfWidth: 30 },   // ~465 keV (thorium chain)
+    { name: 'K-40',         energy: 1460, halfWidth: 80 },   // Potassium-40 ~1.46 MeV (most common background)
+    { name: 'Bi-214',       energy: 2386, halfWidth: 120 }, // Uranium chain ~2.39 MeV
+    { name: 'Tl-208',       energy: 2614, halfWidth: 120 }, // Thorium series
+  ];
+
+  useEffect(() => {
+    if (!avgSpectrum || !canvasRef.current) return;
+    _drawSpectrogramModal(canvasRef.current, avgSpectrum, NUM_CH, MAX_KEV, keVForCh, KNOWN_PEAKS);
+    savedRef.current = canvasRef.current.getContext('2d').getImageData(0, 0, canvasRef.current.width, canvasRef.current.height);
+  }, [avgSpectrum]);
+
+  const handleMouseMove = useCallback((e) => {
+    if (!canvasRef.current || !savedRef.current || !avgSpectrum) return;
+    const c   = canvasRef.current;
+    const ctx = c.getContext('2d');
+    const rect = c.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) * (c.width / rect.width);
+    const my = (e.clientY - rect.top)  * (c.height / rect.height);
+
+    ctx.putImageData(savedRef.current, 0, 0);
+
+    const PL = 56, PR = 12, PT = 14, PB = 32;
+    const cw = c.width - PL - PR, ch = c.height - PT - PB;
+
+    const frac = Math.max(0, Math.min(1, (mx - PL) / cw));
+    const chIdx = Math.round(frac * (NUM_CH - 1));
+    const clampedCh = Math.max(0, Math.min(NUM_CH - 1, chIdx));
+    const px = PL + (clampedCh / (NUM_CH - 1)) * cw;
+    const val = avgSpectrum[clampedCh] || 0;
+    const maxVal = Math.max(...avgSpectrum, 1);
+    const py = PT + ch - (val / maxVal) * ch;
+
+    // Crosshair lines
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath(); ctx.moveTo(px, PT); ctx.lineTo(px, PT + ch); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(PL, py); ctx.lineTo(PL + cw, py); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Dot on curve
+    ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2);
+    const hue = 240 * (1 - clampedCh / (NUM_CH - 1));
+    ctx.fillStyle = `hsl(${hue},80%,55%)`;
+    ctx.fill();
+    ctx.strokeStyle = '#fff';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    // Tooltip
+    const energyKeV = keVForCh(clampedCh);
+    const energyStr = energyKeV >= 1000 ? `${(energyKeV / 1000).toFixed(2)} MeV` : `${energyKeV.toFixed(0)} keV`;
+    const tipText = `ch ${clampedCh} · ${energyStr} · ${Math.round(val)} counts`;
+
+    // Check for nearby known peaks
+    let peakLabel = null;
+    for (const pk of KNOWN_PEAKS) {
+      if (Math.abs(energyKeV - pk.energy) < pk.halfWidth) {
+        peakLabel = `⚠ ${pk.name} (${(pk.energy / 1000).toFixed(2)} MeV)`;
+        break;
+      }
+    }
+
+    ctx.font = 'bold 12px monospace';
+    const lines = peakLabel ? [tipText, peakLabel] : [tipText];
+    const tw = Math.max(...lines.map(l => ctx.measureText(l).width)) + 14;
+    const th = 20;
+    let tx = px + 12;
+    if (tx + tw > c.width - 4) tx = px - tw - 12;
+    const ty = Math.max(PT + 2, py - th * lines.length - 4);
+
+    ctx.fillStyle = 'rgba(10,14,20,0.92)';
+    ctx.fillRect(tx - 2, ty - 2, tw + 4, th * lines.length + 8);
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(tx - 2, ty - 2, tw + 4, th * lines.length + 8);
+
+    ctx.fillStyle = peakLabel ? '#fff' : '#eee';
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'top';
+    for (let li = 0; li < lines.length; li++) {
+      ctx.fillStyle = li === 1 ? 'rgba(255,200,50,0.9)' : '#eee';
+      ctx.fillText(lines[li], tx + 5, ty + 4 + li * th);
+    }
+    ctx.restore();
+  }, [avgSpectrum, NUM_CH, MAX_KEV, keVForCh, KNOWN_PEAKS]);
+
+  const handleMouseLeave = useCallback(() => {
+    if (!canvasRef.current || !savedRef.current) return;
+    canvasRef.current.getContext('2d').putImageData(savedRef.current, 0, 0);
+  }, []);
+
+  if (!avgSpectrum) return null;
+
+  const baseW = 1100;
+  const baseH = 480;
+  const zBtnStyle = {
+    background: 'rgba(255,255,255,0.1)', border: '1px solid rgba(255,255,255,0.18)',
+    color: '#fff', borderRadius: 4, width: 26, height: 26, cursor: 'pointer',
+    fontSize: 16, lineHeight: 1, display: 'inline-flex', alignItems: 'center',
+    justifyContent: 'center', flexShrink: 0,
+  };
+
+  // Compute stats for the info panel
+  const maxVal = Math.max(...avgSpectrum, 1);
+  const peakChIdx = peakChannelIdx(avgSpectrum);
+  const totalAvg = totalCounts(avgSpectrum);
+
+  return ReactDOM.createPortal(
+    <div className="hex-chart-modal-overlay" onClick={onClose}>
+      <div className="hex-chart-modal" onClick={e => e.stopPropagation()} style={{ maxWidth: '95vw' }}>
+        <div className="hex-chart-modal-header">
+          <span className="hex-chart-modal-title">Gamma Spectrum — CsI(Tl) Scintillator</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 'auto' }}>
+            <button style={zBtnStyle} title="Zoom out"
+                    onClick={() => setZoom(z => Math.max(1, Math.round((z - 0.25) * 100) / 100))}>−</button>
+            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', minWidth: 34, textAlign: 'center' }}>
+              {Math.round(zoom * 100)}%
+            </span>
+            <button style={zBtnStyle} title="Zoom in"
+                    onClick={() => setZoom(z => Math.min(4, Math.round((z + 0.25) * 100) / 100))}>+</button>
+            <button className="hex-chart-modal-close" onClick={onClose}>✕</button>
+          </div>
+        </div>
+        <div className="hex-chart-modal-hint">Hover to inspect channel · color = photon energy (blue→red) · ± to zoom</div>
+
+        {/* Info summary panel */}
+        <div style={{
+          display: 'flex', gap: 12, padding: '8px 0', flexWrap: 'wrap',
+          fontSize: 12, color: 'rgba(255,255,255,0.6)'
+        }}>
+          <div style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 6, padding: '6px 12px' }}>
+            Channels: <strong style={{ color: '#fff' }}>{NUM_CH}</strong>
+          </div>
+          <div style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 6, padding: '6px 12px' }}>
+            Readings averaged: <strong style={{ color: '#fff' }}>{numReadings}</strong>
+          </div>
+          <div style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 6, padding: '6px 12px' }}>
+            Avg total counts: <strong style={{ color: '#fff' }}>{totalAvg.toFixed(0)}</strong>
+          </div>
+          <div style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 6, padding: '6px 12px' }}>
+            Peak channel: <strong style={{ color: '#fff' }}>{peakChIdx} (~{keVForCh(peakChIdx).toFixed(0)} keV)</strong>
+          </div>
+          <div style={{ background: 'rgba(255,255,255,0.06)', borderRadius: 6, padding: '6px 12px' }}>
+            Energy range: <strong style={{ color: '#fff' }}>0 — ~{(MAX_KEV / 1000).toFixed(0)} MeV</strong>
+          </div>
+        </div>
+
+        <div style={{ overflow: 'auto', borderRadius: 6 }}>
+          <div style={{ position: 'relative', width: baseW * zoom, height: baseH * zoom, flexShrink: 0 }}>
+            <canvas
+              ref={canvasRef}
+              className="hex-chart-modal-canvas"
+              style={{
+                position: 'absolute', top: 0, left: 0,
+                transform: `scale(${zoom})`, transformOrigin: '0 0',
+                maxWidth: 'none',
+              }}
+              width={baseW}
+              height={baseH}
+              onMouseMove={handleMouseMove}
+              onMouseLeave={handleMouseLeave}
+            />
+          </div>
+        </div>
+
+        {/* Educational context */}
+        <div style={{
+          marginTop: 8, padding: '10px 14px', fontSize: 11, lineHeight: 1.5,
+          color: 'rgba(255,255,255,0.4)', background: 'rgba(255,255,255,0.03)',
+          borderRadius: 6
+        }}>
+          <strong style={{ color: 'rgba(255,255,255,0.6)' }}>Gamma spectroscopy:</strong>{' '}
+          The RC-110 uses a CsI(Tl) scintillator crystal coupled to a photomultiplier tube.
+          When ionizing radiation hits the crystal, it produces flash lights proportional to photon energy.
+          The multi-channel analyzer sorts these pulses by height into {NUM_CH} energy bins (channels).
+          <br />X-axis = gamma photon energy (blue = low keV → red = high MeV) · Y-axis = count rate.
+          Sharp spikes are photopeaks (full-energy deposition); the smooth baseline is Compton scattering continuum.
+          Natural background radiation typically shows K-40 at ~1.46 MeV and uranium/thorium decay chain lines.
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+/** Draw the full spectrogram modal canvas with MCA-style spectrum chart. */
+function _drawSpectrogramModal(canvas, avgSpectrum, NUM_CH, MAX_KEV, keVForCh, KNOWN_PEAKS) {
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(13,17,23,0.95)'; ctx.fillRect(0, 0, W, H);
+
+  const PL = 56, PR = 12, PT = 14, PB = 32;
+  const cw = W - PL - PR, ch = H - PT - PB;
+  const maxVal = Math.max(...avgSpectrum, 1);
+
+  // Grid lines
+  ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+  ctx.lineWidth = 0.7;
+  for (let i = 0; i <= 4; i++) {
+    const y = PT + ch * (i / 4);
+    ctx.beginPath(); ctx.moveTo(PL, y); ctx.lineTo(PL + cw, y); ctx.stroke();
+  }
+
+  // Y-axis labels (counts)
+  ctx.fillStyle = 'rgba(255,255,255,0.45)';
+  ctx.font = '11px monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'alphabetic';
+  for (let i = 0; i <= 4; i++) {
+    const v = Math.round(maxVal * (1 - i / 4));
+    const y = PT + ch * (i / 4);
+    ctx.fillText(String(v), PL - 6, y + 4);
+  }
+
+  // X-axis labels (energy in keV/MeV)
+  ctx.textBaseline = 'top';
+  ctx.textAlign = 'center';
+  const xTicks = [0, 511, 1000, 1460, 2000, MAX_KEV];
+  for (const e of xTicks) {
+    const frac = Math.max(0, Math.min(1, e / MAX_KEV));
+    const x = PL + frac * cw;
+    const label = e >= 1000 ? `${(e / 1000).toFixed(1)} MeV` : `${e} keV`;
+    ctx.fillText(label, x, PT + ch + 6);
+  }
+
+  // Filled area under curve with energy gradient
+  const gradFill = ctx.createLinearGradient(PL, PT, PL + cw, PT);
+  gradFill.addColorStop(0, 'rgba(60,120,255,0.30)');   // Blue (low energy)
+  gradFill.addColorStop(0.35, 'rgba(0,200,120,0.25)'); // Green
+  gradFill.addColorStop(0.7, 'rgba(255,160,40,0.25)'); // Orange
+  gradFill.addColorStop(1, 'rgba(255,50,50,0.30)');    // Red (high energy)
+
+  ctx.beginPath();
+  for (let i = 0; i < NUM_CH; i++) {
+    const x = PL + (i / (NUM_CH - 1)) * cw;
+    const y = PT + ch - (avgSpectrum[i] / maxVal) * ch;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  }
+  ctx.lineTo(PL + cw, PT + ch);
+  ctx.lineTo(PL, PT + ch);
+  ctx.closePath();
+  ctx.fillStyle = gradFill;
+  ctx.fill();
+
+  // Line segments colored by energy
+  for (let i = 1; i < NUM_CH; i++) {
+    const t0 = (i - 1) / (NUM_CH - 1), t1 = i / (NUM_CH - 1);
+    const x0 = PL + t0 * cw, y0 = PT + ch - (avgSpectrum[i - 1] / maxVal) * ch;
+    const x1 = PL + t1 * cw, y1 = PT + ch - (avgSpectrum[i] / maxVal) * ch;
+    const hue = 240 * (1 - (t0 + t1) / 2);
+    ctx.beginPath();
+    ctx.moveTo(x0, y0);
+    ctx.lineTo(x1, y1);
+    ctx.strokeStyle = `hsla(${hue},75%,55%,0.85)`;
+    ctx.lineWidth = 1.8;
+    ctx.lineJoin = 'round';
+    ctx.stroke();
+  }
+
+  // Annotate known background radiation peaks (vertical dashed lines)
+  for (const pk of KNOWN_PEAKS) {
+    const frac = Math.max(0, Math.min(1, pk.energy / MAX_KEV));
+    const x = PL + frac * cw;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(255,200,50,0.35)';
+    ctx.lineWidth = 1;
+    ctx.setLineDash([6, 4]);
+    ctx.beginPath(); ctx.moveTo(x, PT); ctx.lineTo(x, PT + ch); ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Label at top
+    ctx.fillStyle = 'rgba(255,200,50,0.7)';
+    ctx.font = '10px monospace';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    const label = pk.name.length > 14 ? pk.name.slice(0, 12) + '..' : pk.name;
+    ctx.fillText(`▼ ${label}`, x, PT - 2);
+    ctx.restore();
+  }
+
+  // Axis titles
+  ctx.save();
+  ctx.fillStyle = 'rgba(255,255,255,0.35)';
+  ctx.font = '11px sans-serif';
+  // X-axis title
+  ctx.textAlign = 'center';
+  ctx.fillText('Photon Energy (CsI(Tl) Scintillator Spectrum)', PL + cw / 2, H - 4);
+  // Y-axis title (rotated)
+  ctx.save();
+  ctx.translate(12, PT + ch / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText('Count Rate', 0, 0);
+  ctx.restore();
+  ctx.restore();
+
+  // Detector label at top-right
+  ctx.fillStyle = 'rgba(255,255,255,0.18)';
+  ctx.font = '10px monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'top';
+  ctx.fillText(`RC-110 CsI(Tl) · ${NUM_CH} ch · ~0—${(MAX_KEV / 1000).toFixed(0)} MeV`, PL + cw, PT + 1);
 }
 
 // StatCard and Section MUST live at module level — not inside the
@@ -1053,6 +1409,7 @@ function HexBinPanel({ data, onClose }) {
   const corrRef    = useRef(null), altCorrRef = useRef(null);
   const dpcRef     = useRef(null), specRef  = useRef(null);
   const [chartModal, setChartModal] = useState(null);
+  const [specroModalOpen, setSpecroModalOpen] = useState(false);
 
   useEffect(() => {
     if (!data?.points?.length) return;
@@ -1066,7 +1423,7 @@ function HexBinPanel({ data, onClose }) {
       _drawHexScatter(corrRef.current,    pts, p => p.cps, p => p.uSv, 'CPS', 'µSv/h');
     if (data.uSv.avg != null && data.alt.avg != null)
       _drawHexScatter(altCorrRef.current, pts, p => p.alt, p => p.uSv, 'Alt (m)', 'µSv/h');
-    // Draw spectrum bar chart when spectrum data available
+    // Draw gamma spectrum mini-preview when spectrum data available
     if (data.spectrum && data.spectrum.avgSpectrum)
       _drawHexSpectrum(specRef.current, data.spectrum.avgSpectrum);
   }, [data]);
@@ -1207,7 +1564,8 @@ function HexBinPanel({ data, onClose }) {
 
         {/* ── Spectrum (gamma energy channels) ── */}
         {spectrum && spectrum.avgSpectrum && spectrum.avgSpectrum.length > 0 ? (
-          <Section label={`Spectrum (${spectrum.channels} channels · ${spectrum.count} readings)`}>
+          <Section label={`Gamma Spectrum (${spectrum.channels} ch · ${spectrum.count} readings)`}
+            onExpand={() => setSpecroModalOpen(true)}>
             <div className="hex-panel-stat-row">
               <HexStatCard label="peak ch" val={String(spectrum.peakChannel)} />
               <HexStatCard label="avg counts" val={`${spectrum.totalAverage.toFixed(0)}`} />
@@ -1215,12 +1573,12 @@ function HexBinPanel({ data, onClose }) {
             </div>
             <canvas ref={specRef} className="hex-chart" width={560} height={120} />
             <div className="hex-panel-chart-note">
-              blue = low energy · green = mid · red = high energy · bar height = counts
+              line = counts per energy bin · blue→red = low→high keV · click ⤢ for full analysis
             </div>
           </Section>
         ) : (
           spectrum && !spectrum.avgSpectrum && (
-            <Section label="Spectrum">
+            <Section label="Gamma Spectrum">
               <div style={{ color: 'rgba(255,255,255,0.35)', fontSize: '12px' }}>
                 No spectrum data in this hex bin
               </div>
@@ -1237,6 +1595,13 @@ function HexBinPanel({ data, onClose }) {
       </div>
     </div>
     {chartModal && <HexChartModal data={chartModal} onClose={() => setChartModal(null)} />}
+    {specroModalOpen && spectrum?.avgSpectrum && (
+      <SpectrogramModal
+        avgSpectrum={spectrum.avgSpectrum}
+        numReadings={spectrum.count}
+        onClose={() => setSpecroModalOpen(false)}
+      />
+    )}
     </>
   );
 }
