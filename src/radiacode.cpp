@@ -27,6 +27,7 @@ constexpr uint16_t CMD_RD_VIRT_STRING = 0x0826;
 
 constexpr uint32_t VS_DATA_BUF        = 0x00000100;
 constexpr uint32_t VS_SPECTRUM        = 0x00000200;
+constexpr uint32_t VS_CONFIGUREMENT   = 0x00000002;
 constexpr uint32_t VSFR_DEVICE_TIME   = 0x00000504;
 
 constexpr uint16_t BLE_CHUNK = 18;
@@ -66,8 +67,16 @@ struct Internal {
     uint32_t          lastPollMs = 0;
     uint32_t          lastReadingMs = 0;
 
-    enum InitStep { INIT_NONE = 0, INIT_EXCHANGE, INIT_SET_TIME, INIT_DEV_TIME0, INIT_DONE };
+    enum InitStep {
+        INIT_NONE = 0,
+        INIT_EXCHANGE,
+        INIT_SET_TIME,
+        INIT_DEV_TIME0,
+        INIT_CONFIG,          // read VS_CONFIGUREMENT -> parse SpecFormatVersion
+        INIT_DONE
+    };
     InitStep          initStep = INIT_NONE;
+    String            initConfigResponse;  // CONFIGURATION text, filled during INIT_CONFIG
 
     // Manual picker scan
     bool              manualScanActive = false;
@@ -130,6 +139,12 @@ struct Internal {
     // Used by onResponseComplete to route the payload to decodeDataBuf
     // vs. decodeSpectrum (v1.2.0).
     uint32_t          requestedVsAddr = VS_DATA_BUF;
+
+    // Spectrum format version reported by device CONFIGURATION string.
+    // v0 = raw U32LE array (decode_counts_v0), v1 = variable-length RLE
+    // (decode_counts_v1). Default 0 is safe — most older RC-102 units
+    // don't advertise a version line at all and use the legacy format.
+    int               specFormatVersion = 0;
 
     Preferences       prefs;
 };
@@ -216,6 +231,8 @@ static bool sendCommand(uint16_t cmd, const uint8_t* args, size_t argLen);
 static void onResponseComplete(const uint8_t* payload, size_t len);
 static void decodeDataBuf(const uint8_t* p, size_t len);
 static void decodeSpectrum(const uint8_t* p, size_t len);
+static void parseConfigResponse(const char* text, size_t len);
+static int decode_countsv1_cache(const uint8_t* ptr, size_t len, uint16_t* outBuf, uint16_t maxCh);
 static void advanceInit();
 
 // Shared cache so VS_SPECTRUM responses (decoded by decodeSpectrum) can feed
@@ -441,6 +458,8 @@ public:
         g.expectedLen = -1;
         g.respBuffer.clear();
         g.initStep = Internal::INIT_NONE;
+        g.initConfigResponse.clear();
+        g.specFormatVersion = 0;
         // Reliability v0.6.0: we no longer permanently halt auto-retry on
         // short-lived links. "As long as it has power, it's reliable" --
         // the device must continue trying to reconnect indefinitely. The
@@ -515,6 +534,11 @@ static void onResponseComplete(const uint8_t* payload, size_t len) {
             // Route to correct decoder based on which VS was requested (v1.2.0)
             if (g.requestedVsAddr == VS_SPECTRUM) {
                 decodeSpectrum(data, dlen);
+            } else if (g.requestedVsAddr == VS_CONFIGUREMENT) {
+                // Store CONFIGURATION string for pre-init parsing.
+                // CP-1251 encoded; we only need ASCII portion (SpecFormatVersion=N).
+                g.initConfigResponse = String(reinterpret_cast<const char*>(data), dlen);
+                parseConfigResponse(g.initConfigResponse.c_str(), g.initConfigResponse.length());
             } else {
                 decodeDataBuf(data, dlen);
             }
@@ -626,7 +650,83 @@ static void decodeDataBuf(const uint8_t* p, size_t len) {
 
 // ----------------- Spectrum decoder (v1.2.0, VS_SPECTRUM poll) --------------
 // Decodes the RD_VIRT_STRING(VS_SPECTRUM) response payload.
-// Format v0 (used by RC-110): <Ifff> header + array of <I> (U32LE counts).
+// The device CONFIGURATION string may advertise SpecFormatVersion=N.
+// v0: <Ifff> header + array of <I> (U32LE counts).
+// v1: <Ifff> header + variable-length encoded counts (decode_counts_v1).
+// parseConfigResponse extracts SpecFormatVersion from the CONFIG text.
+static void parseConfigResponse(const char* text, size_t len) {
+    // Look for "SpecFormatVersion=N" line in CP-1251 config text.
+    // Only ASCII portion matters (the key name is pure ASCII).
+    const char* tok = strstr(text, "SpecFormatVersion=");
+    if (!tok) {
+        g.specFormatVersion = 0;  // default to v0 if not found
+        return;
+    }
+    int ver = atoi(tok + sizeof("SpecFormatVersion=") - 1);
+    if (ver < 0 || ver > 1) ver = 0;  // clamp to known versions
+    g.specFormatVersion = ver;
+}
+
+// decode_counts_v1: variable-length RLE encoding from Python SDK.
+// Returns number of channels decoded (capped at maxCh).
+static int decode_countsv1_cache(const uint8_t* ptr, size_t len,
+                                 uint16_t* outBuf, uint16_t maxCh) {
+    size_t i = 0;
+    uint16_t nCh = 0;
+    int32_t last = 0;
+
+    while (i < len && nCh < maxCh) {
+        if (i + 2 > len) break;
+        const uint16_t u16 = readU16LE(ptr + i);
+        i += 2;
+        const uint16_t cnt  = (u16 >> 4) & 0x0FFF;
+        const uint8_t  vlen = (uint8_t)(u16 & 0x0F);
+
+        for (uint16_t c = 0; c < cnt && nCh < maxCh; ++c) {
+            int32_t v = 0;
+            if (vlen == 0) {
+                // Zero run - no value bytes to consume
+                v = 0;
+            } else if (vlen == 1) {
+                if (i + 1 > len) break;
+                v = ptr[i]; i++;
+            } else if (vlen == 2) {
+                // signed 8-bit diff from last
+                if (i + 1 > len) break;
+                int8_t d = (int8_t)ptr[i]; i++;
+                v = last + d;
+            } else if (vlen == 3) {
+                // signed 16-bit diff from last
+                if (i + 2 > len) break;
+                int16_t d = readU16LE(ptr + i); i += 2;
+                v = last + (int32_t)d;
+            } else if (vlen == 4) {
+                // signed 24-bit diff from last
+                if (i + 3 > len) break;
+                uint8_t a = ptr[i], b = ptr[i+1], c_v = ptr[i+2];
+                i += 3;
+                int32_t d = ((int32_t)c_v << 16) | ((int32_t)b << 8) | (int32_t)a;
+                // Sign-extend from bit 23
+                if (d >= 0x800000) d -= 0x1000000;
+                v = last + d;
+            } else if (vlen == 5) {
+                // signed 32-bit diff from last
+                if (i + 4 > len) break;
+                int32_t d = readI32LE(ptr + i); i += 4;
+                v = last + d;
+            } else {
+                break;  // unknown vlen
+            }
+
+            if (v < 0) v = 0;  // counts can't be negative
+            uint16_t store = (v > 65535) ? 65535 : (uint16_t)v;
+            outBuf[nCh++] = store;
+            last = v;
+        }
+    }
+    return (int)nCh;
+}
+
 // Shared cache so VS_SPECTRUM responses can feed the next DATA_BUF reading:
 static void decodeSpectrum(const uint8_t* p, size_t len) {
     // Header: ts U32LE + a0 F32LE + a1 F32LE + a2 F32LE = 16 bytes
@@ -634,24 +734,25 @@ static void decodeSpectrum(const uint8_t* p, size_t len) {
         log_w("spectrum response too short (%zu bytes)", len);
         return;
     }
-    // const uint32_t spectrumTs = readU32LE(p);        // integration timestamp (secs since device boot)
-    // const float a0   = readF32LE(p + 4);              // calibration coeff a0
-    // const float a1   = readF32LE(p + 8);              // calibration coeff a1
-    // const float a2   = readF32LE(p + 12);             // calibration coeff a2
     size_t i = 16;
 
-    // Parse U32LE channel counts (v0 format matches Python SDK decode_counts_v0)
-    // Use static buffer gSpectrumParseBuf to avoid stack overflow on NimBLE host task (~4KB stack)
     memset(gSpectrumParseBuf, 0, cfg::SPECTRUM_MAX_CHANNELS * sizeof(uint16_t));
     uint16_t nCh = 0;
 
-    while (i + 4 <= len) {
-        const uint32_t count = readU32LE(p + i);
-        i += 4;
-        if (nCh < cfg::SPECTRUM_MAX_CHANNELS) {
-            // Clamp U32 to U16 for storage
-            gSpectrumParseBuf[nCh++] = (count > 65535) ? 65535 : (uint16_t)count;
+    if (g.specFormatVersion == 0) {
+        // v0: simple U32LE array
+        while (i + 4 <= len) {
+            const uint32_t count = readU32LE(p + i);
+            i += 4;
+            if (nCh < cfg::SPECTRUM_MAX_CHANNELS) {
+                gSpectrumParseBuf[nCh++] = (count > 65535) ? 65535 : (uint16_t)count;
+            }
         }
+    } else {
+        // v1: variable-length RLE encoding
+        nCh = (uint16_t)decode_countsv1_cache(p + i, len - i,
+                                              gSpectrumParseBuf,
+                                              cfg::SPECTRUM_MAX_CHANNELS);
     }
 
     if (nCh == 0) {
@@ -719,9 +820,18 @@ static void advanceInit() {
         return;
     }
     if (g.initStep == Internal::INIT_DEV_TIME0) {
+        g.initStep = Internal::INIT_CONFIG;
+        // Read VS_CONFIGUREMENT to detect SpecFormatVersion
+        std::vector<uint8_t> args;
+        putU32LE(args, VS_CONFIGUREMENT);
+        g.requestedVsAddr = VS_CONFIGUREMENT;
+        sendCommand(CMD_RD_VIRT_STRING, args.data(), args.size());
+        return;
+    }
+    if (g.initStep == Internal::INIT_CONFIG) {
         g.initStep = Internal::INIT_DONE;
         setState(RadiaCode::State::Ready);
-        log_i("RadiaCode init complete");
+        log_i("RadiaCode init complete (spec format v%d)", g.specFormatVersion);
     }
 }
 
