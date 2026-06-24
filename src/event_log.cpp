@@ -24,6 +24,7 @@ RTC_NOINIT_ATTR uint32_t g_rtcMagic;     // sentinel "TRKR"
 RTC_NOINIT_ATTR uint32_t g_rtcUptimeMs;  // millis() of last successful tick
 RTC_NOINIT_ATTR uint32_t g_rtcWifiFlag;  // 1 if Wi-Fi cycle was in-flight
 RTC_NOINIT_ATTR char     g_rtcPhase[16]; // last marked phase tag
+RTC_NOINIT_ATTR uint32_t g_rtcHeapFree;  // ESP.getFreeHeap() at last tick
 
 constexpr uint32_t kMagic = 0x544B5252;  // 'TKRR'
 
@@ -105,6 +106,7 @@ void beginBoot() {
     bool magicValid = (g_rtcMagic == kMagic);
     uint32_t lastUptime = magicValid ? g_rtcUptimeMs : 0u;
     uint32_t wifiInFlight = magicValid ? g_rtcWifiFlag : 0u;
+    uint32_t lastHeapFree = magicValid ? g_rtcHeapFree : 0u;
     char lastPhase[16] = {0};
     if (magicValid) {
         memcpy(lastPhase, g_rtcPhase, sizeof(lastPhase));
@@ -120,6 +122,7 @@ void beginBoot() {
     g_rtcMagic     = kMagic;
     g_rtcUptimeMs  = 0;
     g_rtcWifiFlag  = 0;
+    g_rtcHeapFree  = 0;
     memset((void*)g_rtcPhase, 0, sizeof(g_rtcPhase));
     strncpy((char*)g_rtcPhase, "BOOTED", sizeof(g_rtcPhase) - 1);
 
@@ -129,12 +132,13 @@ void beginBoot() {
     const float vbat = trackerLastVbat();
     int vbatMv = (vbat > 0.0f) ? (int)(vbat * 1000.0f + 0.5f) : -1;
 
-    char buf[240];
+    char buf[320];
     snprintf(buf, sizeof(buf),
-             "%u,%u,BOOT,%s,raw0=%d,raw1=%d,vbatMv=%d,lastUptimeMs=%u,wifiInFlight=%u,lastPhase=%s",
+             "%u,%u,BOOT,%s,raw0=%d,raw1=%d,vbatMv=%d,lastUptimeMs=%u,wifiInFlight=%u,heapFree=%u,lastPhase=%s",
              (unsigned)millis(), (unsigned)millis(), rname,
              rawRr0, rawRr1,
              vbatMv, (unsigned)lastUptime, (unsigned)wifiInFlight,
+             (unsigned)lastHeapFree,
              lastPhase[0] ? lastPhase : "NONE");
     appendLineRaw(String(buf));
 
@@ -151,6 +155,7 @@ void markPhase(const char* phase) {
         g_rtcPhase[i] = phase[i];
     }
     g_rtcPhase[i] = '\0';
+    g_rtcHeapFree = ESP.getFreeHeap();
     g_rtcMagic = kMagic;
 }
 

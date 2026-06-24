@@ -663,18 +663,38 @@ size_t SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
         ++lifetimeSamples_;
         return (size_t)len;
     }
-    if (!fs_) return 0;
+    // ---- LittleFS: chunk writes to avoid block-size overflow ---------------
+    // LittleFS has a maximum write size (~4095 bytes on ESP32-S3). A single
+    // CSV row with 1024 spectrum channels can exceed this limit, causing
+    // f.print() to truncate and producing WRITE ERR. Chunk the write so every
+    // individual call stays safely under the filesystem block size.
+    constexpr size_t kLittleFS_MaxChunk = 2048;  // well below 4095 limit
     event_log::markPhase("ST_OPEN_APPEND");
     File f = fs_->open(path, "a");
     if (!f) { log_w("append: open failed"); event_log::markPhase("ST_OPEN_FAIL2"); return 0; }
     event_log::markPhase("ST_WRITE");
-    size_t written = f.print(line);
+    size_t totalWritten = 0;
+    const char* ptr = line;
+    int remaining = len;
+    while (remaining > 0) {
+        size_t chunk = (remaining < (int)kLittleFS_MaxChunk) ? (size_t)remaining : kLittleFS_MaxChunk;
+        size_t w = f.write((const uint8_t*)ptr, chunk);
+        if (w == 0) {
+            Serial.printf("[REC] WRITE ERR: chunked write failed at %u/%d heap=%u\n",
+                          (unsigned)totalWritten, len, (unsigned)ESP.getFreeHeap());
+            f.close();
+            return 0;
+        }
+        totalWritten += w;
+        ptr += w;
+        remaining -= (int)w;
+    }
     event_log::markPhase("ST_CLOSE");
     f.close();
     event_log::markPhase("ST_DONE");
-    if ((int)written < len) {
-        Serial.printf("[REC] WRITE ERR: tried %d bytes wrote %u heap=%u\n",
-                      len, (unsigned)written, (unsigned)ESP.getFreeHeap());
+    if ((int)totalWritten < len) {
+        Serial.printf("[REC] WRITE ERR: wrote %u of %d bytes heap=%u\n",
+                      (unsigned)totalWritten, len, (unsigned)ESP.getFreeHeap());
         return 0;
     }
     ++sampleCount_;
@@ -727,9 +747,18 @@ void SessionStore::appendEvent(uint64_t timestampMsFull,
         f.write((const uint8_t*)line, (size_t)len);
         f.close();
     } else if (fs_) {
+        // LittleFS: chunk writes to stay within block size limit.
+        constexpr size_t kLittleFS_MaxChunk = 2048;
         File f = fs_->open(path, "a");
         if (!f) { log_w("appendEvent: open failed"); return; }
-        f.print(line);
+        const char* ptr = line;
+        int remaining = len;
+        while (remaining > 0) {
+            size_t chunk = (remaining < (int)kLittleFS_MaxChunk) ? (size_t)remaining : kLittleFS_MaxChunk;
+            f.write((const uint8_t*)ptr, chunk);
+            ptr += chunk;
+            remaining -= (int)chunk;
+        }
         f.close();
     } else {
         return;
