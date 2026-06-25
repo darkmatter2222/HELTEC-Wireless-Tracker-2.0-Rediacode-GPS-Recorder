@@ -568,7 +568,6 @@ static void onResponseComplete(const uint8_t* payload, size_t len) {
     // normal polling resumes — spectrum accumulator is now zeroed.
     if (g.activeCmd == CMD_WR_VIRT_STRING && g.spectrumResetPending) {
         g.spectrumResetPending = false;
-        log_i("spectrum reset acknowledged");
     }
 
     if (g.initStep != Internal::INIT_DONE && g.state == RadiaCode::State::Initializing) {
@@ -693,7 +692,6 @@ static int decode_countsv1_cache(const uint8_t* ptr, size_t len,
     size_t i = 0;
     uint16_t nCh = 0;
     int32_t last = 0;
-    unsigned debug_run = 0;
 
     while (i < len && nCh < maxCh) {
         if (i + 2 > len) break;
@@ -701,13 +699,6 @@ static int decode_countsv1_cache(const uint8_t* ptr, size_t len,
         i += 2;
         const uint16_t cnt  = (u16 >> 4) & 0x0FFF;
         const uint8_t  vlen = (uint8_t)(u16 & 0x0F);
-
-        // Debug: log first few RLE runs
-        if (debug_run < 5) {
-            log_i("v1 run %u at i=%zu: u16=0x%04X cnt=%u vlen=%u",
-                  debug_run, i - 2, u16, cnt, vlen);
-            debug_run++;
-        }
 
         for (uint16_t c = 0; c < cnt && nCh < maxCh; ++c) {
             int32_t v = 0;
@@ -752,11 +743,6 @@ static int decode_countsv1_cache(const uint8_t* ptr, size_t len,
             uint16_t store = (v > 65535) ? 65535 : (uint16_t)v;
             outBuf[nCh++] = store;
             last = lastVal;                            // next delta uses REAL value
-
-            // Debug: log first 4 decoded values from each run
-            if (debug_run <= 2 && c < 4) {
-                log_i("  ch[%u]=%d last=%d", nCh - 1, (int)v, (int)last);
-            }
         }
     }
     return (int)nCh;
@@ -773,17 +759,6 @@ static void decodeSpectrum(const uint8_t* p, size_t len) {
     float h_a0   = readF32LE(p + 4);
     float h_a1   = readF32LE(p + 8);
     float h_a2   = readF32LE(p + 12);
-    log_i("spectrum header: ts=%u a0=%.4f a1=%.4f a2=%.4f payload=%zu bytes",
-          (unsigned)h_ts, h_a0, h_a1, h_a2, len);
-
-    // Debug: hex dump first 36 bytes of total payload (header + RLE)
-    size_t dumpLen = (len < 36) ? len : 36;
-    char hexLine[180];
-    snprintf(hexLine, sizeof(hexLine), "HEX: ");
-    for (size_t j = 0; j < dumpLen; ++j)
-        snprintf(hexLine + strlen(hexLine), sizeof(hexLine) - strlen(hexLine), "%02X ", p[j]);
-    log_i("%s", hexLine);
-
     size_t i = 16;
 
     memset(gSpectrumParseBuf, 0, cfg::SPECTRUM_MAX_CHANNELS * sizeof(uint16_t));
@@ -1503,7 +1478,6 @@ void RadiaCode::loop() {
         // to zero the accumulator so the next ~5 s poll represents a fresh
         // integration window instead of unbounded cumulative counts.
         if (g.spectrumResetPending) {
-            log_i("resetting spectrum accumulator");
             std::vector<uint8_t> args;
             putU32LE(args, VS_SPECTRUM);
             putU32LE(args, 0x00);
