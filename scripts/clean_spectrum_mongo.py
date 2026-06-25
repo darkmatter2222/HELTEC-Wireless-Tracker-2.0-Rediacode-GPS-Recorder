@@ -13,7 +13,7 @@ import argparse
 from pymongo import MongoClient
 from datetime import datetime
 
-MONGO_URI = "mongodb://ryan:Welcome123%21@localhost:27017/?authSource=admin"
+MONGO_URI = "mongodb://ryan:Welcome123%21@192.168.86.48:27017/?authSource=admin"
 DB_NAME = "radiacode"
 COLLECTION = "tracker_samples"
 
