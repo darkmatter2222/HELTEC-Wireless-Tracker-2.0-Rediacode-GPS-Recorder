@@ -85,7 +85,7 @@ constexpr uint32_t RADIACODE_LINK_STALL_MS = 15000;
 // ---------------- Storage -----------------------------------------------------
 constexpr const char* SESSIONS_DIR    = "/sessions";
 constexpr const char* ACTIVE_FILE     = "/active.txt";   // current session id
-constexpr size_t      MAX_LINE_BYTES  = 4096;   // 1024-channel spectrum (~3 KB) + GPS/header fields
+constexpr size_t      MAX_LINE_BYTES  = 5120;   // 1024-channel spectrum (~4 KB worst case) + GPS/header fields
 
 // ---------------- SD card (HW-125 micro-SD breakout, SPI mode) ----------------
 // Wiring (see heltec_tracker/AGENTS.md for the full table):

@@ -652,6 +652,14 @@ size_t SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
                        spd, brg, alt, hdp, acc,
                        spectrumData.c_str());
     if (len <= 0) return 0;
+    // Truncation detection — snprintf returns the WOULD-BE length.
+    // If it exceeds the buffer, the newline is cut off and the next row
+    // concatenates into the same line, corrupting spectrumData.
+    if ((size_t)len >= cfg::MAX_LINE_BYTES) {
+        log_w("append: row truncated (len=%d > buffer=%zu), skipping",
+              len, sizeof(line));
+        return 0;
+    }
 
     String path = pathFor(activeId_);
     if (backend_ == Backend::SdFat) {

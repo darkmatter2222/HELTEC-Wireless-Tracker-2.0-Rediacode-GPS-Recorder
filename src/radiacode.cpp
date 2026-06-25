@@ -541,6 +541,7 @@ static void onResponseComplete(const uint8_t* payload, size_t len) {
             if (dlen > 0 && data[dlen - 1] == 0) --dlen;
             // Route to correct decoder based on which VS was requested (v1.2.0)
             if (g.requestedVsAddr == VS_SPECTRUM) {
+                log_i("VS_SPECTRUM response: flen=%u dlen=%u", (unsigned)flen, (unsigned)dlen);
                 decodeSpectrum(data, dlen);
                 // After successfully reading the spectrum, queue a reset so
                 // next poll represents a fresh integration window (~5 s)
@@ -798,6 +799,11 @@ static void decodeSpectrum(const uint8_t* p, size_t len) {
            (unsigned)(nCh > 1 ? gSpectrumParseBuf[1] : 0),
            (unsigned)(nCh > 2 ? gSpectrumParseBuf[2] : 0),
            (unsigned)(nCh > 3 ? gSpectrumParseBuf[3] : 0));
+    // Sanity check: RC-110 CsI(Tl) should produce ~64 channels.
+    // If nCh >> 64, the RLE decoder is parsing garbage past actual data.
+    if (nCh > 128) {
+        log_w("vs_spectrum: %u channels exceeds expected ~64 — payload may contain trailing garbage", (unsigned)nCh);
+    }
 }
 
 // ----------------- init state machine -----------------------------------------
