@@ -24,6 +24,7 @@ constexpr uint16_t CMD_SET_TIME       = 0x0A04;
 constexpr uint16_t CMD_RD_VIRT_SFR    = 0x0824;
 constexpr uint16_t CMD_WR_VIRT_SFR    = 0x0825;
 constexpr uint16_t CMD_RD_VIRT_STRING = 0x0826;
+constexpr uint16_t CMD_WR_VIRT_STRING = 0x0827;
 
 constexpr uint32_t VS_DATA_BUF        = 0x00000100;
 constexpr uint32_t VS_SPECTRUM        = 0x00000200;
@@ -145,6 +146,13 @@ struct Internal {
     // (decode_counts_v1). Default 0 is safe — most older RC-102 units
     // don't advertise a version line at all and use the legacy format.
     int               specFormatVersion = 0;
+
+    // Spectrum reset between polls (v1.2.5): VS_SPECTRUM is cumulative
+    // rather than a FIFO like VS_DATA_BUF — it accumulates since boot or
+    // since last WR_VIRT_STRING(VS.SPECTRUM, 0). Reset after each poll so
+    // channel counts stay within uint16 range and represent the integration
+    // window (~5 s) instead of days of accumulation.
+    bool              spectrumResetPending = false;
 
     Preferences       prefs;
 };
@@ -534,6 +542,10 @@ static void onResponseComplete(const uint8_t* payload, size_t len) {
             // Route to correct decoder based on which VS was requested (v1.2.0)
             if (g.requestedVsAddr == VS_SPECTRUM) {
                 decodeSpectrum(data, dlen);
+                // After successfully reading the spectrum, queue a reset so
+                // next poll represents a fresh integration window (~5 s)
+                // instead of cumulative counts since boot.
+                g.spectrumResetPending = true;
             } else if (g.requestedVsAddr == VS_CONFIGUREMENT) {
                 // Store CONFIGURATION string for pre-init parsing.
                 // CP-1251 encoded; we only need ASCII portion (SpecFormatVersion=N).
@@ -547,9 +559,16 @@ static void onResponseComplete(const uint8_t* payload, size_t len) {
         case CMD_SET_EXCHANGE:
         case CMD_SET_TIME:
         case CMD_WR_VIRT_SFR:
-        default:
+        case CMD_WR_VIRT_STRING:
             // Init steps just need an ack; advance the machine.
             break;
+    }
+
+    // After WR_VIRT_STRING(VS.SPECTRUM, 0) ack, clear the reset flag so
+    // normal polling resumes — spectrum accumulator is now zeroed.
+    if (g.activeCmd == CMD_WR_VIRT_STRING && g.spectrumResetPending) {
+        g.spectrumResetPending = false;
+        log_i("spectrum reset acknowledged");
     }
 
     if (g.initStep != Internal::INIT_DONE && g.state == RadiaCode::State::Initializing) {
@@ -1479,6 +1498,19 @@ void RadiaCode::loop() {
     }
 
     if (g.state == State::Ready && !g.awaitingResponse) {
+        // VS_SPECTRUM reset between polls (v1.2.5):
+        // After decoding a spectrum response, send WR_VIRT_STRING(VS.SPECTRUM, 0)
+        // to zero the accumulator so the next ~5 s poll represents a fresh
+        // integration window instead of unbounded cumulative counts.
+        if (g.spectrumResetPending) {
+            log_i("resetting spectrum accumulator");
+            std::vector<uint8_t> args;
+            putU32LE(args, VS_SPECTRUM);
+            putU32LE(args, 0x00);
+            g.requestedVsAddr = VS_SPECTRUM; // so onResponseComplete knows context
+            sendCommand(CMD_WR_VIRT_STRING, args.data(), args.size());
+            return;
+        }
         // VS_DATA_BUF poll (~1 Hz) — primary realtime readings
         if ((now - g.lastPollMs) >= cfg::RADIACODE_POLL_MS) {
             g.lastPollMs = now;
