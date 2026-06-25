@@ -1258,6 +1258,49 @@ Otherwise, iterate to completion.
   transfer time for large outgoing bodies — it only governs the TCP response read timeout,
   not how long `sendRequest()` blocks while flushing the send buffer over a slow link.
 
+### snprintf Buffer Truncation Corrupts spectrumData in CSV Rows (v1.2.6)
+
+- **User-reported symptom**: web UI spectrogram color channels showed "outrageous" Y-axis
+  values for spectrum data despite firmware correctly decoding 1024 RLE channels. Inspecting
+  MongoDB revealed spectrumData arrays with only 783-784 elements (not 1024), and index [782]
+  or [783] consistently contained timestamp-like values such as `5701782273605448` or
+  `1782273610598`. All 26,558 docs with spectrumData across 3 sessions (Jun 22-24) were
+  corrupted — 100% failure rate.
+- **Root cause**: `SessionStore::append()` in `src/session_store.cpp` used
+  `snprintf(line, sizeof(line), ...)` with a `static char line[cfg::MAX_LINE_BYTES]` where
+  `MAX_LINE_BYTES=4096`. A CSV row with 1024 spectrum channels including multi-digit values
+  can exceed 4KB. When truncated, the `\n` at the end of the format string is cut off. The
+  check `if (len <= 0) return 0;` does NOT detect truncation — snprintf returns the WOULD-BE
+  length which exceeds sizeof(line), but code only checks for error (<=0). The file I/O writes
+  the truncated content without a line terminator. On the next loop iteration, the same static
+  buffer is reused and overwrites from byte 0. The previous row + current row's data are
+  concatenated in the file WITHOUT a newline separator. When the API's `csv.reader` parses this
+  file, column 12 (spectrumData) receives part of the first row's spectrum string PLUS the
+  beginning of the second row — which includes `timestampMs` as a pipe-separated element in
+  the spectrum data array. The bleeding timestamp digits created those massive out-of-range
+  values treated as channel counts by the web UI color channels.
+- **Why typical indoor rows also failed**: Even with mostly-zero counts (1 byte/channel),
+  row length for 1024 channels is ~2.1KB — well under 4KB. BUT when near any radiation source
+  or after spectrum accumulator integration without proper reset, multi-digit values appear,
+  pushing row length toward 3-5KB. Any row exceeding 4KB triggers the truncation. The bug
+  was present from v1.2.2 (spectrum architecture change) through v1.2.5.
+- **Fix (v1.2.6)** in `src/config.h` + `src/session_store.cpp`:
+  - Increased `MAX_LINE_BYTES` from 4096 to 5120 to provide headroom for worst-case rows.
+    Worst case: 1024 channels of max uint16 values (65535) = ~6KB, but realistic field data
+    rarely exceeds 4KB with the v1.2.5 accumulator reset working correctly. The 5KB buffer
+    handles all practical cases while still providing safety margin.
+  - Added truncation detection after snprintf at line 651:
+    `if ((size_t)len >= cfg::MAX_LINE_BYTES)` → logs warning + returns 0 to skip the row
+    rather than writing corrupted data to file. Prefer losing one sample over corrupting
+    the entire CSV row which makes downstream data unusable.
+- **MongoDB cleanup**: Ran `scripts/clean_spectrum_mongo.py --execute` which unset spectrumData
+  on all 26,558 corrupted docs where channel count != 1024 OR any element > 65535.
+- **Rule for future code**: ALWAYS check snprintf return value against buffer size, not just
+  for <=0 errors. `snprintf()` returns the WOULD-BE length (excluding null terminator); if
+  this >= buffer size, truncation occurred and data was silently cut off. Any format string
+  that includes a `\n` terminator is especially dangerous — truncating before the newline
+  causes multi-row concatenation that corrupts all subsequent parsing.
+
 ### WiFi.mode(WIFI_OFF) While BLE Active Causes PANIC + INT_WDT on Any Cycle (v0.9.5) — CRITICAL
 
 - **Symptom**: v0.9.4 device crashed with `BOOT,PANIC,raw0=12` and `BOOT,INT_WDT,raw0=8`
