@@ -343,6 +343,20 @@ namespace secrets {
   `r.spectrumChannelCount`, or `r.spectrumChannels[]` is using a pre-1.2.2 API.
   **CRITICAL**: Never allocate arrays or Strings inside the BLE callback path
   (onReading, onNotify, ScanCb) — it runs on Core 0 with ~4KB stack.
+- **Spectrum accumulator reset** (v1.2.5): `VS_SPECTRUM` (0x200) is a cumulative
+  accumulator — it integrates counts since boot or since last reset, unlike
+  `VS_DATA_BUF` which is a ring buffer. FW now sends `WR_VIRT_STRING(0x0827)(VS.SPECTRUM, 0)`
+  after each successful spectrum decode so the next ~5 s poll represents fresh integration
+  data rather than unbounded accumulation. This keeps per-channel counts within uint16 range.
+  Without this reset, background radiation over hours/days would saturate channels at 65535.
+  The flag `spectrumResetPending` in the `Internal` struct queues the async WR_VIRT_STRING
+  command; `onResponseComplete` clears it on ack. Commands: `CMD_WR_VIRT_STRING = 0x0827`.
+- **Spectrum RLE v1 decode** (v1.2.4): Variable-length RLE with int32 differential tracking.
+  **CRITICAL**: the `last` tracker variable must remain unclamped int32 for the delta chain
+  to stay valid — only the value stored into `gSpectrumCache` is clamped to [0, 65535].
+  The fix tracked `int32_t lastVal = v; ... last = lastVal` separately from the storage clamp.
+  Verified against Python SDK radiacode==0.3.5 at
+  `C:\Users\ryans\AppData\Roaming\Python\Python313\site-packages\radiacode\decoders\spectrum.py`.
 
 ### GPS — `gps_module.{h,cpp}`
 
