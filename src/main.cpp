@@ -215,26 +215,17 @@ static void enablePeripherals() {
 
 void setup() {
     Serial.begin(115200);
-    // Heltec V3 uses native USB CDC; give the host a moment to enumerate so
-    // the first prints aren't lost.
     const uint32_t cdcDeadline = millis() + 1500;
     while (!Serial && millis() < cdcDeadline) { delay(10); }
     Serial.println();
-    Serial.printf("HTIT-Tracker firmware v%s starting...\n", cfg::FW_VERSION);
+    Serial.printf("HTIT-Tracker firmware v%s minimal boot test\n", cfg::FW_VERSION);
 
-    // Task watchdog (v0.6.0). Arms a 30 s timer on the Arduino loop task.
-    // Any subsystem that wedges the main loop (deadlocked mutex, infinite
-    // BLE callback, etc.) will trigger a clean ESP_RST_TASK_WDT reset
-    // rather than the device silently going unresponsive. The Wi-Fi
-    // uploader task subscribes itself in its own taskLoop().
+#if 0
     esp_task_wdt_init(cfg::TASK_WDT_TIMEOUT_S, /*panic=*/true);
     esp_task_wdt_add(NULL);
     Serial.printf("[BOOT] task_wdt armed: %us, panic-on-timeout\n",
                   (unsigned)cfg::TASK_WDT_TIMEOUT_S);
 
-    // Log the previous reset reason so out-of-range / brown-out / watchdog
-    // resets are immediately visible in the boot log instead of looking
-    // like a normal power-on. Critical for diagnosing field reboots.
     {
         const esp_reset_reason_t rr = esp_reset_reason();
         const char* name = "unknown";
@@ -253,124 +244,9 @@ void setup() {
         }
         Serial.printf("[BOOT] reset reason: %s (%d)\n", name, (int)rr);
     }
+#endif
 
-    // Configure the local timezone so SessionStore::dayIdFromEpochMs() returns
-    // local Eastern-time YYYY-MM-DD instead of UTC. Done once at boot so all
-    // subsequent localtime_r() calls (in any task) see the same TZ.
-    setenv("TZ", cfg::LOCAL_TZ, 1);
-    tzset();
-    Serial.printf("[BOOT] timezone set to %s (always-on day-bucketed recording)\n",
-                  cfg::LOCAL_TZ);
-
-    enablePeripherals();
-    gButton.begin(cfg::BUTTON_PIN, cfg::BUTTON_DEBOUNCE_MS, cfg::BUTTON_LONG_PRESS_MS);
-
-    gUi.begin();
-    gGps.begin();
-
-    if (!gStore.begin()) {
-        if (gStore.storageFailed()) {
-            Serial.println("[STORE] FATAL: SD card required but not detected.");
-            Serial.println("[STORE]        Recording is DISABLED until reboot.");
-            Serial.println("[STORE]        Reseat the card / check 5V on HW-125 VCC, then power-cycle.");
-        } else {
-            Serial.println("[STORE] FATAL: no backend available -- recording disabled");
-        }
-    } else {
-        Serial.printf("[STORE] backend=%s used=%u total=%u",
-                      gStore.backendName(),
-                      (unsigned)gStore.usedBytes(), (unsigned)gStore.totalBytes());
-        if (gStore.sdMounted()) {
-            Serial.printf(" cardSizeMB=%llu", (unsigned long long)gStore.cardSizeMb());
-        }
-        Serial.println();
-        gStore.resumeIfActive();
-    }
-
-    // Add safety check to prevent infinite boot loops
-    // If we've been in a boot loop for too long, disable some features
-    uint32_t currentTime = millis();
-    // Note: We don't have a reliable bootLoopCount variable here anymore, 
-    // so we'll skip the safety mode logic for now to avoid conflicts
-
-    // Initialise the persistent event log on LittleFS. Reads RTC slow
-    // memory markers from the previous boot, appends a BOOT record (incl.
-    // reset reason + wifiInFlight flag) so we can diagnose battery
-    // brown-outs that happen while the user isn't watching serial.
-    // For now, let's just try to initialize and proceed - if it fails due to 
-    // corrupted filesystem, we'll handle that gracefully in the event_log.cpp itself.
-    event_log::beginBoot();
-
-    // Reload the cumulative trip dose from NVS so crashes don't wipe the
-    // user's accumulated total.  Done after gStore.begin() so LittleFS is
-    // already mounted and the NVS partition is accessible.
-    loadDoseFromNvs();
-
-    // Load spectrum collection mode from NVS (v1.1.0).
-    loadSpectrumModeFromNvs();
-
-    // Load lifetime statistics from NVS (v1.0.0).
-    gLife.begin();
-
-    gWifi.begin(&gStore);
-    // Wire lifetime upload counter — incremented on the wifi_up task (core 0).
-    // LifetimeStats::onUploadSuccess() is a single atomic increment; safe.
-    gWifi.setUploadSuccessCb([]() { gLife.onUploadSuccess(); });
-
-    gUi.setSources(&gGps, &gStore, &gRadia);
-    gUi.setWifi(&gWifi);
-    gUi.setLifetimeStats(&gLife);
-    gUi.setRadiaState(RadiaCode::State::Idle, String());
-
-    gRadia.begin(
-        // onReading
-        [](const RadiaCode::Reading& r) {
-            event_log::markPhase("RC_CB");
-            gUi.setReading(r);
-
-            // Build deviceId = address w/o colons (compact)
-            String id = gRadia.peerAddress();
-            id.replace(":", "");
-
-            // CRITICAL (v0.4.4): do NOT touch the filesystem here. This
-            // callback runs on the NimBLE host task (Core 0, ~4 KB stack);
-            // LittleFS.open() during ST_OPEN_DAY consumed enough stack to
-            // trip the canary and crash on the first GPS-fixed sample. We
-            // snapshot the data into a portMUX-protected slot and let the
-            // main Arduino loop (Core 1, 8 KB stack) call gStore.append().
-            PendingSample snap;
-            snap.valid    = true;
-            snap.ts       = gGps.bestEpochMs();
-            snap.uSv      = r.uSvPerHour;
-            snap.cps      = r.cps;
-            snap.hasGps   = gGps.hasFix();
-            snap.lat      = gGps.latitude();
-            snap.lng      = gGps.longitude();
-            snap.deviceId = id;
-            snap.speed    = cfg::FIELD_SPEED_KPH   ? (float)gGps.speedKph()           : -1.f;
-            snap.bearing  = cfg::FIELD_BEARING_DEG ? (float)gGps.bearingFromHistory() : -1.f;
-            snap.alt      = cfg::FIELD_ALTITUDE_M  ? (float)gGps.altitudeMeters()     : -9999.f;
-            snap.hdop     = cfg::FIELD_HDOP        ? (float)gGps.hdop()               : -1.f;
-            snap.acc      = cfg::FIELD_ACCURACY_M  ? (float)gGps.accuracyMeters()     : -1.f;
-            // Spectrum data is NOT built here — the callback runs on the NimBLE
-            // host task (Core 0, ~4 KB stack). String + pipe-delimited building
-            // is deferred to the main loop (Core 1, 8 KB stack) below.
-            portENTER_CRITICAL(&gSampleMux);
-            gPendingSample = snap;
-            portEXIT_CRITICAL(&gSampleMux);
-        },
-        // onState
-        [](RadiaCode::State s, const String& addr) {
-            gUi.setRadiaState(s, addr);
-            Serial.printf("[RC] state=%d addr=%s\n", (int)s, addr.c_str());
-        }
-    );
-
-    // Apply spectrum mode from NVS (v1.1.0).
-    gRadia.setSpectrumMode(gSpectrumMode);
-    gUi.setSpectrumMode(gSpectrumMode);
-
-    Serial.println("Setup complete");
+    Serial.println("[DEBUG] setup() complete — entering loop");
 }
 
 // --- Serial command interface ----------------------------------------------
@@ -676,6 +552,14 @@ static void pollSerialCommands() {
 }
 
 void loop() {
+    // ### CRITICAL DEBUG: minimal boot test — if this fails, crash is in setup() or bootloader ###
+    static int count = 0;
+    Serial.print("[DEBUG] loop iteration: ");
+    Serial.println(count++);
+    delay(1000);
+    return;
+
+    // ### END DEBUG — everything below is unreachable for now ###
     static uint32_t bootLoopCheck = 0;
     static int bootLoopCount = 0;
     

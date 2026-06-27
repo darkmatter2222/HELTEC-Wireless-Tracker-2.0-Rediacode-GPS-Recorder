@@ -326,8 +326,13 @@ bool SessionStore::begin() {
     }
     Serial.println("[STORE] LittleFS mounted successfully");
     if (!LittleFS.exists(cfg::SESSIONS_DIR)) {
-
+        LittleFS.mkdir(cfg::SESSIONS_DIR);
     }
+
+    // ### DEBUG: disable LittleFS to test if firmware can boot without it ###
+    Serial.println("[STORE] DISABLED: refusing to use LittleFS for debug");
+    return false;
+
     fs_ = &LittleFS;
     backend_ = Backend::LittleFs;
     return true;
