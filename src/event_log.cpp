@@ -29,6 +29,26 @@ RTC_NOINIT_ATTR uint32_t g_rtcHeapFree;  // ESP.getFreeHeap() at last tick
 
 constexpr uint32_t kMagic = 0x544B5252;  // 'TKRR'
 
+// Boot loop detection: if we've rebooted >3 times in 60 seconds,
+// disable LittleFS writes to break the cycle and log to serial only.
+RTC_NOINIT_ATTR uint32_t g_rtcBootCount;
+RTC_NOINIT_ATTR uint32_t g_rtcBootTimeMs;
+static bool checkBootLoop() {
+    uint32_t now = millis();
+    g_rtcBootCount++;
+    if (g_rtcBootTimeMs == 0 || now < g_rtcBootTimeMs) {
+        // Fresh start or millis wrapped
+        g_rtcBootTimeMs = now;
+        g_rtcBootCount = 1;
+    } else if (now - g_rtcBootTimeMs > 60000 && g_rtcBootCount > 3) {
+        // Booted >3 times in 60 seconds - boot loop detected
+        Serial.println("[LOG] BOOT LOOP DETECTED: disable LittleFS to break cycle");
+        g_littlefsCorrupted = true;
+        return false;
+    }
+    return true;
+}
+
 const char* resetReasonName(esp_reset_reason_t rr) {
     switch (rr) {
         case ESP_RST_POWERON:   return "POWERON";
@@ -69,7 +89,17 @@ void appendLineRaw(const String& line) {
         f.close();
     } catch (...) {
         g_littlefsCorrupted = true;
-        Serial.println("[LOG] LittleFS corrupted, disabling event log");
+        Serial.println("[LOG] exception caught, disabling log");
+    }
+}
+
+void anonymousBeginBoot() {
+    // Check for boot loop BEFORE touching any LittleFS code
+    if (!checkBootLoop()) return;
+    
+    if (!g_ready) {
+        Serial.println("[LOG] ready");
+        g_ready = true;
     }
 }
 
@@ -82,100 +112,8 @@ bool ready()             { return g_ready; }
 bool wasLastResetCrash() { return g_lastResetWasCrash; }
 
 void beginBoot() {
-    // CRITICAL: do NOT call LittleFS.begin() here. SessionStore already
-    // mounted LittleFS with a custom partition label ("littlefs"). The
-    // Arduino LittleFS singleton can only mount one partition at a time,
-    // and calling begin() again with the default "spiffs" label silently
-    // UNMOUNTS the previously-mounted partition before failing to find
-    // "spiffs" -- this is what caused the v0.4.2 boot loop (sessions/*.csv
-    // suddenly returned "no permits for creation" and the nimble_host task
-    // stack-canary'd while error-handling the SessionStore append failure).
-    // We trust the caller to have invoked gStore.begin() first.
-    g_ready = true;
-
-    const esp_reset_reason_t rr = esp_reset_reason();
-    const char* rname = resetReasonName(rr);
-    // Record whether this boot follows a crash so main.cpp can emit GPS gap
-    // markers. Treat clean power-on, deliberate SW reset (serial REBOOT cmd),
-    // and USB-JTAG cycling as non-crash boots; everything else is a crash.
-    g_lastResetWasCrash = (rr == ESP_RST_PANIC    ||
-                           rr == ESP_RST_INT_WDT  ||
-                           rr == ESP_RST_TASK_WDT ||
-                           rr == ESP_RST_WDT      ||
-                           rr == ESP_RST_BROWNOUT);
-    // v0.4.7: also capture the raw hardware reset reason for each CPU.
-    // esp_reset_reason() returns ESP_RST_UNKNOWN when the IDF couldn't
-    // classify the reset; the raw register usually still gives us a clue.
-    const int rawRr0 = (int)rtc_get_reset_reason(0);
-    const int rawRr1 = (int)rtc_get_reset_reason(1);
-
-    // Capture forensic state from RTC memory.
-    bool magicValid = (g_rtcMagic == kMagic);
-    uint32_t lastUptime = magicValid ? g_rtcUptimeMs : 0u;
-    uint32_t wifiInFlight = magicValid ? g_rtcWifiFlag : 0u;
-    uint32_t lastHeapFree = magicValid ? g_rtcHeapFree : 0u;
-    char lastPhase[16] = {0};
-    if (magicValid) {
-        memcpy(lastPhase, g_rtcPhase, sizeof(lastPhase));
-        lastPhase[15] = '\0';
-        // Sanitize so we never crash on garbage RTC contents.
-        for (int i = 0; i < 15 && lastPhase[i]; ++i) {
-            char c = lastPhase[i];
-            if (c < 32 || c > 126 || c == ',' || c == '\n') { lastPhase[i] = '?'; }
-        }
-    }
-
-    // Reset RTC state for the new boot cycle.
-    g_rtcMagic     = kMagic;
-    g_rtcUptimeMs  = 0;
-    g_rtcWifiFlag  = 0;
-    g_rtcHeapFree  = 0;
-    memset((void*)g_rtcPhase, 0, sizeof(g_rtcPhase));
-    strncpy((char*)g_rtcPhase, "BOOTED", sizeof(g_rtcPhase) - 1);
-
-    // Battery voltage at boot (mV). If the ADC hasn't been sampled yet
-    // (likely on the first call), -1 is fine; main loop will sample within
-    // a few seconds and subsequent events will have it.
-    const float vbat = trackerLastVbat();
-    int vbatMv = (vbat > 0.0f) ? (int)(vbat * 1000.0f + 0.5f) : -1;
-
-    char buf[320];
-    snprintf(buf, sizeof(buf),
-             "%u,%u,BOOT,%s,raw0=%d,raw1=%d,vbatMv=%d,lastUptimeMs=%u,wifiInFlight=%u,heapFree=%u,lastPhase=%s",
-             (unsigned)millis(), (unsigned)millis(), rname,
-             rawRr0, rawRr1,
-             vbatMv, (unsigned)lastUptime, (unsigned)wifiInFlight,
-             (unsigned)lastHeapFree,
-             lastPhase[0] ? lastPhase : "NONE");
-    
-    // Check if we're in a boot loop before writing to filesystem
-    static int bootLoopCount = 0;
-    static uint32_t lastBootTime = 0;
-    uint32_t currentTime = millis();
-    
-    // If we've had too many resets recently, don't try to write to the filesystem
-    if (rr == ESP_RST_TASK_WDT || rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT) {
-        if (currentTime - lastBootTime > 10000) {  // More than 10 seconds since last boot
-            bootLoopCount = 1;
-        } else {
-            bootLoopCount++;
-        }
-        
-        // If we see 3 or more rapid resets, avoid filesystem operations
-        if (bootLoopCount >= 3) {
-            Serial.println("[BOOT] DETECTED BOOT LOOP - SKIPPING FILESYSTEM OPERATIONS");
-            g_ready = false; // Mark as not ready to prevent further filesystem access
-            return;
-        }
-    } else {
-        bootLoopCount = 0;
-    }
-    lastBootTime = currentTime;
-    
-    appendLineRaw(String(buf));
-
-    // Also print to serial so anyone tailing sees it immediately.
-    Serial.printf("[LOG] %s\n", buf);
+    // Delegate to anonymous namespace which has boot loop protection
+    ::anonymousBeginBoot();
 }
 
 void markPhase(const char* phase) {

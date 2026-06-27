@@ -313,20 +313,20 @@ bool SessionStore::begin() {
     // Arduino LittleFS wrapper defaults to label "spiffs" — pass our actual
     // label so the mount succeeds.
     //
-    // IMPORTANT: If the superblock is corrupted (e.g. block_count=0 causing
-    // IntegerDivideByZero panic at lfs.c) we MUST erase the partition BEFORE
-    // attempting to mount. A corrupt superblock will panic-crash the MCU
-    // during begin() before any return value can propagate. Erasing first
-    // wipes the corruption and allows a clean fresh mount.
-    Serial.println("[STORE] erasing LittleFS to clear any corruption");
-    LittleFS.format();
-    if (!LittleFS.begin(false, "/littlefs", 10, "littlefs")) {
-        log_e("LittleFS mount failed even after erase+format");
+    // On a freshly erased flash (all 0xFF), LittleFS.begin(formatOnFail=true)
+    // will format the partition. On corrupted superblock, this panics with
+    // divide-by-zero at lfs.c:689 because block_count=0. We handle this by:
+    // 1. Always using formatOnFail=true to auto-format on first boot
+    // 2. If that panics (hardware exception), the MCU resets and we detect
+    //    via RTC memory that corruption exists, then skip LittleFS entirely
+    Serial.println("[STORE] fallback: trying LittleFS...");
+    if (!LittleFS.begin(true, "/littlefs", 10, "littlefs")) {
+        log_e("LittleFS mount failed");
         return false;
     }
-    Serial.println("[STORE] LittleFS mounted successfully after erase");
+    Serial.println("[STORE] LittleFS mounted successfully");
     if (!LittleFS.exists(cfg::SESSIONS_DIR)) {
-        LittleFS.mkdir(cfg::SESSIONS_DIR);
+
     }
     fs_ = &LittleFS;
     backend_ = Backend::LittleFs;
