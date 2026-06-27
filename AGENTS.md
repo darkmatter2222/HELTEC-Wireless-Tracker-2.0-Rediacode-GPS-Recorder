@@ -1210,6 +1210,15 @@ Otherwise, iterate to completion.
 
 ## Lessons Learned — Do Not Re-Litigate
 
+### Ultra-Minimal Firmware Still Enters Download Mode (2026-06-25) — CRITICAL DIAGNOSIS
+
+- **Symptom**: Device enters download mode (`boot:0x0 DOWNLOAD`) within milliseconds of boot, even with ~332 KB firmware that contains ONLY `Serial.begin(115200)` + `Serial.printf(...)` + one `Serial.println` in `setup()`, and a trivial `loop()` that prints a counter then `delay(1000)` + early `return`. ALL subsystems disabled via `#if 0` (WDT, timezone, peripherals, UI, GPS, storage/LittleFS, dose, spectrum, lifetime, wifi, radia).
+- **Saved PC**: Consistently around `0x40041a76` / `0x40041a79` / `0x40041a7c` / `0x40048e4b` — ARM ROM addresses. Varies slightly with firmware binary size but ALWAYS in ROM range (0x40040000+).
+- **Esptool confirms**: Device is already in download mode BEFORE connection when using `--before no_reset`. Bootloader is alive and responsive at 0x0, firmware binary verified valid at 0x10000.
+- **USB-CDC DTR/RTS**: Every time COM4 is opened (even with `dsrdtr=False/rtscts=False`), the device shows `reset reason 15 (USB_UART_CHIP_RESET)` and enters download mode. Native USB-CDC on ESP32-S3 resets the chip when the USB interface re-enumerates.
+- **Conclusion**: The crash is NOT in our application code. It's happening at or before Arduino core initialization — either in bootloader-to-app handoff, ROM code during early init, or hardware level (brown-out? power issue?). Application-level debugging via progressive code stripping CANNOT isolate the root cause because even empty setup/loop fails.
+- **Next diagnostic path**: If device works on battery power (USB unplugged), crash is USB-CDC-induced. If it still crashes on battery alone, flash corruption at 0x81A0 or hardware issue is more likely. Try bare-metal esp-idf example without Arduino to confirm if the chip can execute ANY application code.
+
 ### Corrupted LittleFS Superblock Causes IntegerDivideByZero Boot Loop (v1.2.6) — CRITICAL
 
 - **User-reported symptom**: device stuck in persistent boot loop for hours, never reaching running state. Boot time <5 seconds per cycle, completely unusable even on battery power (USB not connected).
