@@ -140,6 +140,31 @@ void beginBoot() {
              vbatMv, (unsigned)lastUptime, (unsigned)wifiInFlight,
              (unsigned)lastHeapFree,
              lastPhase[0] ? lastPhase : "NONE");
+    
+    // Check if we're in a boot loop before writing to filesystem
+    static int bootLoopCount = 0;
+    static uint32_t lastBootTime = 0;
+    uint32_t currentTime = millis();
+    
+    // If we've had too many resets recently, don't try to write to the filesystem
+    if (rr == ESP_RST_TASK_WDT || rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT) {
+        if (currentTime - lastBootTime > 10000) {  // More than 10 seconds since last boot
+            bootLoopCount = 1;
+        } else {
+            bootLoopCount++;
+        }
+        
+        // If we see 3 or more rapid resets, avoid filesystem operations
+        if (bootLoopCount >= 3) {
+            Serial.println("[BOOT] DETECTED BOOT LOOP - SKIPPING FILESYSTEM OPERATIONS");
+            g_ready = false; // Mark as not ready to prevent further filesystem access
+            return;
+        }
+    } else {
+        bootLoopCount = 0;
+    }
+    lastBootTime = currentTime;
+    
     appendLineRaw(String(buf));
 
     // Also print to serial so anyone tailing sees it immediately.

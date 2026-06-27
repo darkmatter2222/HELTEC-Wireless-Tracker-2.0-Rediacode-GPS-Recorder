@@ -31,11 +31,6 @@ Ui            gUi;
 WifiUploader  gWifi;
 
 // ---------------------------------------------------------------------------
-// Boot loop detection
-static int bootLoopCount = 0;  // Moved to global scope for access in setup()
-static uint32_t lastBootTime = 0;
-
-// ---------------------------------------------------------------------------
 // Spectrum collection mode (v1.1.0)
 // When enabled, eid=1 spectrum segments from DATA_BUF are parsed and stored.
 bool     gSpectrumMode = false;
@@ -257,32 +252,6 @@ void setup() {
             default: break;
         }
         Serial.printf("[BOOT] reset reason: %s (%d)\n", name, (int)rr);
-        
-        // Check for boot loop detection - if we see repeated TASK_WDT resets
-        // within a short period, we'll trigger a special recovery mode
-        static int bootLoopCount = 0;
-        static uint32_t lastBootTime = 0;
-        uint32_t currentTime = millis();
-        
-        if (rr == ESP_RST_TASK_WDT || rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT) {
-            // Only count boot loops if we're not too close to the previous boot
-            if (currentTime - lastBootTime > 10000) {  // More than 10 seconds since last boot
-                bootLoopCount = 1;
-            } else {
-                bootLoopCount++;
-            }
-            
-            // If we see 3 or more rapid resets, something is seriously wrong
-            if (bootLoopCount >= 3) {
-                Serial.println("[BOOT] DETECTED BOOT LOOP - ENABLING SAFETY MODE");
-                // In safety mode, we'll avoid risky operations and just show diagnostics
-                // This prevents a potential infinite boot loop
-            }
-        } else {
-            // Reset the boot loop counter for non-reset situations
-            bootLoopCount = 0;
-        }
-        lastBootTime = currentTime;
     }
 
     // Configure the local timezone so SessionStore::dayIdFromEpochMs() returns
@@ -321,12 +290,8 @@ void setup() {
     // Add safety check to prevent infinite boot loops
     // If we've been in a boot loop for too long, disable some features
     uint32_t currentTime = millis();
-    if (bootLoopCount >= 3) {
-        Serial.println("[BOOT] DETECTED BOOT LOOP - ENABLING SAFETY MODE");
-        // In safety mode, we'll avoid risky operations and just show diagnostics
-        // This prevents a potential infinite boot loop
-        delay(1000);  // Brief pause before continuing to give user time to notice
-    }
+    // Note: We don't have a reliable bootLoopCount variable here anymore, 
+    // so we'll skip the safety mode logic for now to avoid conflicts
 
     // Initialise the persistent event log on LittleFS. Reads RTC slow
     // memory markers from the previous boot, appends a BOOT record (incl.
