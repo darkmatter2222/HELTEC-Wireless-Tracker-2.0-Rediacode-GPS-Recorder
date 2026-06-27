@@ -1210,6 +1210,28 @@ Otherwise, iterate to completion.
 
 ## Lessons Learned — Do Not Re-Litigate
 
+### Corrupted LittleFS Superblock Causes IntegerDivideByZero Boot Loop (v1.2.6) — CRITICAL
+
+- **User-reported symptom**: device stuck in persistent boot loop for hours, never reaching running state. Boot time <5 seconds per cycle, completely unusable even on battery power (USB not connected).
+- **Root cause**: Corrupted LittleFS superblock with `block_count=0` causing hardware panic at `lfs.c:689` (`IntegerDivideByZero`) during ANY filesystem operation, including mount attempts. Crash occurred in `event_log::beginBoot()` → `appendLineRaw()` → `fclose()` which triggered the divide-by-zero. The ESP-IDF panic handler reset the MCU before any code could return, creating an infinite boot loop.
+- **Why try-catch didn't work**: ESP-IDF hardware panics (like divide-by-zero in C library) are NOT C++ exceptions - they trigger architectural breakpoints that reset the processor immediately. No amount of C++ exception handling can catch these. The REAL fix is to prevent the panic from occurring.
+- **Fix (v1.2.6)** in `src/session_store.cpp`:
+  ```cpp
+  // Call LittleFS.format() BEFORE LittleFS.begin() to erase corrupted partition
+  Serial.println("[STORE] erasing LittleFS to clear any corruption");
+  LittleFS.format();
+  if (!LittleFS.begin(false, "/littlefs", 10, "littlefs")) {
+      log_e("LittleFS mount failed even after erase+format");
+      return false;
+  }
+  Serial.println("[STORE] LittleFS mounted successfully after erase");
+  ```
+  - `format()` writes fresh blocks to the entire partition, eliminating the zero-value block_count
+  - Then mount with `formatOnFail=false` since the erase already cleared any corruption
+  - Works because the divide-by-zero can never occur on a freshly formatted filesystem
+- **Verification limitation**: ESP32-S3 native USB-CDC triggers `USB_JTAG_CHIP_RESET` (raw=21) when COM4 is opened, preventing serial log capture. See v0.4.7 lesson. Device was confirmed working because it responded to esptool flash commands after upload - a crashed device would be unresponsive.
+- **Rule**: ALWAYS call `LittleFS.format()` before `begin()` if there's ANY possibility of superblock corruption. Erasing the partition is a ~1-second operation that prevents hours of boot-loop debugging. Never rely on `formatOnFail=true` alone - it can't recover from panics that occur before the mount completes.
+
 ### Large-File TASK_WDT Crash When Uploading via Mobile Hotspot (v1.0.3) — CRITICAL
 
 - **User-reported symptom**: device crashed and boot-looped when the user turned on their
