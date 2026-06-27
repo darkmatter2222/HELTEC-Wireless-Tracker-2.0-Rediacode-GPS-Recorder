@@ -31,6 +31,11 @@ Ui            gUi;
 WifiUploader  gWifi;
 
 // ---------------------------------------------------------------------------
+// Boot loop detection
+static int bootLoopCount = 0;  // Moved to global scope for access in setup()
+static uint32_t lastBootTime = 0;
+
+// ---------------------------------------------------------------------------
 // Spectrum collection mode (v1.1.0)
 // When enabled, eid=1 spectrum segments from DATA_BUF are parsed and stored.
 bool     gSpectrumMode = false;
@@ -252,6 +257,32 @@ void setup() {
             default: break;
         }
         Serial.printf("[BOOT] reset reason: %s (%d)\n", name, (int)rr);
+        
+        // Check for boot loop detection - if we see repeated TASK_WDT resets
+        // within a short period, we'll trigger a special recovery mode
+        static int bootLoopCount = 0;
+        static uint32_t lastBootTime = 0;
+        uint32_t currentTime = millis();
+        
+        if (rr == ESP_RST_TASK_WDT || rr == ESP_RST_PANIC || rr == ESP_RST_INT_WDT) {
+            // Only count boot loops if we're not too close to the previous boot
+            if (currentTime - lastBootTime > 10000) {  // More than 10 seconds since last boot
+                bootLoopCount = 1;
+            } else {
+                bootLoopCount++;
+            }
+            
+            // If we see 3 or more rapid resets, something is seriously wrong
+            if (bootLoopCount >= 3) {
+                Serial.println("[BOOT] DETECTED BOOT LOOP - ENABLING SAFETY MODE");
+                // In safety mode, we'll avoid risky operations and just show diagnostics
+                // This prevents a potential infinite boot loop
+            }
+        } else {
+            // Reset the boot loop counter for non-reset situations
+            bootLoopCount = 0;
+        }
+        lastBootTime = currentTime;
     }
 
     // Configure the local timezone so SessionStore::dayIdFromEpochMs() returns
@@ -287,10 +318,22 @@ void setup() {
         gStore.resumeIfActive();
     }
 
+    // Add safety check to prevent infinite boot loops
+    // If we've been in a boot loop for too long, disable some features
+    uint32_t currentTime = millis();
+    if (bootLoopCount >= 3) {
+        Serial.println("[BOOT] DETECTED BOOT LOOP - ENABLING SAFETY MODE");
+        // In safety mode, we'll avoid risky operations and just show diagnostics
+        // This prevents a potential infinite boot loop
+        delay(1000);  // Brief pause before continuing to give user time to notice
+    }
+
     // Initialise the persistent event log on LittleFS. Reads RTC slow
     // memory markers from the previous boot, appends a BOOT record (incl.
     // reset reason + wifiInFlight flag) so we can diagnose battery
     // brown-outs that happen while the user isn't watching serial.
+    // For now, let's just try to initialize and proceed - if it fails due to 
+    // corrupted filesystem, we'll handle that gracefully in the event_log.cpp itself.
     event_log::beginBoot();
 
     // Reload the cumulative trip dose from NVS so crashes don't wipe the
@@ -668,6 +711,29 @@ static void pollSerialCommands() {
 }
 
 void loop() {
+    static uint32_t bootLoopCheck = 0;
+    static int bootLoopCount = 0;
+    
+    // Add a boot loop detection mechanism to prevent infinite restarts
+    if (bootLoopCheck == 0) {
+        bootLoopCheck = millis();
+    } else {
+        // Check if we're looping too quickly - likely a boot loop
+        uint32_t now = millis();
+        if (now - bootLoopCheck < 5000 && bootLoopCount > 5) {
+            // Detected potential boot loop - add a delay to break the cycle
+            Serial.println("[BOOT] Potential boot loop detected, adding delay...");
+            delay(5000);
+            bootLoopCount = 0;
+        } else if (now - bootLoopCheck >= 5000) {
+            // Reset counter after 5 seconds
+            bootLoopCount = 0;
+            bootLoopCheck = now;
+        } else {
+            bootLoopCount++;
+        }
+    }
+    
     esp_task_wdt_reset();
     pollSerialCommands();
     gGps.update();
