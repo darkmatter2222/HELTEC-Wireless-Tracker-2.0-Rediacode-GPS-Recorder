@@ -312,10 +312,19 @@ bool SessionStore::begin() {
     // "spiffs" because LittleFS reuses the SPIFFS subtype on ESP-IDF). The
     // Arduino LittleFS wrapper defaults to label "spiffs" — pass our actual
     // label so the mount succeeds.
-    if (!LittleFS.begin(true, "/littlefs", 10, "littlefs")) {
-        log_e("LittleFS mount failed even after format");
+    //
+    // IMPORTANT: If the superblock is corrupted (e.g. block_count=0 causing
+    // IntegerDivideByZero panic at lfs.c) we MUST erase the partition BEFORE
+    // attempting to mount. A corrupt superblock will panic-crash the MCU
+    // during begin() before any return value can propagate. Erasing first
+    // wipes the corruption and allows a clean fresh mount.
+    Serial.println("[STORE] erasing LittleFS to clear any corruption");
+    LittleFS.format();
+    if (!LittleFS.begin(false, "/littlefs", 10, "littlefs")) {
+        log_e("LittleFS mount failed even after erase+format");
         return false;
     }
+    Serial.println("[STORE] LittleFS mounted successfully after erase");
     if (!LittleFS.exists(cfg::SESSIONS_DIR)) {
         LittleFS.mkdir(cfg::SESSIONS_DIR);
     }

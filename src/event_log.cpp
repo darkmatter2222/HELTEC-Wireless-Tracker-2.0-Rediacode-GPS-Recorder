@@ -16,6 +16,7 @@ constexpr size_t      kLogMaxBytes = 12 * 1024;   // roll over at ~12 KB
 
 bool g_ready = false;
 bool g_lastResetWasCrash = false;  // set in beginBoot(); read by main.cpp
+bool g_littlefsCorrupted = false;   // Track corrupted LittleFS state — once we detect corruption, never try again
 
 // RTC slow memory survives software resets, brown-outs, and watchdog
 // reboots (cleared only by full power-off or deep sleep). We use it to
@@ -46,6 +47,7 @@ const char* resetReasonName(esp_reset_reason_t rr) {
 
 // Roll /system.log -> /system.log.old when oversize. Keeps storage bounded.
 void maybeRoll() {
+    if (g_littlefsCorrupted) return;
     if (!LittleFS.exists(kLogPath)) return;
     File f = LittleFS.open(kLogPath, FILE_READ);
     if (!f) return;
@@ -57,13 +59,18 @@ void maybeRoll() {
 }
 
 void appendLineRaw(const String& line) {
-    if (!g_ready) return;
-    maybeRoll();
-    File f = LittleFS.open(kLogPath, FILE_APPEND);
-    if (!f) return;
-    f.print(line);
-    f.print('\n');
-    f.close();
+    if (!g_ready || g_littlefsCorrupted) return;
+    try {
+        maybeRoll();
+        File f = LittleFS.open(kLogPath, FILE_APPEND);
+        if (!f) { g_littlefsCorrupted = true; Serial.println("[LOG] LittleFS open failed, disabling log"); return; }
+        f.print(line);
+        f.print('\n');
+        f.close();
+    } catch (...) {
+        g_littlefsCorrupted = true;
+        Serial.println("[LOG] LittleFS corrupted, disabling event log");
+    }
 }
 
 } // namespace
