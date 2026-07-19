@@ -1168,8 +1168,9 @@ void Ui::drawRatioSparkline(int chartX, int chartY, int chartW, int chartH,
                 float absCurr = fabsf(devPct);
                 float t = absPrev / (absPrev + absCurr);
                 int crossX = prevX + (int)roundf(t * (x - prevX));
-                tft.drawLine(prevX, prevY, crossX, zeroY, prevColor);
-                tft.drawLine(crossX, zeroY, x, y, segColor);
+                int crossY = prevY + (int)roundf(t * (y - prevY));
+                tft.drawLine(prevX, prevY, crossX, crossY, prevColor);
+                tft.drawLine(crossX, crossY, x, y, segColor);
             } else {
                 tft.drawLine(prevX, prevY, x, y, segColor);
             }
