@@ -346,7 +346,7 @@ namespace secrets {
 ### TFT UI — `ui.{h,cpp}`
 
 - ST7735 landscape rotation=1; 160×80; colors: GREEN `#00E676`, RED, DIM_GREY
-- Screens cycled by short-press: STATS → GPS → STORAGE → DOSE → STATS; PICKER entered via long-press on STATS
+- Screens cycled by short-press: STATS → GPS → STORAGE → DOSE → D/C TREND → LIFETIME → LIFETIME2 → STATS; PICKER entered via long-press on STATS
 - **Header status bar** (v0.3.5): RC state badge (GREEN=OK, AMBER=scanning/init, RED=disconnected);
   GPS badge (GREEN=3D fix, RED=no fix); battery with color threshold; recording dot always visible
   (dim outline = idle, filled red = recording)
@@ -377,8 +377,22 @@ namespace secrets {
   `Hold: sync now` shown at y=72 when Wi-Fi is configured. GPS long-press still advances the screen.
   STORAGE screen layout (v0.9.1): y=14 REC/AUTO/Samp; y=26 Day; y=38 Disk%; y=50 bar; y=56 Pending;
   y=64 Wi-Fi status; y=72 `Hold: sync now` hint.
-- **LIFETIME screens** (v1.0.0): Two new screens (6th and 7th) in the normal cycle
-  (STATS→GPS→STORAGE→DOSE→LIFETIME→LIFETIME2→STATS).
+- **D/C TREND screen** (v1.0.1): Five-minute dose-per-count deviation sparkline.
+  - Collects trend data continuously via `Ui::setReading()` from the NimBLE callback.
+  - 5-second aggregation bins accumulate dose (nSv/h) and CPS sums; ratio = sum(dose) / sum(cps).
+  - Bins with <3 samples create gaps in the sparkline.
+  - Adaptive baseline: median of first 6 valid bins (~30s warmup), then EMA with α=0.0083 (~10 min time constant).
+  - Deviations >±25% are graphed but excluded from baseline updates (contamination protection).
+  - Sparkline: green for positive deviation (above baseline), red for negative (below).
+  - Display: "D/C TREND" title, current deviation %, horizontal zero/baseline line, "-5m" / "now" time labels.
+  - States: "NO DATA" (initial), "CAL N/6" (warmup), "+/−N%" (normal), "STALE" (no data >10s), "NO RC" (disconnected).
+  - No long-press action on this screen. Data collection continues regardless of visible screen.
+  - Thread-safe via spinlock (`portENTER_CRITICAL/EXIT_CRITICAL`) protecting the circular buffer.
+  - No flash persistence for the 5-minute buffer; cleared on reboot.
+  - Unit tests: `test/test_ratio_trend_native/` — 34 tests covering ratio math, baseline, buffer, and graph mapping.
+
+- **LIFETIME screens** (v1.0.0): Two screens (7th and 8th) in the normal cycle
+  (STATS→GPS→STORAGE→DOSE→D/C TREND→LIFETIME→LIFETIME2→STATS).
   Both display NVS-backed lifetime counters that survive every reboot and reset (~64 bytes in
   `"life"` NVS namespace). Long-press on **either** screen emits `ACTION_RESET_LIFETIME` →
   `LifetimeStats::reset()` and zeroes all counters.

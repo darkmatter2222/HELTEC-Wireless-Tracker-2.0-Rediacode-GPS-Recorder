@@ -1,0 +1,179 @@
+@echo off
+setlocal EnableExtensions EnableDelayedExpansion
+
+REM ============================================================
+REM GitHub Copilot CLI DGX Spark launcher
+REM Maximum-autonomy local model launcher
+REM The proxy auto-discovers all models from Ollama every 30s - no code changes needed to add/remove models. Add new ones via: ssh dgxspark "ollama pull <model>"
+REM Models can also be swapped by changing COPILOT_MODEL env var directly without this script
+REM IMPORTANT: Do NOT name this file copilot.bat
+REM Recommended name: copilot-dgx.bat
+REM ============================================================
+
+set COPILOT_PROVIDER_TYPE=openai
+set COPILOT_PROVIDER_BASE_URL=http://192.168.86.48/copilot/v1
+set COPILOT_PROVIDER_API_KEY=YOUR_API_KEY_HERE
+set COPILOT_ALLOW_ALL=true
+
+REM Extension credentials — read by .github/extensions/deploy-dgx/extension.mjs
+set DASHBOARD_USERNAME=darkmatter2222
+set DASHBOARD_PASSWORD=YOUR_DASHBOARD_PASSWORD_HERE
+set ADMIN_USERNAME=darkmatter2222
+set ADMIN_PASSWORD=YOUR_DASHBOARD_PASSWORD_HERE
+
+REM Find the real Copilot CLI, not this launcher.
+set REAL_COPILOT=
+
+for /f "delims=" %%I in ('where copilot 2^>nul') do (
+    if /I not "%%~fI"=="%~f0" (
+        set REAL_COPILOT=%%~fI
+        goto found_copilot
+    )
+)
+
+:found_copilot
+if "%REAL_COPILOT%"=="" (
+    echo ERROR: Could not find the real GitHub Copilot CLI on PATH.
+    echo.
+    echo Try running:
+    echo   where copilot
+    echo.
+    echo If the first result is this .bat file, rename this file to copilot-dgx.bat.
+    exit /b 1
+)
+
+echo.
+echo Select GitHub Copilot CLI model:
+echo.
+echo   1. Qwen3 (General purpose, 17 GB)
+echo   2. Qwen3-Coder (Coding specialist, 18 GB)
+echo   3. Qwen3-Coder-Next Q8 (Flagship MoE coder, 84 GB)
+echo   4. Qwen3.6-27B OBLITERATED (Uncensored finetune, 16 GB)
+echo   5. Qwen3.6-27B MTP (MTP variant, 17 GB)
+echo   6. Qwen3-Coder-Spec (Spec decoding ~80 TPS, 18 GB)
+echo   7. Qwen3-Coder-Next-Spec 32K (Daily coding, fast load, 84 GB)   ^<-- RECOMMENDED
+echo   8. Qwen3-Coder-Next-Spec Full (Long context 262K, 84 GB)
+echo   9. Qwen3 4B (Small/fast, 2.5 GB)
+echo   0. Exit
+echo.
+
+choice /C 1234567890 /N /M "Choose a model [1-9, 0=exit]: "
+
+if errorlevel 10 goto exit
+if errorlevel 9 goto qwen34b
+if errorlevel 8 goto qwen3codernextspecfull
+if errorlevel 7 goto qwen3codernextspec32k
+if errorlevel 6 goto qwen3coderspec
+if errorlevel 5 goto qwen36mtp
+if errorlevel 4 goto obliterated
+if errorlevel 3 goto qwen3codernext
+if errorlevel 2 goto qwen3coder
+if errorlevel 1 goto qwen3
+
+:qwen3
+set COPILOT_MODEL=qwen3
+set MODEL_DISPLAY_NAME=Qwen3 (General Purpose)
+goto launch
+
+:qwen3coder
+set COPILOT_MODEL=qwen3-coder
+set MODEL_DISPLAY_NAME=Qwen3-Coder 27B
+goto launch
+
+:qwen3codernext
+set COPILOT_MODEL=qwen3-coder-next:q8_0
+set MODEL_DISPLAY_NAME=Qwen3-Coder-Next Q8 (Flagship MoE)
+goto launch
+
+:obliterated
+set COPILOT_MODEL=obliterated
+set MODEL_DISPLAY_NAME=Qwen3.6-27B OBLITERATED
+goto launch
+
+:qwen36mtp
+set COPILOT_MODEL=qwen3.6:27b-mtp-q4_K_M
+set MODEL_DISPLAY_NAME=Qwen3.6-27B MTP (Multi-Token Prediction)
+goto launch
+
+:qwen3coderspec
+set COPILOT_MODEL=qwen3-coder-spec:latest
+set MODEL_DISPLAY_NAME=Qwen3-Coder-Spec (Speculative Decoding ~80 TPS)
+goto launch
+
+:qwen3codernextspec32k
+set COPILOT_MODEL=qwen3-coder-next-spec-32k:latest
+set MODEL_DISPLAY_NAME=Qwen3-Coder-Next-Spec 32K (Daily Coding, 32K ctx)
+goto launch
+
+:qwen3codernextspecfull
+set COPILOT_MODEL=qwen3-coder-next-spec:latest
+set MODEL_DISPLAY_NAME=Qwen3-Coder-Next-Spec Full (Long Context 262K)
+goto launch
+
+:qwen34b
+set COPILOT_MODEL=qwen3:4b
+set MODEL_DISPLAY_NAME=Qwen3 4B (Small/Fast)
+goto launch
+
+:launch
+echo.
+echo Starting GitHub Copilot CLI
+echo ------------------------------------------------------------
+echo   Real CLI:              %REAL_COPILOT%
+echo   Provider type:         %COPILOT_PROVIDER_TYPE%
+echo   Base URL:              %COPILOT_PROVIDER_BASE_URL%
+echo   Model ID:              %COPILOT_MODEL%
+echo   Model name:            %MODEL_DISPLAY_NAME%
+echo   Mode:                  Autopilot / agent-like
+echo   Permissions:           YOLO / allow-all / never ask
+echo   Remote mobile:         ON
+echo   Streaming:             ON
+echo   Context:               Long context
+echo   GitHub MCP tools:      ALL
+echo   Experimental:          ON
+echo   Autopilot continues:   Unlimited
+echo   Voice input:           Use /voice inside Copilot CLI
+echo   Traffic routed via:    Databricks (192.168.86.48) → DGX Spark (192.168.86.39)
+echo ------------------------------------------------------------
+echo.
+echo In-session setup commands:
+echo   /voice        Enable speech-to-text dictation
+echo   /remote on    Ensure remote mobile control is enabled
+echo   /env          Show loaded tools, MCP servers, skills, hooks
+echo   /mcp show     Show configured MCP servers
+echo   /yolo         Re-enable allow-all permissions
+echo.
+echo To add new models (no proxy code changes needed):
+echo   ssh dgxspark "ollama pull ModelName"
+echo   Then restart this script - model auto-discovers within 30s.
+echo   Current model pool hosted on DGX Spark:
+echo     qwen3, qwen3:4b, qwen3.6 MTP, qwen3-coder, qwen3-coder-spec,
+echo     qwen3-coder-next:q8_0, qwen3-coder-next-spec, obliterated
+echo.
+echo Voice usage after /voice is enabled:
+echo   Hold Spacebar to talk, release to insert transcription.
+echo   For longer dictation: Ctrl+X, then V.
+echo.
+echo WARNING:
+echo   This can read, modify, delete, and execute files under this repo.
+echo   Use only in a repo/folder you trust.
+echo.
+
+call "%REAL_COPILOT%" ^
+  --mode=autopilot ^
+  --yolo ^
+  --no-ask-user ^
+  --remote ^
+  --stream=on ^
+  --context=long_context ^
+  --enable-all-github-mcp-tools ^
+  --experimental
+
+goto end
+
+:exit
+echo Exiting.
+goto end
+
+:end
+endlocal

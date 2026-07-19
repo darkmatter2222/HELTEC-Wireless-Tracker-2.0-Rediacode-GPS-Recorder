@@ -139,6 +139,9 @@ void Ui::onLongPress() {
             // Long-press on either LIFETIME screen resets all lifetime counters.
             pendingAction_ = ACTION_RESET_LIFETIME;
             break;
+        case SCREEN_RATIO_TREND:
+            // Intentionally no-op: D/C TREND has no long-press action.
+            break;
         case SCREEN_PICKER:
             if (pickerCursor_ >= (int)pickList_.size()) {
                 pendingAction_ = ACTION_CANCEL_PICKER;
@@ -166,6 +169,7 @@ void Ui::setReading(const RadiaCode::Reading& r) {
         // RadiaCode reports its own battery; we treat it as the displayed value.
         // (USB-C powered ESP has its own divider but is less interesting here.)
     }
+    updateRatioTrend(r, millis());
 }
 void Ui::setRadiaState(RadiaCode::State s, const String& addr) {
     rcState_ = s;
@@ -241,6 +245,7 @@ void Ui::tick() {
         case SCREEN_GPS:      renderGps();      break;
         case SCREEN_STORAGE:  renderStorage();  break;
         case SCREEN_DOSE:     renderDose();     break;
+        case SCREEN_RATIO_TREND: renderRatioTrend(); break;
         case SCREEN_LIFETIME:  renderLifetime();  break;
         case SCREEN_LIFETIME2: renderLifetime2(); break;
         case SCREEN_PICKER:   renderPicker();   break;
@@ -822,5 +827,363 @@ void Ui::renderPicker() {
             tft.setTextColor(0xFFFF, bg);
             tft.setCursor(2, y + 2); tft.print(line);
         }
+    }
+}
+
+// ============================================================================
+// D/C TREND — Dose-per-Count Sparkline (lines below)
+// ============================================================================
+
+// Pure helpers (testable, no side effects)
+
+float Ui::calculateDosePerCount(float uSvPerHour, float cps) {
+    // Converts µSv/h to nSv/h and divides by CPS.
+    // Returns the dose-per-count ratio in nSv/h per CPS.
+    const float nsvPerHour = uSvPerHour * 1000.0f;
+    return nsvPerHour / cps;
+}
+
+float Ui::calculateDeviationPercent(float ratio, float baseline) {
+    return 100.0f * ((ratio / baseline) - 1.0f);
+}
+
+int Ui::mapRatioDeviationToY(float deviationPct, float scalePct, int zeroY, int halfHeight) {
+    // Maps deviation percentage to y-coordinate relative to zeroY.
+    // Positive → above zeroY (smaller y), negative → below zeroY (larger y).
+    int y = zeroY - (int)roundf((deviationPct / scalePct) * halfHeight);
+    return y;
+}
+
+// Median of six values (warmup baseline)
+static float medianOfSix(float arr[]) {
+    // Copy and sort six values.
+    float sorted[6];
+    memcpy(sorted, arr, sizeof(sorted));
+    for (int i = 0; i < 5; i++) {
+        for (int j = i + 1; j < 6; j++) {
+            if (sorted[j] < sorted[i]) {
+                float tmp = sorted[i];
+                sorted[i] = sorted[j];
+                sorted[j] = tmp;
+            }
+        }
+    }
+    // Median of even-sized set = average of two middle values
+    return (sorted[2] + sorted[3]) / 2.0f;
+}
+
+// Called from NimBLE callback context — must be lightweight
+void Ui::updateRatioTrend(const RadiaCode::Reading& r, uint32_t nowMs) {
+    // Gate 1: reading must be valid
+    if (!r.valid) return;
+    // Gate 2: floats must be valid
+    if (!isfinite(r.uSvPerHour) || !isfinite(r.cps)) return;
+    // Gate 3: non-negative dose
+    if (r.uSvPerHour < 0.0f) return;
+    // Gate 4: CPS above minimum
+    if (r.cps < MIN_VALID_CPS) return;
+
+    const float nsvPerHour = r.uSvPerHour * 1000.0f;
+
+    // Initialize bin if needed
+    if (ratioBinStartMs_ == 0) {
+        ratioBinStartMs_ = nowMs;
+    }
+
+    // Accumulate sums
+    ratioDoseSum_ += nsvPerHour;
+    ratioCpsSum_ += r.cps;
+    ratioBinSamples_++;
+    ratioLastReadingMs_ = nowMs;
+
+    // Check bin completion (unsigned diff is rollover-safe)
+    if ((uint32_t)(nowMs - ratioBinStartMs_) >= RATIO_BIN_MS) {
+        finishRatioBin(nowMs);
+    }
+}
+
+void Ui::finishRatioBin(uint32_t nowMs) {
+    bool valid = (ratioBinSamples_ >= MIN_SAMPLES_PER_BIN) && (ratioCpsSum_ > 0.0f);
+    float ratio = NAN;
+
+    if (valid) {
+        ratio = ratioDoseSum_ / ratioCpsSum_;
+        // Validate computed ratio
+        if (!isfinite(ratio) || ratio <= 0.0f) {
+            valid = false;
+        }
+    }
+
+    insertRatioPoint(ratio, valid);
+
+    // Reset bin accumulator
+    ratioDoseSum_ = 0.0f;
+    ratioCpsSum_ = 0.0f;
+    ratioBinSamples_ = 0;
+    ratioBinStartMs_ = 0;
+
+    // Baseline management
+    if (valid) {
+        if (!ratioBaselineValid_) {
+            // Warmup phase: collect 6 bins for median baseline
+            if (ratioWarmupCount_ < BASELINE_WARMUP_BINS) {
+                ratioWarmup_[ratioWarmupCount_++] = ratio;
+                if (ratioWarmupCount_ >= BASELINE_WARMUP_BINS) {
+                    ratioBaseline_ = medianOfSix(ratioWarmup_);
+                    if (isfinite(ratioBaseline_) && ratioBaseline_ > 0.0f) {
+                        ratioBaselineValid_ = true;
+                        ratioChartDirty_ = true;  // new baseline → redraw
+                    }
+                }
+            }
+        } else {
+            // Adaptive baseline update with contamination protection
+            float provisional = calculateDeviationPercent(ratio, ratioBaseline_);
+            if (fabsf(provisional) <= BASELINE_UPDATE_LIMIT_PCT) {
+                ratioBaseline_ += BASELINE_ALPHA * (ratio - ratioBaseline_);
+            }
+            ratioCurrentDeviationPct_ = calculateDeviationPercent(ratio, ratioBaseline_);
+            ratioChartDirty_ = true;
+        }
+    } else {
+        // Invalid bin: mark chart dirty so gap is visible
+        ratioChartDirty_ = true;
+    }
+
+    // Debug logging
+    if (cfg::RATIO_DEBUG_LOG && valid) {
+        Serial.printf("[RATIO] raw=%.3f baseline=%.3f dev=%+.1f%% samples=%u\n",
+            ratio, ratioBaseline_, ratioCurrentDeviationPct_, ratioBinSamples_);
+    }
+}
+
+void Ui::insertRatioPoint(float ratio, bool valid) {
+    // Thread-safe write to circular buffer
+    portENTER_CRITICAL(&ratioMux_);
+
+    size_t idx = ratioWriteIndex_;
+    ratioRaw_[idx] = ratio;
+    ratioValid_[idx] = valid;
+    ratioWriteIndex_ = (idx + 1) % RATIO_POINT_COUNT;
+    if (ratioCount_ < RATIO_POINT_COUNT) {
+        ratioCount_++;
+    }
+
+    portEXIT_CRITICAL(&ratioMux_);
+    ratioChartDirty_ = true;
+}
+
+void Ui::renderRatioTrend() {
+    // Determine current display state
+    bool isStale = (ratioLastReadingMs_ > 0) &&
+                     ((uint32_t)(millis() - ratioLastReadingMs_) >= RATIO_STALE_MS);
+    bool rcReady = rcState_ == RadiaCode::State::Ready;
+    bool drawChart = false;
+
+    // Clear screen
+    tft.fillScreen(COL_BG);
+
+    // Title row (y=14)
+    tft.setTextSize(1);
+    tft.setTextColor(COL_DIM, COL_BG);
+    tft.setCursor(3, 14);
+    tft.print("D/C TREND");
+
+    // Window label (top-right)
+    tft.setCursor(137, 14);
+    tft.print("5m");
+
+    if (ratioLastReadingMs_ == 0) {
+        // No data yet
+        tft.setTextColor(COL_DIM, COL_BG);
+        tft.setTextSize(1);
+        tft.setCursor(62, 14);
+        tft.print("NO DATA");
+        // Draw zero line only
+        const int chartX = 3, chartY = 27, chartW = 154, chartH = 39;
+        const int zeroY = chartY + chartH / 2;
+        tft.setTextColor(COL_DIM, COL_BG);
+        tft.drawFastHLine(chartX, zeroY, chartW, COL_DIM);
+        return;
+    }
+
+    if (!rcReady) {
+        // RadiaCode disconnected
+        tft.setTextColor(COL_AMBER, COL_BG);
+        tft.setTextSize(1);
+        tft.setCursor(62, 14);
+        tft.print("NO RC");
+        drawChart = true;
+    } else if (!ratioBaselineValid_) {
+        // Warmup state: CAL N/6
+        char warmupBuf[16];
+        snprintf(warmupBuf, sizeof(warmupBuf), "CAL %zu/%d",
+                  ratioWarmupCount_, (int)BASELINE_WARMUP_BINS);
+        tft.setTextColor(COL_AMBER, COL_BG);
+        tft.setTextSize(1);
+        tft.setCursor(62, 14);
+        tft.print(warmupBuf);
+        drawChart = true;
+    } else if (isStale) {
+        tft.setTextColor(COL_DIM, COL_BG);
+        tft.setTextSize(1);
+        tft.setCursor(62, 14);
+        tft.print("STALE");
+        drawChart = true;
+    } else {
+        // Normal state: show current deviation
+        float devPct = ratioCurrentDeviationPct_;
+        char devBuf[16];
+        if (fabsf(devPct) < 9.95f)
+            snprintf(devBuf, sizeof(devBuf), "%+.1f%%", devPct);
+        else
+            snprintf(devBuf, sizeof(devBuf), "%+.0f%%", devPct);
+        // Clamp display to ±999%
+        if (devPct > 999.0f) {
+            strcpy(devBuf, ">+999%");
+        } else if (devPct < -999.0f) {
+            strcpy(devBuf, "<-999%");
+        }
+        tft.setTextColor(COL_FG, COL_BG);
+        tft.setTextSize(1);
+        tft.setCursor(62, 14);
+        tft.print(devBuf);
+        drawChart = true;
+    }
+
+    if (drawChart) {
+    const int chartX = 3;
+    const int chartY = 27;
+    const int chartW = 154;
+    const int chartH = 39;
+    const int zeroY = chartY + chartH / 2;  // y=46
+    const int halfHeight = (chartH - 1) / 2;
+
+    // Compute scale from valid points
+    float maxAbsDev = MIN_GRAPH_SCALE_PCT;
+    {
+        portENTER_CRITICAL(&ratioMux_);
+        for (size_t i = 0; i < ratioCount_; i++) {
+            size_t idx = ratioWriteIndex_ != 0
+                ? (ratioWriteIndex_ + i) % RATIO_POINT_COUNT
+                : i;
+            if (ratioValid_[idx]) {
+                float d = calculateDeviationPercent(ratioRaw_[idx], ratioBaseline_);
+                if (fabsf(d) > maxAbsDev) maxAbsDev = fabsf(d);
+            }
+        }
+        portEXIT_CRITICAL(&ratioMux_);
+    }
+    // Target scale with 15% padding, clamped
+    float targetScalePct = constrain(maxAbsDev * 1.15f, MIN_GRAPH_SCALE_PCT, MAX_GRAPH_SCALE_PCT);
+    // Smooth scale transitions
+    ratioDisplayScalePct_ = 0.85f * ratioDisplayScalePct_ + 0.15f * targetScalePct;
+    float scale = ratioDisplayScalePct_;
+
+    // Only redraw chart when dirty
+    if (forceFullRedraw_ || ratioChartDirty_) {
+        tft.fillRect(chartX, chartY, chartW, chartH, COL_BG);
+
+        // Zero line
+        tft.setTextColor(COL_DIM, COL_BG);
+        tft.drawFastHLine(chartX, zeroY, chartW, COL_DIM);
+
+        // Draw sparkline segments
+        drawRatioSparkline(chartX, chartY, chartW, chartH, zeroY, halfHeight, scale);
+
+        ratioChartDirty_ = false;
+    }
+    } // if (drawChart)
+
+    // Footer labels (y=70) — always drawn
+    tft.setTextSize(1);
+    tft.setTextColor(COL_DIM, COL_BG);
+    tft.setCursor(3, 70);
+    tft.print("-5m");
+    tft.setCursor(139, 70);
+    tft.print("now");
+}
+
+void Ui::drawRatioSparkline(int chartX, int chartY, int chartW, int chartH,
+                              int zeroY, int halfHeight, float scalePct) {
+    // Snapshot the buffer under spinlock to avoid cross-core races
+    float localRaw[RATIO_POINT_COUNT];
+    bool localValid[RATIO_POINT_COUNT];
+    size_t localCount;
+    size_t localWriteIndex;
+
+    portENTER_CRITICAL(&ratioMux_);
+    memcpy(localRaw, ratioRaw_, sizeof(localRaw));
+    memcpy(localValid, ratioValid_, sizeof(localValid));
+    localCount = ratioCount_;
+    localWriteIndex = ratioWriteIndex_;
+    portEXIT_CRITICAL(&ratioMux_);
+
+    if (localCount == 0) return;
+
+    // Determine the starting index for right-aligned partial buffer
+    size_t startIdx;
+    if (localCount < RATIO_POINT_COUNT) {
+        // Right-align: the first visible point corresponds to the oldest data
+        startIdx = (localWriteIndex - localCount + RATIO_POINT_COUNT) % RATIO_POINT_COUNT;
+    } else {
+        // Buffer full: oldest point is the one just after the write index
+        startIdx = (localWriteIndex + 1) % RATIO_POINT_COUNT;
+    }
+
+    // Previous point tracking for segment drawing
+    bool hadPrev = false;
+    int prevX = 0, prevY = 0;
+    float prevDev = 0;
+
+    for (size_t i = 0; i < localCount; i++) {
+        size_t idx = (startIdx + i) % RATIO_POINT_COUNT;
+        if (!localValid[idx]) {
+            hadPrev = false;
+            continue;
+        }
+
+        // Map to x-coordinate
+        int x = chartX + (int)roundf((float)i * (chartW - 1) / (RATIO_POINT_COUNT - 1));
+
+        // Compute deviation for this point
+        float devPct = calculateDeviationPercent(localRaw[idx], ratioBaseline_);
+        int y = zeroY - (int)roundf((devPct / scalePct) * halfHeight);
+        y = constrain(y, chartY, chartY + chartH - 1);
+
+        // Draw segment from previous point
+        if (hadPrev) {
+            // Determine segment color (based on current point)
+            uint16_t segColor = (devPct > RATIO_NEUTRAL_PCT) ? COL_GREEN :
+                                 (devPct < -RATIO_NEUTRAL_PCT) ? COL_RED : COL_FG;
+
+            // Check for zero crossing: if prev and current have different signs,
+            // draw two segments with different colors
+            if ((prevDev > RATIO_NEUTRAL_PCT) != (devPct > RATIO_NEUTRAL_PCT) ||
+                  (prevDev < -RATIO_NEUTRAL_PCT) != (devPct < -RATIO_NEUTRAL_PCT)) {
+                // Interpolate zero-crossing x
+                float t = fabsf(prevDev) / (fabsf(prevDev) + fabsf(devPct));
+                int crossX = prevX + (int)roundf(t * (x - prevX));
+
+                // Draw pre-crossing segment
+                uint16_t c1 = (prevDev > RATIO_NEUTRAL_PCT) ? COL_GREEN : COL_RED;
+                tft.drawLine(prevX, prevY, crossX, zeroY, c1);
+                // Draw post-crossing segment
+                uint16_t c2 = (devPct > RATIO_NEUTRAL_PCT) ? COL_GREEN : COL_RED;
+                tft.drawLine(crossX, zeroY, x, y, c2);
+            } else {
+                tft.drawLine(prevX, prevY, x, y, segColor);
+            }
+        }
+
+        hadPrev = true;
+        prevX = x;
+        prevY = y;
+        prevDev = devPct;
+    }
+
+    // Draw newest point as a small dot
+    if (hadPrev) {
+        tft.fillCircle(prevX, prevY, 2, COL_FG);
     }
 }

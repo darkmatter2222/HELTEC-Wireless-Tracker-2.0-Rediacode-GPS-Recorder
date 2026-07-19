@@ -7,7 +7,7 @@
 
 # ----- Firmware secrets -----
 src/secrets.h
-
+copilot-dgx.bat
 # ----- API / web .env files (contain real credentials) -----
 api/**/.env
 web/**/.env

@@ -15,10 +15,11 @@ public:
         SCREEN_GPS,
         SCREEN_STORAGE,
         SCREEN_DOSE,
+        SCREEN_RATIO_TREND,
         SCREEN_LIFETIME,
         SCREEN_LIFETIME2,
         SCREEN_PICKER,
-        SCREEN_NORMAL_COUNT = SCREEN_PICKER, // STATS/GPS/STORAGE/DOSE/LIFETIME/LIFETIME2 cycle
+        SCREEN_NORMAL_COUNT = SCREEN_PICKER, // STATS/GPS/STORAGE/DOSE/RATIO_TREND/LIFETIME/LIFETIME2 cycle
     };
 
     void begin();
@@ -69,6 +70,16 @@ private:
     void renderGps();
     void renderStorage();
     void renderDose();
+    void renderRatioTrend();
+    // D/C Trend helpers
+    void updateRatioTrend(const RadiaCode::Reading& r, uint32_t nowMs);
+    void finishRatioBin(uint32_t nowMs);
+    void insertRatioPoint(float ratio, bool valid);
+    float calculateDosePerCount(float uSvPerHour, float cps);
+    float calculateDeviationPercent(float ratio, float baseline);
+    int mapRatioDeviationToY(float deviationPct, float scalePct, int zeroY, int halfHeight);
+    void drawRatioSparkline(int chartX, int chartY, int chartW, int chartH,
+                             int zeroY, int halfHeight, float scalePct);
     void renderLifetime();
     void renderLifetime2();
     void renderPicker();
@@ -103,4 +114,45 @@ private:
     int    pickerCursor_ = 0;
     String pickedAddr_;
     uint8_t pickedAddrType_ = 0;
+
+    // ---- D/C Trend state (5-minute circular buffer) ----
+    static constexpr uint32_t RATIO_BIN_MS = 5000;
+    static constexpr size_t RATIO_POINT_COUNT = 60;
+    static constexpr size_t BASELINE_WARMUP_BINS = 6;
+    static constexpr uint16_t MIN_SAMPLES_PER_BIN = 3;
+    static constexpr float MIN_VALID_CPS = 0.25f;
+    static constexpr float BASELINE_ALPHA = 0.0083f;
+    static constexpr float BASELINE_UPDATE_LIMIT_PCT = 25.0f;
+    static constexpr float RATIO_NEUTRAL_PCT = 1.0f;
+    static constexpr float MIN_GRAPH_SCALE_PCT = 10.0f;
+    static constexpr float MAX_GRAPH_SCALE_PCT = 100.0f;
+    static constexpr uint32_t RATIO_STALE_MS = 10000;
+    static constexpr float MAX_PLAUSIBLE_RATIO = 1000.0f;
+
+    // Bin accumulator
+    float  ratioDoseSum_ = 0.0f;
+    float  ratioCpsSum_ = 0.0f;
+    uint16_t ratioBinSamples_ = 0;
+    uint32_t ratioBinStartMs_ = 0;
+    uint32_t ratioLastReadingMs_ = 0;
+
+    // Circular buffer: 60 completed bins
+    float ratioRaw_[RATIO_POINT_COUNT] = {};
+    bool  ratioValid_[RATIO_POINT_COUNT] = {};
+    size_t ratioWriteIndex_ = 0;
+    size_t ratioCount_ = 0;
+
+    // Baseline
+    float ratioWarmup_[BASELINE_WARMUP_BINS] = {};
+    size_t ratioWarmupCount_ = 0;
+    bool  ratioBaselineValid_ = false;
+    float ratioBaseline_ = 0.0f;
+    float ratioCurrentDeviationPct_ = 0.0f;
+
+    // Graph scale
+    float ratioDisplayScalePct_ = MIN_GRAPH_SCALE_PCT;
+
+    // Redraw & thread safety
+    bool  ratioChartDirty_ = true;
+    portMUX_TYPE ratioMux_ = portMUX_INITIALIZER_UNLOCKED;
 };
