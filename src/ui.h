@@ -116,8 +116,8 @@ private:
     String pickedAddr_;
     uint8_t pickedAddrType_ = 0;
 
-    // ---- D/C Trend state (5-minute circular buffer) ----
-    static constexpr uint32_t RATIO_BIN_MS = 5000;
+    // ---- D/C Trend state (1-minute circular buffer) ----
+    static constexpr uint32_t RATIO_BIN_MS = 1000; // 1-second bins → 60 bins × 1s = 1-minute window
     static constexpr size_t RATIO_POINT_COUNT = 60;
     static constexpr size_t BASELINE_WARMUP_BINS = 6;
     static constexpr uint16_t MIN_SAMPLES_PER_BIN = 3;

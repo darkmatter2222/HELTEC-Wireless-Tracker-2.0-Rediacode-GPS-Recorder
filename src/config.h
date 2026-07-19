@@ -132,7 +132,7 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "1.0.2";
+constexpr const char* FW_VERSION = "1.0.3";
 // D/C trend debug logging — logs a single line per 5-second bin completion.
 // Keep false in production to avoid serial spam; enable for field diagnostics.
 constexpr bool     RATIO_DEBUG_LOG = false;

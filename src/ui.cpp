@@ -976,8 +976,8 @@ void Ui::insertRatioPoint(float ratio, bool valid) {
 // Field indices for D/C TREND: 38-44 (indices 0-37 used by other screens)
 //   38: "D/C TREND" title
 //   39: status/deviation display (mutable — changes each bin)
-//   40: "5m" window label (static)
-//   41: "-5m" footer (static)
+//   40: "1m" window label (static)
+//   41: "-1m" footer (static)
 //   42: "now" footer (static)
 //   43: zero line redraw flag (internal, not a field)
 //   44: reserved
@@ -991,8 +991,8 @@ void Ui::renderRatioTrend() {
     // Title (field 38): always same text, field() skips after first draw
     field(38, 3, 14, 60, 8, "D/C TREND", COL_DIM, COL_BG, 1);
 
-    // Window label (field 40): static "5m"
-    field(40, 137, 14, 20, 8, "5m", COL_DIM, COL_BG, 1);
+    // Window label (field 40): static "1m"
+    field(40, 137, 14, 20, 8, "1m", COL_DIM, COL_BG, 1);
 
     // ---- Mutable status/deviation display (field 39) ----
     if (ratioLastReadingMs_ == 0) {
@@ -1035,7 +1035,7 @@ void Ui::renderRatioTrend() {
     }
 
     // ---- Footer labels (static, cached) ----
-    field(41, 3, 70, 22, 8, "-5m", COL_DIM, COL_BG, 1);
+    field(41, 3, 70, 22, 8, "-1m", COL_DIM, COL_BG, 1);
     field(42, 139, 70, 18, 8, "now", COL_DIM, COL_BG, 1);
 }
 
@@ -1096,13 +1096,43 @@ void Ui::drawRatioSparkline(int chartX, int chartY, int chartW, int chartH,
 
     if (localCount == 0) return;
 
+    // ---- Compute population σ from valid raw ratio values ----
+    float meanR = 0.0f;
+    size_t validCount = 0;
+    for (size_t i = 0; i < RATIO_POINT_COUNT; i++) {
+        if (localValid[i]) {
+            meanR += localRaw[i];
+            validCount++;
+        }
+    }
+    if (validCount > 0) meanR /= validCount;
+
+    float variance = 0.0f;
+    for (size_t i = 0; i < RATIO_POINT_COUNT; i++) {
+        if (localValid[i]) {
+            float d = localRaw[i] - meanR;
+            variance += d * d;
+        }
+    }
+    if (validCount > 0) variance /= validCount;
+    float sigmaR = sqrtf(variance);
+    // Convert σ to percentage-of-baseline
+    float sigmaPct = ratioBaseline_ > 0.0f ? (sigmaR / ratioBaseline_) * 100.0f : 10.0f;
+    if (sigmaPct < 1.0f) sigmaPct = 1.0f;  // floor to prevent classification collapse
+
+    // σ-zone classification: |z|≤1→GREEN, 1<|z|≤2→AMBER, |z|>2→RED
+    auto zoneColor = [sigmaPct](float devPct) -> uint16_t {
+        float z = fabsf(devPct) / sigmaPct;
+        if (z <= 1.0f) return COL_GREEN;
+        if (z <= 2.0f) return COL_AMBER;
+        return COL_RED;
+    };
+
     // Determine the starting index for right-aligned partial buffer
     size_t startIdx;
     if (localCount < RATIO_POINT_COUNT) {
-        // Right-align: the first visible point corresponds to the oldest data
         startIdx = (localWriteIndex - localCount + RATIO_POINT_COUNT) % RATIO_POINT_COUNT;
     } else {
-        // Buffer full: oldest point is the one just after the write index
         startIdx = (localWriteIndex + 1) % RATIO_POINT_COUNT;
     }
 
@@ -1128,24 +1158,18 @@ void Ui::drawRatioSparkline(int chartX, int chartY, int chartW, int chartH,
 
         // Draw segment from previous point
         if (hadPrev) {
-            // Determine segment color (based on current point)
-            uint16_t segColor = (devPct > RATIO_NEUTRAL_PCT) ? COL_GREEN :
-                                 (devPct < -RATIO_NEUTRAL_PCT) ? COL_RED : COL_FG;
+            uint16_t segColor = zoneColor(devPct);
 
-            // Check for zero crossing: if prev and current have different signs,
-            // draw two segments with different colors
-            if ((prevDev > RATIO_NEUTRAL_PCT) != (devPct > RATIO_NEUTRAL_PCT) ||
-                  (prevDev < -RATIO_NEUTRAL_PCT) != (devPct < -RATIO_NEUTRAL_PCT)) {
-                // Interpolate zero-crossing x
-                float t = fabsf(prevDev) / (fabsf(prevDev) + fabsf(devPct));
+            // If the σ-zone changed between prev and current, split at zone boundary
+            uint16_t prevColor = zoneColor(prevDev);
+            if (prevColor != segColor) {
+                // Interpolate zone-boundary crossing point
+                float absPrev = fabsf(prevDev);
+                float absCurr = fabsf(devPct);
+                float t = absPrev / (absPrev + absCurr);
                 int crossX = prevX + (int)roundf(t * (x - prevX));
-
-                // Draw pre-crossing segment
-                uint16_t c1 = (prevDev > RATIO_NEUTRAL_PCT) ? COL_GREEN : COL_RED;
-                tft.drawLine(prevX, prevY, crossX, zeroY, c1);
-                // Draw post-crossing segment
-                uint16_t c2 = (devPct > RATIO_NEUTRAL_PCT) ? COL_GREEN : COL_RED;
-                tft.drawLine(crossX, zeroY, x, y, c2);
+                tft.drawLine(prevX, prevY, crossX, zeroY, prevColor);
+                tft.drawLine(crossX, zeroY, x, y, segColor);
             } else {
                 tft.drawLine(prevX, prevY, x, y, segColor);
             }
@@ -1157,8 +1181,5 @@ void Ui::drawRatioSparkline(int chartX, int chartY, int chartW, int chartH,
         prevDev = devPct;
     }
 
-    // Draw newest point as a small dot
-    if (hadPrev) {
-        tft.fillCircle(prevX, prevY, 2, COL_FG);
-    }
+    // White position indicator dot removed per user request
 }

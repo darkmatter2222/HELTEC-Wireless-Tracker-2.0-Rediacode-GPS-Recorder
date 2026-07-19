@@ -1,7 +1,7 @@
 // Native unit tests for D/C Trend (dose-per-count ratio sparkline)
 //
-// Context: The trend screen displays a 5-minute sparkline of the dose-per-count
-// ratio relative to an adaptive baseline. 5-second bins aggregate dose-rate and
+// Context: The trend screen displays a 1-minute sparkline of the dose-per-count
+// ratio relative to an adaptive baseline. 1-second bins aggregate dose-rate and
 // CPS, baseline is initialized by median of 6 warmup bins, then updated via EMA.
 //
 // Run:  pio test -e native
@@ -15,7 +15,7 @@
 // Constants under test (must match ui.h/ui.cpp)
 // ---------------------------------------------------------------------------
 static constexpr float MIN_VALID_CPS = 0.25f;
-static constexpr uint32_t RATIO_BIN_MS = 5000;
+static constexpr uint32_t RATIO_BIN_MS = 1000;
 static constexpr size_t RATIO_POINT_COUNT = 60;
 static constexpr size_t BASELINE_WARMUP_BINS = 6;
 static constexpr uint16_t MIN_SAMPLES_PER_BIN = 3;
@@ -311,7 +311,104 @@ void test_partial_buffer_right_alignment(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Missing bin / gap tests
+// σ (standard deviation) zone coloring tests
+// ---------------------------------------------------------------------------
+
+// Replicate the σ computation from drawRatioSparkline
+static float computeSigma(float buf[60], bool valid[60], size_t count) {
+    float mean = 0.0f;
+    size_t n = 0;
+    for (size_t i = 0; i < 60; i++) {
+        if (valid[i]) { mean += buf[i]; n++; }
+    }
+    if (n == 0) return 0.0f;
+    mean /= n;
+    float var = 0.0f;
+    for (size_t i = 0; i < 60; i++) {
+        if (valid[i]) { float d = buf[i] - mean; var += d * d; }
+    }
+    return sqrtf(var / n);
+}
+
+void test_sigma_all_same_values(void) {
+    float buf[60] = {};
+    bool valid[60] = {};
+    for (int i = 0; i < 10; i++) {
+        buf[i] = 10.0f;
+        valid[i] = true;
+    }
+    float sigma = computeSigma(buf, valid, 10);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, sigma);
+}
+
+void test_sigma_known_variance(void) {
+    // Values: 8, 9, 10, 11, 12 → mean=10, var=2.0, σ≈1.414
+    float buf[60] = {};
+    bool valid[60] = {};
+    float vals[] = {8.0f, 9.0f, 10.0f, 11.0f, 12.0f};
+    for (int i = 0; i < 5; i++) {
+        buf[i] = vals[i];
+        valid[i] = true;
+    }
+    float sigma = computeSigma(buf, valid, 5);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 1.414f, sigma);
+}
+
+void test_sigma_single_value(void) {
+    float buf[60] = {};
+    bool valid[60] = {};
+    buf[0] = 42.0f;
+    valid[0] = true;
+    float sigma = computeSigma(buf, valid, 1);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, sigma);
+}
+
+// σ-zone classification: |z|≤1→GREEN, 1<|z|≤2→AMBER, |z|>2→RED
+static uint16_t zoneColor(float devPct, float sigmaPct) {
+    float z = fabsf(devPct) / (sigmaPct < 1.0f ? 1.0f : sigmaPct);
+    if (z <= 1.0f) return 0x07E0; // COL_GREEN
+    if (z <= 2.0f) return 0x053F; // COL_AMBER
+    return 0x001F; // COL_RED
+}
+
+void test_zone_green_at_zero(void) {
+    TEST_ASSERT_EQUAL_UINT16(0x07E0, zoneColor(0.0f, 5.0f));
+}
+
+void test_zone_green_within_1sigma(void) {
+    // σ_pct = 5.0, dev = ±5 → z = 1.0 → GREEN
+    TEST_ASSERT_EQUAL_UINT16(0x07E0, zoneColor(5.0f, 5.0f));
+    TEST_ASSERT_EQUAL_UINT16(0x07E0, zoneColor(-5.0f, 5.0f));
+}
+
+void test_zone_amber_between_1_and_2sigma(void) {
+    // σ_pct = 5.0, dev = ±9 → z = 1.8 → AMBER
+    TEST_ASSERT_EQUAL_UINT16(0x053F, zoneColor(9.0f, 5.0f));
+    TEST_ASSERT_EQUAL_UINT16(0x053F, zoneColor(-9.0f, 5.0f));
+}
+
+void test_zone_red_above_2sigma(void) {
+    // σ_pct = 5.0, dev = ±12 → z = 2.4 → RED
+    TEST_ASSERT_EQUAL_UINT16(0x001F, zoneColor(12.0f, 5.0f));
+    TEST_ASSERT_EQUAL_UINT16(0x001F, zoneColor(-12.0f, 5.0f));
+}
+
+void test_zone_at_exact_1sigma_green(void) {
+    // z = 1.0 exactly → GREEN (boundary inclusive)
+    TEST_ASSERT_EQUAL_UINT16(0x07E0, zoneColor(5.0f, 5.0f));
+}
+
+void test_zone_at_exact_2sigma_amber(void) {
+    // z = 2.0 exactly → AMBER (boundary inclusive)
+    TEST_ASSERT_EQUAL_UINT16(0x053F, zoneColor(10.0f, 5.0f));
+}
+
+void test_zone_sigma_floor(void) {
+    // σPct floored at 1.0
+    TEST_ASSERT_EQUAL_UINT16(0x07E0, zoneColor(0.5f, 0.3f)); // σ=0.3 → floored to 1.0, z=0.5 → GREEN
+    TEST_ASSERT_EQUAL_UINT16(0x053F, zoneColor(1.5f, 0.3f)); // z=1.5 → AMBER
+    TEST_ASSERT_EQUAL_UINT16(0x001F, zoneColor(3.0f, 0.3f)); // z=3.0 → RED
+}
 // ---------------------------------------------------------------------------
 
 void test_insufficient_samples_gap(void) {
@@ -354,7 +451,7 @@ void test_negative_deviation_maps_below_zero(void) {
     int halfHeight = 19;
     float scalePct = 10.0f;
     int y = mapRatioDeviationToY(-5.0f, scalePct, zeroY, halfHeight);
-    // y = 46 - (-5/10)*19 = 46 + 9.5 = 55.5 => 56 (rounded)
+    // y = 46 - (-5/10)*19 = 46 + 9.5 = 55.5 => 55 (truncated)
     TEST_ASSERT_EQUAL_INT(55, y);
     TEST_ASSERT_TRUE(y > zeroY);  // below zero line
 }
@@ -392,9 +489,9 @@ void test_extreme_negative_clipped_to_bottom(void) {
 void test_bin_completion_before_rollover(void) {
     // Normal case: two timestamps close together, no rollover involved
     uint32_t startMs = 1000;
-    uint32_t nowMs = 6000;
+    uint32_t nowMs = 2000;
     uint32_t elapsed = (uint32_t)(nowMs - startMs);
-    // 5000ms exactly at threshold
+    // 1000ms exactly at threshold
     TEST_ASSERT_TRUE(elapsed >= RATIO_BIN_MS);
     // Verify the subtraction is correct
     TEST_ASSERT_EQUAL_UINT(RATIO_BIN_MS, elapsed);
@@ -403,27 +500,20 @@ void test_bin_completion_before_rollover(void) {
 void test_bin_completion_across_rollover(void) {
     // Start just before rollover, end just after
     uint32_t startMs = UINT32_MAX - 100;  // 100ms before rollover
-    uint32_t nowMs = 4900;                   // 4900ms after rollover
-    // Unsigned subtraction: (4900 - (UINT32_MAX - 100)) wraps correctly
-    // 4900 - (0xFFFFFFFF - 100) = 4900 - 0xFFFFFF9C = 0x12D8 = 4888
-    // Hmm, that's less than 5000, so this test doesn't complete
-    // Let me use values that DO span 5000ms across rollover
-    startMs = UINT32_MAX - 100;
-    nowMs = 5100;  // 5100ms after rollover
+    uint32_t nowMs = 1200;                // 1200ms after rollover
     uint32_t elapsed = (uint32_t)(nowMs - startMs);
-    // 5100 - (UINT32_MAX - 100) = 5100 + 100 + 1 = 5201 (wrapping)
-    // Actually: 5100 - 0xFFFFFF9C = 0x1449 = 5201ms
+    // 1200 - (UINT32_MAX - 100) = 1200 + 100 + 1 = 1301ms (wrapping)
     TEST_ASSERT_TRUE(elapsed >= RATIO_BIN_MS);
     TEST_ASSERT_TRUE(elapsed > RATIO_BIN_MS);
 }
 
 void test_no_false_completion_short_elapsed(void) {
-    // Verify a bin does NOT complete at 4999ms
+    // Verify a bin does NOT complete at 999ms
     uint32_t startMs = 1000;
-    uint32_t nowMs = 5999;
+    uint32_t nowMs = 1999;
     TEST_ASSERT_FALSE((uint32_t)(nowMs - startMs) >= RATIO_BIN_MS);
-    // But at 5000ms it should complete
-    nowMs = 6000;
+    // But at 1000ms it should complete
+    nowMs = 2000;
     TEST_ASSERT_TRUE((uint32_t)(nowMs - startMs) >= RATIO_BIN_MS);
 }
 
@@ -504,5 +594,16 @@ int main(void) {
     RUN_TEST(test_scale_min_clamp);
     RUN_TEST(test_scale_max_clamp);
     RUN_TEST(test_scale_normal_range);
+    // σ-zone coloring
+    RUN_TEST(test_sigma_all_same_values);
+    RUN_TEST(test_sigma_known_variance);
+    RUN_TEST(test_sigma_single_value);
+    RUN_TEST(test_zone_green_at_zero);
+    RUN_TEST(test_zone_green_within_1sigma);
+    RUN_TEST(test_zone_amber_between_1_and_2sigma);
+    RUN_TEST(test_zone_red_above_2sigma);
+    RUN_TEST(test_zone_at_exact_1sigma_green);
+    RUN_TEST(test_zone_at_exact_2sigma_amber);
+    RUN_TEST(test_zone_sigma_floor);
     return UNITY_END();
 }
