@@ -116,13 +116,13 @@ private:
     String pickedAddr_;
     uint8_t pickedAddrType_ = 0;
 
-    // ---- D/C Trend state (1-minute circular buffer) ----
-    static constexpr uint32_t RATIO_BIN_MS = 1000; // 1-second bins → 60 bins × 1s = 1-minute window
-    static constexpr size_t RATIO_POINT_COUNT = 60;
+    // ---- D/C Trend state (5-minute circular buffer) ----
+    static constexpr uint32_t RATIO_BIN_MS = 1000; // 1-second bins → 300 bins × 1s = 5-minute window
+    static constexpr size_t RATIO_POINT_COUNT = 300;
     static constexpr size_t BASELINE_WARMUP_BINS = 6;
     static constexpr uint16_t MIN_SAMPLES_PER_BIN = 3;
     static constexpr float MIN_VALID_CPS = 0.25f;
-    static constexpr float BASELINE_ALPHA = 0.0083f;
+    static constexpr float BASELINE_ALPHA = 0.003f;
     static constexpr float BASELINE_UPDATE_LIMIT_PCT = 25.0f;
     static constexpr float RATIO_NEUTRAL_PCT = 1.0f;
     static constexpr float MIN_GRAPH_SCALE_PCT = 10.0f;
@@ -137,7 +137,7 @@ private:
     uint32_t ratioBinStartMs_ = 0;
     uint32_t ratioLastReadingMs_ = 0;
 
-    // Circular buffer: 60 completed bins
+    // Circular buffer: 300 completed bins
     float ratioRaw_[RATIO_POINT_COUNT] = {};
     bool  ratioValid_[RATIO_POINT_COUNT] = {};
     size_t ratioWriteIndex_ = 0;

@@ -1096,33 +1096,37 @@ void Ui::drawRatioSparkline(int chartX, int chartY, int chartW, int chartH,
 
     if (localCount == 0) return;
 
-    // ---- Compute population σ from valid raw ratio values ----
-    float meanR = 0.0f;
+    // ---- Compute population σ from valid deviation percentages ----
+    // (not from raw ratios, so σ reflects the actual spread of deviations)
     size_t validCount = 0;
+    float devPcts[RATIO_POINT_COUNT];
     for (size_t i = 0; i < RATIO_POINT_COUNT; i++) {
         if (localValid[i]) {
-            meanR += localRaw[i];
+            devPcts[validCount] = calculateDeviationPercent(localRaw[i], ratioBaseline_);
             validCount++;
         }
     }
-    if (validCount > 0) meanR /= validCount;
+    if (validCount == 0) return;
+
+    float meanDev = 0.0f;
+    for (size_t i = 0; i < validCount; i++) {
+        meanDev += devPcts[i];
+    }
+    meanDev /= validCount;
 
     float variance = 0.0f;
-    for (size_t i = 0; i < RATIO_POINT_COUNT; i++) {
-        if (localValid[i]) {
-            float d = localRaw[i] - meanR;
-            variance += d * d;
-        }
+    for (size_t i = 0; i < validCount; i++) {
+        float d = devPcts[i] - meanDev;
+        variance += d * d;
     }
-    if (validCount > 0) variance /= validCount;
-    float sigmaR = sqrtf(variance);
-    // Convert σ to percentage-of-baseline
-    float sigmaPct = ratioBaseline_ > 0.0f ? (sigmaR / ratioBaseline_) * 100.0f : 10.0f;
-    if (sigmaPct < 1.0f) sigmaPct = 1.0f;  // floor to prevent classification collapse
+    variance /= validCount;
+    float sigmaDev = sqrtf(variance);
+    // σ floor: 0.5% — small enough to let real variation drive classification
+    if (sigmaDev < 0.5f) sigmaDev = 0.5f;
 
-    // σ-zone classification: |z|≤1→GREEN, 1<|z|≤2→AMBER, |z|>2→RED
-    auto zoneColor = [sigmaPct](float devPct) -> uint16_t {
-        float z = fabsf(devPct) / sigmaPct;
+    // σ-zone classification: |z|≤1→GREEN, 1<|z|≤2→AMBER, 2<|z|≤3→RED, |z|>3→RED
+    auto zoneColor = [sigmaDev](float devPct) -> uint16_t {
+        float z = fabsf(devPct) / sigmaDev;
         if (z <= 1.0f) return COL_GREEN;
         if (z <= 2.0f) return COL_AMBER;
         return COL_RED;

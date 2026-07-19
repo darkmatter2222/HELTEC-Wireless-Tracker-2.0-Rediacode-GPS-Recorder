@@ -1,6 +1,6 @@
 // Native unit tests for D/C Trend (dose-per-count ratio sparkline)
 //
-// Context: The trend screen displays a 1-minute sparkline of the dose-per-count
+// Context: The trend screen displays a 5-minute sparkline of the dose-per-count
 // ratio relative to an adaptive baseline. 1-second bins aggregate dose-rate and
 // CPS, baseline is initialized by median of 6 warmup bins, then updated via EMA.
 //
@@ -16,10 +16,10 @@
 // ---------------------------------------------------------------------------
 static constexpr float MIN_VALID_CPS = 0.25f;
 static constexpr uint32_t RATIO_BIN_MS = 1000;
-static constexpr size_t RATIO_POINT_COUNT = 60;
+static constexpr size_t RATIO_POINT_COUNT = 300;
 static constexpr size_t BASELINE_WARMUP_BINS = 6;
 static constexpr uint16_t MIN_SAMPLES_PER_BIN = 3;
-static constexpr float BASELINE_ALPHA = 0.0083f;
+static constexpr float BASELINE_ALPHA = 0.003f;
 static constexpr float BASELINE_UPDATE_LIMIT_PCT = 25.0f;
 static constexpr float RATIO_NEUTRAL_PCT = 1.0f;
 static constexpr float MIN_GRAPH_SCALE_PCT = 10.0f;
@@ -221,27 +221,26 @@ void test_baseline_update_excluded_below_limit(void) {
 
 void test_ema_alpha_small(void) {
     // B_new = B_old + alpha * (R - B_old)
-    // With B_old = 10, R = 11, alpha = 0.0083
-    // B_new = 10 + 0.0083 * 1 = 10.0083
+    // With B_old = 10, R = 11, alpha = 0.003
+    // B_new = 10 + 0.003 * 1 = 10.003
     float baseline = 10.0f;
     float ratio = 11.0f;
     float newBaseline = baseline + BASELINE_ALPHA * (ratio - baseline);
-    TEST_ASSERT_FLOAT_WITHIN(0.001f, 10.0083f, newBaseline);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 10.003f, newBaseline);
 }
 
 void test_ema_small_alpha_slow_adaptation(void) {
     // After 100 EMA updates of ratio=11 on baseline=10:
-    // B_100 ≈ 10 + (1)*(1 - 0.9917^100) ≈ 10.58
-    // (roughly, B_n = B_0 + (R - B_0)*(1 - (1-alpha)^n))
+    // B_n = B_0 + (R - B_0)*(1 - (1-alpha)^n)
+    // With alpha=0.003: (1-0.003)^100 ≈ 0.738
+    // B_100 ≈ 10 + 1 * 0.262 = 10.262
     float baseline = 10.0f;
     for (int i = 0; i < 100; i++) {
         baseline = baseline + BASELINE_ALPHA * (11.0f - baseline);
     }
-    // (1 - alpha)^100 ≈ 0.447
-    // B_100 ≈ 10 + 1 * 0.553 = 10.553
     TEST_ASSERT_TRUE(baseline > 10.0f);
     TEST_ASSERT_TRUE(baseline < 11.0f);
-    TEST_ASSERT_FLOAT_WITHIN(0.1f, 10.55f, baseline);
+    TEST_ASSERT_FLOAT_WITHIN(0.1f, 10.26f, baseline);
 }
 
 // ---------------------------------------------------------------------------
@@ -272,24 +271,25 @@ void test_circular_buffer_rollover(void) {
     size_t writeIdx = 0;
     size_t count = 0;
 
-    // Insert 62 points (more than buffer size)
-    for (int i = 1; i <= 62; i++) {
+    // Insert 302 points (more than buffer size of 300)
+    for (int i = 1; i <= 302; i++) {
         buffer[writeIdx] = (float)i;
         valid[writeIdx] = true;
         writeIdx = (writeIdx + 1) % RATIO_POINT_COUNT;
         if (count < RATIO_POINT_COUNT) count++;
     }
-    // After 62 inserts: count should be capped at 60
+    // After 302 inserts: count should be capped at 300
     TEST_ASSERT_EQUAL_INT(RATIO_POINT_COUNT, count);
     // writeIdx should be at position 2
     TEST_ASSERT_EQUAL_INT(2, writeIdx);
-    // Oldest value should be 4 (values 1-3 were overwritten)
+    // After 302 inserts: indices 0 and 1 were overwritten by values 301 and 302.
+    // Index 3 still holds value 4.0 from insert 4 (never overwritten).
     int oldestIdx = (writeIdx + 1) % RATIO_POINT_COUNT;
     TEST_ASSERT_FLOAT_WITHIN(0.01f, 4.0f, buffer[oldestIdx]);
 }
 
 void test_partial_buffer_right_alignment(void) {
-    // With only 5 points in a 60-point buffer, the points should be
+    // With only 5 points in a 300-point buffer, the points should be
     // right-aligned so the newest data stays at the right edge.
     float buffer[RATIO_POINT_COUNT];
     bool valid[RATIO_POINT_COUNT];
@@ -304,35 +304,32 @@ void test_partial_buffer_right_alignment(void) {
     }
     // Start index for right-aligned display:
     size_t startIdx = (writeIdx - count + RATIO_POINT_COUNT) % RATIO_POINT_COUNT;
-    // writeIdx=5, count=5 => startIdx = (5-5+60)%60 = 0
+    // writeIdx=5, count=5 => startIdx = (5-5+300)%300 = 0
     TEST_ASSERT_EQUAL_INT(0, startIdx);
     // First displayed value should be 10.0
     TEST_ASSERT_FLOAT_WITHIN(0.01f, 10.0f, buffer[startIdx]);
 }
 
 // ---------------------------------------------------------------------------
-// σ (standard deviation) zone coloring tests
-// ---------------------------------------------------------------------------
-
 // Replicate the σ computation from drawRatioSparkline
-static float computeSigma(float buf[60], bool valid[60], size_t count) {
+static float computeSigma(float buf[RATIO_POINT_COUNT], bool valid[RATIO_POINT_COUNT], size_t count) {
     float mean = 0.0f;
     size_t n = 0;
-    for (size_t i = 0; i < 60; i++) {
+    for (size_t i = 0; i < RATIO_POINT_COUNT; i++) {
         if (valid[i]) { mean += buf[i]; n++; }
     }
     if (n == 0) return 0.0f;
     mean /= n;
     float var = 0.0f;
-    for (size_t i = 0; i < 60; i++) {
+    for (size_t i = 0; i < RATIO_POINT_COUNT; i++) {
         if (valid[i]) { float d = buf[i] - mean; var += d * d; }
     }
     return sqrtf(var / n);
 }
 
 void test_sigma_all_same_values(void) {
-    float buf[60] = {};
-    bool valid[60] = {};
+    float buf[RATIO_POINT_COUNT] = {};
+    bool valid[RATIO_POINT_COUNT] = {};
     for (int i = 0; i < 10; i++) {
         buf[i] = 10.0f;
         valid[i] = true;
@@ -343,8 +340,8 @@ void test_sigma_all_same_values(void) {
 
 void test_sigma_known_variance(void) {
     // Values: 8, 9, 10, 11, 12 → mean=10, var=2.0, σ≈1.414
-    float buf[60] = {};
-    bool valid[60] = {};
+    float buf[RATIO_POINT_COUNT] = {};
+    bool valid[RATIO_POINT_COUNT] = {};
     float vals[] = {8.0f, 9.0f, 10.0f, 11.0f, 12.0f};
     for (int i = 0; i < 5; i++) {
         buf[i] = vals[i];
@@ -355,8 +352,8 @@ void test_sigma_known_variance(void) {
 }
 
 void test_sigma_single_value(void) {
-    float buf[60] = {};
-    bool valid[60] = {};
+    float buf[300] = {};
+    bool valid[300] = {};
     buf[0] = 42.0f;
     valid[0] = true;
     float sigma = computeSigma(buf, valid, 1);
@@ -364,8 +361,9 @@ void test_sigma_single_value(void) {
 }
 
 // σ-zone classification: |z|≤1→GREEN, 1<|z|≤2→AMBER, |z|>2→RED
+// σ floor reduced to 0.5% to let real variation drive classification
 static uint16_t zoneColor(float devPct, float sigmaPct) {
-    float z = fabsf(devPct) / (sigmaPct < 1.0f ? 1.0f : sigmaPct);
+    float z = fabsf(devPct) / (sigmaPct < 0.5f ? 0.5f : sigmaPct);
     if (z <= 1.0f) return 0x07E0; // COL_GREEN
     if (z <= 2.0f) return 0x053F; // COL_AMBER
     return 0x001F; // COL_RED
@@ -404,10 +402,10 @@ void test_zone_at_exact_2sigma_amber(void) {
 }
 
 void test_zone_sigma_floor(void) {
-    // σPct floored at 1.0
-    TEST_ASSERT_EQUAL_UINT16(0x07E0, zoneColor(0.5f, 0.3f)); // σ=0.3 → floored to 1.0, z=0.5 → GREEN
-    TEST_ASSERT_EQUAL_UINT16(0x053F, zoneColor(1.5f, 0.3f)); // z=1.5 → AMBER
-    TEST_ASSERT_EQUAL_UINT16(0x001F, zoneColor(3.0f, 0.3f)); // z=3.0 → RED
+    // σPct floored at 0.5
+    TEST_ASSERT_EQUAL_UINT16(0x07E0, zoneColor(0.5f, 0.3f)); // σ=0.3 → floored to 0.5, z=1.0 → GREEN
+    TEST_ASSERT_EQUAL_UINT16(0x001F, zoneColor(1.5f, 0.3f)); // z=3.0 → RED (>2σ)
+    TEST_ASSERT_EQUAL_UINT16(0x001F, zoneColor(3.5f, 0.3f)); // z=7.0 → RED
 }
 // ---------------------------------------------------------------------------
 
