@@ -71,6 +71,7 @@ private:
     void renderStorage();
     void renderDose();
     void renderRatioTrend();
+    void _drawRatioChart();
     // D/C Trend helpers
     void updateRatioTrend(const RadiaCode::Reading& r, uint32_t nowMs);
     void finishRatioBin(uint32_t nowMs);

@@ -973,90 +973,80 @@ void Ui::insertRatioPoint(float ratio, bool valid) {
     ratioChartDirty_ = true;
 }
 
+// Field indices for D/C TREND: 38-44 (indices 0-37 used by other screens)
+//   38: "D/C TREND" title
+//   39: status/deviation display (mutable — changes each bin)
+//   40: "5m" window label (static)
+//   41: "-5m" footer (static)
+//   42: "now" footer (static)
+//   43: zero line redraw flag (internal, not a field)
+//   44: reserved
 void Ui::renderRatioTrend() {
     // Determine current display state
     bool isStale = (ratioLastReadingMs_ > 0) &&
                      ((uint32_t)(millis() - ratioLastReadingMs_) >= RATIO_STALE_MS);
     bool rcReady = rcState_ == RadiaCode::State::Ready;
-    bool drawChart = false;
 
-    // Clear screen
-    tft.fillScreen(COL_BG);
+    // ---- Static labels (field() caching, no flicker) ----
+    // Title (field 38): always same text, field() skips after first draw
+    field(38, 3, 14, 60, 8, "D/C TREND", COL_DIM, COL_BG, 1);
 
-    // Title row (y=14)
-    tft.setTextSize(1);
-    tft.setTextColor(COL_DIM, COL_BG);
-    tft.setCursor(3, 14);
-    tft.print("D/C TREND");
+    // Window label (field 40): static "5m"
+    field(40, 137, 14, 20, 8, "5m", COL_DIM, COL_BG, 1);
 
-    // Window label (top-right)
-    tft.setCursor(137, 14);
-    tft.print("5m");
-
+    // ---- Mutable status/deviation display (field 39) ----
     if (ratioLastReadingMs_ == 0) {
-        // No data yet
-        tft.setTextColor(COL_DIM, COL_BG);
-        tft.setTextSize(1);
-        tft.setCursor(62, 14);
-        tft.print("NO DATA");
-        // Draw zero line only
+        field(39, 62, 14, 74, 8, "NO DATA", COL_DIM, COL_BG, 1);
+        // Draw zero line only (no chart)
         const int chartX = 3, chartY = 27, chartW = 154, chartH = 39;
         const int zeroY = chartY + chartH / 2;
-        tft.setTextColor(COL_DIM, COL_BG);
-        tft.drawFastHLine(chartX, zeroY, chartW, COL_DIM);
-        return;
-    }
-
-    if (!rcReady) {
-        // RadiaCode disconnected
-        tft.setTextColor(COL_AMBER, COL_BG);
-        tft.setTextSize(1);
-        tft.setCursor(62, 14);
-        tft.print("NO RC");
-        drawChart = true;
+        if (forceFullRedraw_ || ratioChartDirty_) {
+            tft.fillRect(chartX, chartY, chartW, chartH, COL_BG);
+            tft.drawFastHLine(chartX, zeroY, chartW, COL_DIM);
+            ratioChartDirty_ = false;
+        }
+    } else if (!rcReady) {
+        field(39, 62, 14, 74, 8, "NO RC", COL_AMBER, COL_BG, 1);
+        _drawRatioChart();
     } else if (!ratioBaselineValid_) {
-        // Warmup state: CAL N/6
         char warmupBuf[16];
         snprintf(warmupBuf, sizeof(warmupBuf), "CAL %zu/%d",
                   ratioWarmupCount_, (int)BASELINE_WARMUP_BINS);
-        tft.setTextColor(COL_AMBER, COL_BG);
-        tft.setTextSize(1);
-        tft.setCursor(62, 14);
-        tft.print(warmupBuf);
-        drawChart = true;
+        field(39, 62, 14, 74, 8, warmupBuf, COL_AMBER, COL_BG, 1);
+        _drawRatioChart();
     } else if (isStale) {
-        tft.setTextColor(COL_DIM, COL_BG);
-        tft.setTextSize(1);
-        tft.setCursor(62, 14);
-        tft.print("STALE");
-        drawChart = true;
+        field(39, 62, 14, 74, 8, "STALE", COL_DIM, COL_BG, 1);
+        _drawRatioChart();
     } else {
-        // Normal state: show current deviation
+        // Normal: show current deviation
         float devPct = ratioCurrentDeviationPct_;
         char devBuf[16];
         if (fabsf(devPct) < 9.95f)
             snprintf(devBuf, sizeof(devBuf), "%+.1f%%", devPct);
         else
             snprintf(devBuf, sizeof(devBuf), "%+.0f%%", devPct);
-        // Clamp display to ±999%
         if (devPct > 999.0f) {
             strcpy(devBuf, ">+999%");
         } else if (devPct < -999.0f) {
             strcpy(devBuf, "<-999%");
         }
-        tft.setTextColor(COL_FG, COL_BG);
-        tft.setTextSize(1);
-        tft.setCursor(62, 14);
-        tft.print(devBuf);
-        drawChart = true;
+        field(39, 62, 14, 74, 8, devBuf, COL_FG, COL_BG, 1);
+        _drawRatioChart();
     }
 
-    if (drawChart) {
+    // ---- Footer labels (static, cached) ----
+    field(41, 3, 70, 22, 8, "-5m", COL_DIM, COL_BG, 1);
+    field(42, 139, 70, 18, 8, "now", COL_DIM, COL_BG, 1);
+}
+
+// Chart drawer — called when a chart should be displayed
+// Only clears and redraws the chart rectangle when dirty
+void Ui::_drawRatioChart() {
     const int chartX = 3;
     const int chartY = 27;
     const int chartW = 154;
     const int chartH = 39;
-    const int zeroY = chartY + chartH / 2;  // y=46
+    const int zeroY = chartY + chartH / 2;
     const int halfHeight = (chartH - 1) / 2;
 
     // Compute scale from valid points
@@ -1078,30 +1068,15 @@ void Ui::renderRatioTrend() {
     float targetScalePct = constrain(maxAbsDev * 1.15f, MIN_GRAPH_SCALE_PCT, MAX_GRAPH_SCALE_PCT);
     // Smooth scale transitions
     ratioDisplayScalePct_ = 0.85f * ratioDisplayScalePct_ + 0.15f * targetScalePct;
-    float scale = ratioDisplayScalePct_;
 
-    // Only redraw chart when dirty
+    // Only redraw when dirty (new bin arrived or screen just entered)
     if (forceFullRedraw_ || ratioChartDirty_) {
         tft.fillRect(chartX, chartY, chartW, chartH, COL_BG);
-
-        // Zero line
-        tft.setTextColor(COL_DIM, COL_BG);
         tft.drawFastHLine(chartX, zeroY, chartW, COL_DIM);
-
-        // Draw sparkline segments
-        drawRatioSparkline(chartX, chartY, chartW, chartH, zeroY, halfHeight, scale);
-
+        drawRatioSparkline(chartX, chartY, chartW, chartH, zeroY, halfHeight,
+                            ratioDisplayScalePct_);
         ratioChartDirty_ = false;
     }
-    } // if (drawChart)
-
-    // Footer labels (y=70) — always drawn
-    tft.setTextSize(1);
-    tft.setTextColor(COL_DIM, COL_BG);
-    tft.setCursor(3, 70);
-    tft.print("-5m");
-    tft.setCursor(139, 70);
-    tft.print("now");
 }
 
 void Ui::drawRatioSparkline(int chartX, int chartY, int chartW, int chartH,
