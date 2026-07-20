@@ -377,17 +377,24 @@ namespace secrets {
   `Hold: sync now` shown at y=72 when Wi-Fi is configured. GPS long-press still advances the screen.
   STORAGE screen layout (v0.9.1): y=14 REC/AUTO/Samp; y=26 Day; y=38 Disk%; y=50 bar; y=56 Pending;
   y=64 Wi-Fi status; y=72 `Hold: sync now` hint.
-- **D/C TREND screen** (v1.0.1): Five-minute dose-per-count deviation sparkline.
-  - Collects trend data continuously via `Ui::setReading()` from the NimBLE callback.
-  - 5-second aggregation bins accumulate dose (nSv/h) and CPS sums; ratio = sum(dose) / sum(cps).
-  - Bins with <3 samples create gaps in the sparkline.
-  - Adaptive baseline: median of first 6 valid bins (~30s warmup), then EMA with α=0.0083 (~10 min time constant).
-  - Deviations >±25% are graphed but excluded from baseline updates (contamination protection).
-  - Sparkline: green for positive deviation (above baseline), red for negative (below).
+- **D/C TREND screen** (v1.0.3): Five-minute dose-per-count deviation sparkline.
+  - Collects trend data continuously via `Ui::setReading()` from the NimBLE callback (runs on NimBLE host task, Core 0).
+  - 1-second aggregation bins (`RATIO_BIN_MS = 1000`): 300 bins × 1s = 5-minute window.
+  - Bin validity: `MIN_SAMPLES_PER_BIN = 1` (was 3, causing ~90% rejection at 1Hz polling).
+  - Ratio: `sum(dose nSv/h) / sum(cps)` — ratio of sums is more stable than mean of ratios.
+  - `MIN_VALID_CPS = 0.25f` gate rejects near-zero CPS to prevent division instability.
+  - Adaptive baseline: median of first 6 valid bins (warmup), then EMA with `BASELINE_ALPHA = 0.003f`
+    (slower than v1.0.1's 0.0083; ~35 min time constant for 5-minute window).
+  - Contamination protection: deviations >±25% are graphed but excluded from baseline updates.
+  - **σ-zone coloring**: deviation classified by z-score from deviation percentage σ:
+    `|z|≤1 → GREEN` (normal), `1<|z|≤2 → AMBER` (moderate), `|z|>2 → RED` (significant deviation).
+    σ computed from population std-dev of deviation percentages, floored at 0.5% to avoid division by near-zero.
   - Display: "D/C TREND" title, current deviation %, horizontal zero/baseline line, "-5m" / "now" time labels.
+    X-coordinates scale across full chart width even for partial buffers (`localCount-1` denominator).
   - States: "NO DATA" (initial), "CAL N/6" (warmup), "+/−N%" (normal), "STALE" (no data >10s), "NO RC" (disconnected).
   - No long-press action on this screen. Data collection continues regardless of visible screen.
-  - Thread-safe via spinlock (`portENTER_CRITICAL/EXIT_CRITICAL`) protecting the circular buffer.
+  - Flicker control: `ratioChartDirty_` flag — redrawing only occurs when a new bin completes.
+  - Thread-safe via spinlock (`portENTER_CRITICAL/EXIT_CRITICAL`) protecting the circular buffer from BLE callback vs. UI thread.
   - No flash persistence for the 5-minute buffer; cleared on reboot.
   - Unit tests: `test/test_ratio_trend_native/` — 34 tests covering ratio math, baseline, buffer, and graph mapping.
 
@@ -2200,3 +2207,16 @@ self-tests must pass. All passed on the current build:
   (May 2026). Updated in `public/config.js`, `src/api.js`, and `dist/config.js`.
   The nginx entrypoint script patches `config.js` at container start — no rebuild needed
   to change `API_BASE`.
+
+### D/C TREND Rendering Bugs — Empty Chart, Only Red Ticks, Wrong Time Labels (v1.0.3)
+
+- **Symptom**: D/C TREND screen showed only a single red tick and "1m" labels. No continuous chart visible.
+- **Three independent bugs** caused the broken display:
+  1. `MIN_SAMPLES_PER_BIN = 3`: At ~1Hz BLE polling, 1-second bins get ~1 sample. Requiring ≥3 rejected ~90% of bins as gaps → empty chart.
+  2. X-coordinate squashing: `i/(RATIO_POINT_COUNT-1) * 153` rounded to 0 for small `i` in partial buffers, stacking all early points at x=3.
+  3. Wrong time labels: "1m" didn't match the 5-minute (300 bins × 1s) spec.
+- **Fix (v1.0.3)** in `src/ui.h` and `src/ui.cpp`:
+  - `MIN_SAMPLES_PER_BIN`: 3 → **1** (accept bins with ≥1 sample)
+  - X-mapping: use `localCount-1` as denominator for partial buffers so points spread across full chart width
+  - Label text: "1m" → **"5m"** (matches 300s = 5-minute window)
+- **Rule**: Always validate UI rendering with actual device display. Partial circular buffers produce `localCount < RATIO_POINT_COUNT` points; X-mapping must use `localCount-1` to spread them evenly. A sample threshold of 1 is the minimum to accept any bin.

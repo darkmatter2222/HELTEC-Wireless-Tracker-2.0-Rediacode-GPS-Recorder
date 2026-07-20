@@ -73,17 +73,17 @@ and a full-featured web application — all in one repo. If any of these apply t
 
 ## Screens
 
-Short-press cycles through all screens. Long-press action varies per screen (see table).
+Short-press cycles through all screens (STATS → GPS → STORAGE → DOSE → D/C TREND → LIFETIME → LIFETIME2). Long-press action varies per screen (see table).
 
-| STATS | GPS | STORAGE | DOSE |
-|:-----:|:---:|:-------:|:----:|
-| ![stats](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_stats.png) | ![gps](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_gps.png) | ![storage](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_storage.png) | ![dose](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_dose.png) |
-| Live dose rate (nSv/h) + sample counter · **Long: BLE picker** | Fix quality, coordinates, bearing · **Long: advance** | Recording state, pending uploads, sync status · **Long: force sync** | Cumulative trip dose (µSv/mSv) + instant rate · **Long: reset dose** |
+| STATS | GPS | STORAGE | DOSE | D/C TREND |
+|:-----:|:---:|:-------:|:----:|:--------:|
+| ![stats](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_stats.png) | ![gps](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_gps.png) | ![storage](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_storage.png) | ![dose](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_dose.png) | ![dc_trend](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_ratio_trend.png) |
+| Live dose rate (nSv/h) + sample counter · **Long: BLE picker** | Fix quality, coordinates, bearing · **Long: advance** | Recording state, pending uploads, sync status · **Long: force sync** | Cumulative trip dose (µSv/mSv) + instant rate · **Long: reset dose** | Dose-per-count ratio trend (5m window, σ-zone coloring) · **Long: no action** |
 
-| LIFETIME (1/2) | LIFETIME (2/2) | PICKER |
-|:--------------:|:--------------:|:------:|
-| ![lifetime](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_lifetime.png) | ![lifetime2](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_lifetime2.png) | ![picker](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_picker.png) |
-| Distance (km/mi) · Rec time · Alt gain (m/ft) · **Long: reset all** | Spikes · Unique cells · Data written · Battery cycles · **Long: reset all** | BLE device selection · **Long: connect** |
+| D/C TREND | LIFETIME (1/2) | LIFETIME (2/2) | PICKER |
+|:----------:|:--------------:|:--------------:|:------:|
+| ![ratio_trend](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_ratio_trend.png) | ![lifetime](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_lifetime.png) | ![lifetime2](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_lifetime2.png) | ![picker](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_picker.png) |
+| Dose-per-count ratio trend (5-min window, σ-zone coloring) · **Long: none** | Distance (km/mi) · Rec time · Alt gain (m/ft) · **Long: reset all** | Spikes · Unique cells · Data written · Battery cycles · **Long: reset all** | BLE device selection · **Long: connect** |
 
 > Rendered at 3× scale (480×240 px) from `scripts/render_screens.py`. Actual display is 160×80.
 
@@ -465,10 +465,13 @@ Day rollover happens transparently at midnight (local time). The active file is 
 
 | Press | Screen | Action |
 |-------|--------|--------|
-| Short | any | Cycle to next screen (STATS → GPS → STORAGE → repeat) |
+| Short | any | Cycle: STATS → GPS → STORAGE → DOSE → D/C TREND → LIFETIME → LIFETIME2 → STATS |
 | Long | STATS | Open BLE device picker |
 | Long | GPS | Advance to next screen (same as short) |
 | Long | STORAGE | **Force immediate Wi-Fi sync** (bypasses 60s cadence and any backoff) |
+| Long | D/C TREND | **No action** (intentionally none) |
+| Long | DOSE | Reset cumulative dose accumulator |
+| Long | LIFETIME (1/2 or 2/2) | Reset all lifetime counters |
 | Long | PICKER | Connect to highlighted device |
 
 > Recording starts and stops automatically — there is no manual start/stop button.  
@@ -484,6 +487,7 @@ Day rollover happens transparently at midnight (local time). The active file is 
 | **GPS** | Fix status, satellite count, HDOP, lat/lon/alt/speed, smoothed bearing heading |
 | **STORAGE** | Recording state, sample counter, disk usage, pending upload count, Wi-Fi countdown / phase |
 | **DOSE** | Cumulative trip dose accumulator (µSv / auto-switches to mSv); long-press to reset |
+| **D/C TREND** | Dose-per-count ratio trend over 5-minute window with σ-zone coloring (green ≤1σ, amber ≤2σ, red >2σ). **No long-press action.** |
 | **PICKER** | Nearby BLE devices — scroll with short-press, connect with long-press |
 
 Header bar (always visible): RC connection state · GPS fix quality · battery % · recording dot

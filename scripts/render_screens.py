@@ -9,7 +9,7 @@ Requires Pillow:
 Usage:
     python scripts/render_screens.py
 
-Output: docs/screens/screen_{stats,gps,storage,dose,lifetime,lifetime2,picker}.png
+Output: docs/screens/screen_{stats,gps,storage,dose,ratio_trend,lifetime,lifetime2,picker}.png
 """
 
 import os
@@ -343,6 +343,81 @@ def render_picker():
     return img
 
 # ---------------------------------------------------------------------------
+# D/C TREND screen — dose-per-count ratio trend with σ-zone sparkline
+# ---------------------------------------------------------------------------
+def render_ratio_trend():
+    img  = Image.new("RGB", (W, H), COL_BG)
+    draw = ImageDraw.Draw(img)
+    draw_header(draw, "OK  ", COL_GREEN, has_fix=True, bat_pct=72, recording=True)
+
+    # Title
+    field(draw, 4, 14, 156, 8, "D/C TREND", COL_FG, COL_BG)
+
+    # Current deviation
+    field(draw, 4, 22, 156, 8, "-0.9%", COL_GREEN, COL_BG)
+
+    # Chart area
+    chart_x, chart_y = 2, 30
+    chart_w, chart_h = 155, 20
+    baseline_y = chart_y + chart_h // 2  # center line
+
+    # Background
+    field(draw, chart_x, chart_y, chart_w, chart_h, "", COL_DIM, COL_BG)
+
+    # Horizontal baseline (zero line)
+    draw.line([(chart_x, baseline_y), (chart_x + chart_w, baseline_y)], fill=COL_FG, width=1)
+
+    # Sparkline data points (simulated 5-minute window)
+    # Simulate deviation points over the chart width
+    import random
+    random.seed(42)
+    baseline_ratio = 145.0  # simulated baseline
+    points = []
+    for i in range(300):
+        deviation = random.uniform(-5, 5)  # ±5% range
+        points.append(deviation)
+
+    # Compute σ from deviation points
+    import statistics
+    sigma = statistics.pstdev(points)
+    if sigma < 0.5:
+        sigma = 0.5
+
+    # Draw sparkline with σ-zone coloring
+    num_points = len(points)
+    for i in range(1, num_points):
+        dev_prev = points[i-1]
+        dev_curr = points[i]
+
+        x1 = int(chart_x + (i - 1) / (num_points - 1) * chart_w)
+        x2 = int(chart_x + i / (num_points - 1) * chart_w)
+
+        y1 = chart_y + chart_h // 2 - int(dev_prev * chart_h / 10)
+        y2 = chart_y + chart_h // 2 - int(dev_curr * chart_h / 10)
+
+        # σ-zone coloring
+        z_prev = abs(dev_prev) / sigma
+        z_curr = abs(dev_curr) / sigma
+
+        if z_prev <= 1 or z_curr <= 1:
+            color = COL_GREEN
+        elif z_prev <= 2 or z_curr <= 2:
+            color = COL_AMBER
+        else:
+            color = COL_RED
+
+        draw.line([(x1, y1), (x2, y2)], fill=color, width=2)
+
+    # Time labels
+    field(draw, 2, chart_y + chart_h + 1, 156, 8, "-5m            now", COL_DIM, COL_BG)
+
+    # Info line
+    field(draw, 4, 64, 156, 8, "Baseline: 145.0 (nSv/h)/cps", COL_DIM, COL_BG)
+    field(draw, 4, 72, 156, 8, "σ = 2.1%  |z|≤1=green 1-2=amber >2=red", COL_DIM, COL_BG)
+
+    return img
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -356,6 +431,7 @@ def main():
         "storage":           render_storage(),
         "storage_uploading": render_storage_uploading(),
         "dose":              render_dose(),
+        "ratio_trend":       render_ratio_trend(),
         "lifetime":          render_lifetime(),
         "lifetime2":         render_lifetime2(),
         "picker":            render_picker(),
