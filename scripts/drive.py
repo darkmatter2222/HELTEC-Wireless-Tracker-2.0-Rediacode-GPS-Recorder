@@ -13,7 +13,7 @@ from __future__ import annotations
 import argparse, os, re, sys, threading, time
 import serial
 
-PORT = os.environ.get("TRACKER_PORT", "COM4")  # override: set TRACKER_PORT=COM5
+PORT = os.environ.get("TRACKER_PORT", "COM3")  # override: set TRACKER_PORT=COM5
 BAUD = 115200
 
 def open_port() -> serial.Serial:

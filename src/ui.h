@@ -120,7 +120,7 @@ private:
     static constexpr uint32_t RATIO_BIN_MS = 1000; // 1-second bins → 300 bins × 1s = 5-minute window
     static constexpr size_t RATIO_POINT_COUNT = 300;
     static constexpr size_t BASELINE_WARMUP_BINS = 6;
-    static constexpr uint16_t MIN_SAMPLES_PER_BIN = 3;
+    static constexpr uint16_t MIN_SAMPLES_PER_BIN = 1;
     static constexpr float MIN_VALID_CPS = 0.25f;
     static constexpr float BASELINE_ALPHA = 0.003f;
     static constexpr float BASELINE_UPDATE_LIMIT_PCT = 25.0f;

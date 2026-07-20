@@ -976,8 +976,8 @@ void Ui::insertRatioPoint(float ratio, bool valid) {
 // Field indices for D/C TREND: 38-44 (indices 0-37 used by other screens)
 //   38: "D/C TREND" title
 //   39: status/deviation display (mutable — changes each bin)
-//   40: "1m" window label (static)
-//   41: "-1m" footer (static)
+//   40: "5m" window label (static)
+//   41: "-5m" footer (static)
 //   42: "now" footer (static)
 //   43: zero line redraw flag (internal, not a field)
 //   44: reserved
@@ -991,8 +991,8 @@ void Ui::renderRatioTrend() {
     // Title (field 38): always same text, field() skips after first draw
     field(38, 3, 14, 60, 8, "D/C TREND", COL_DIM, COL_BG, 1);
 
-    // Window label (field 40): static "1m"
-    field(40, 137, 14, 20, 8, "1m", COL_DIM, COL_BG, 1);
+    // Window label (field 40): static "5m"
+    field(40, 137, 14, 20, 8, "5m", COL_DIM, COL_BG, 1);
 
     // ---- Mutable status/deviation display (field 39) ----
     if (ratioLastReadingMs_ == 0) {
@@ -1035,7 +1035,7 @@ void Ui::renderRatioTrend() {
     }
 
     // ---- Footer labels (static, cached) ----
-    field(41, 3, 70, 22, 8, "-1m", COL_DIM, COL_BG, 1);
+    field(41, 3, 70, 22, 8, "-5m", COL_DIM, COL_BG, 1);
     field(42, 139, 70, 18, 8, "now", COL_DIM, COL_BG, 1);
 }
 
@@ -1153,7 +1153,10 @@ void Ui::drawRatioSparkline(int chartX, int chartY, int chartW, int chartH,
         }
 
         // Map to x-coordinate
-        int x = chartX + (int)roundf((float)i * (chartW - 1) / (RATIO_POINT_COUNT - 1));
+        // When buffer is partial, spread points across full chart width
+        // (i.e. use localCount-1 as denominator so points don't squish to the left)
+        float xDenom = (localCount > 1) ? (float)(localCount - 1) : 1.0f;
+        int x = chartX + (int)roundf((float)i * (chartW - 1) / xDenom);
 
         // Compute deviation for this point
         float devPct = calculateDeviationPercent(localRaw[idx], ratioBaseline_);
