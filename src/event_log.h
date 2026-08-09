@@ -58,9 +58,22 @@ void clear();
 bool ready();
 
 // True if the PREVIOUS boot ended due to a crash (PANIC, INT_WDT, TASK_WDT,
-// BROWNOUT, WDT) rather than a clean power-on or deliberate software reset.
-// Used by main.cpp to emit GPS_LOST+REGAINED gap markers on first post-crash
-// GPS fix so the viewer does not draw a straight line across the crash gap.
+// BROWNOUT, WDT) rather than a clean power-on or deliberate
+// software reset. Used by main.cpp to emit GPS_LOST+REGAINED gap
+// markers on first post-crash GPS fix.
 bool wasLastResetCrash();
+
+// Return the reset reason (as a string) of the last crash. Only meaningful
+// after wasLastResetCrash() returns true. Returns "UNKNOWN" if no crash.
+const char* lastCrashReason();
+
+// Return the last marked phase tag from the crashed boot. Only meaningful
+// after wasLastResetCrash() returns true. Returns "NONE" if no phase was
+// marked.
+const char* lastCrashPhase();
+
+// Return the millis() uptime of the crashed boot cycle. Only meaningful
+// after wasLastResetCrash() returns true.
+uint32_t lastCrashUptimeMs();
 
 } // namespace event_log

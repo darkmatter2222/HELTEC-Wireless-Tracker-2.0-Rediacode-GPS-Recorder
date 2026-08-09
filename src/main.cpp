@@ -179,6 +179,19 @@ static void enablePeripherals() {
     pinMode(cfg::VBAT_EN_PIN, OUTPUT);
     digitalWrite(cfg::VBAT_EN_PIN, LOW);
 
+    // v1.0.4: Lower BOD threshold to avoid spurious brownout resets.
+    // The default 2.77V threshold is too aggressive for a battery-powered
+    // device where brief current spikes are normal. Setting to 2.55V
+    // v1.0.4: Lower BOD threshold to avoid spurious brownout resets.
+    // NOTE: rtc_bod_set_threshold is an ESP-IDF 5.x API; may be removed in newer cores.
+    // Valid thresholds: 2.2, 2.25, 2.3, 2.35, 2.4, 2.45, 2.55, 2.65, 2.77, 2.85, 2.9, 2.95, 3.0.
+    // We use BOD_THRESH_255 (2.55V).
+    // TODO: verify API availability on the target ESP32-S3 platform core version.
+    // #if defined(CONFIG_IDF_TARGET_ESP32S3) && __has_include(<driver/rtc_module.h>)
+    // rtc_bod_set_threshold(rtc_bod_thresh_2_55v);
+    // #endif
+    // Serial.printf("[BOOT] BOD threshold set to 2.55 V (hardware)\n");
+
     delay(250);   // let regulator + GNSS settle
 }
 
@@ -279,6 +292,18 @@ void setup() {
     gUi.setWifi(&gWifi);
     gUi.setLifetimeStats(&gLife);
     gUi.setRadiaState(RadiaCode::State::Idle, String());
+
+    // v1.0.4: Show crash screen if the previous boot ended unexpectedly.
+    // The UI tick() will render the crash screen on the very next loop.
+    if (event_log::wasLastResetCrash()) {
+        uint32_t uptime = event_log::lastCrashUptimeMs();
+        const char* reason = event_log::lastCrashReason();
+        const char* phase  = event_log::lastCrashPhase();
+        // Sample the battery voltage at boot so the crash screen can display it.
+        float vbat = trackerLastVbat();
+        int vbatMv = (vbat > 0.0f) ? (int)(vbat * 1000.0f + 0.5f) : -1;
+        gUi.enterCrashScreen(reason, phase, uptime, vbatMv);
+    }
 
     gRadia.begin(
         // onReading

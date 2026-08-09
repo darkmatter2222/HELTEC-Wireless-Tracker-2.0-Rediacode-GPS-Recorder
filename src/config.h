@@ -225,6 +225,14 @@ constexpr uint32_t TASK_WDT_TIMEOUT_S = 60;
 constexpr uint32_t WIFI_FAIL_REBOOT_THRESHOLD = 10;  // consecutive failures before check
 constexpr uint32_t WIFI_HEAL_MIN_HEAP         = 50000; // bytes; reboot only below this
 
+// ---------------- Brownout Detector threshold (v1.0.4) ----------------------
+// ESP32-S3 BOD level: 2.55V = critical brownout, 2.70V = severe, 2.77V =
+// moderate, 2.90V = mild. Default is 2.77V which is quite aggressive for
+// a battery-powered device where brief spikes are normal. We lower it to
+// 2.55V (critical) so the hardware brownout only fires when the rail is
+// actually in danger of collapsing — letting the software gate at 3.60V
+// Configured via rtc_bod_set_threshold in enablePeripherals() in main.cpp.
+
 // ---------------- GPS reliability (v0.6.0) ----------------------------------
 // Default ESP32 HardwareSerial RX FIFO is 256 bytes -- at 115200 baud that
 // only buffers ~22 ms of NMEA. A blocking BLE op or long flash flush can

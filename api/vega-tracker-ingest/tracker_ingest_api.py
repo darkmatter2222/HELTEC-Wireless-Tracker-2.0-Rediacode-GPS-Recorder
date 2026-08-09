@@ -1703,6 +1703,24 @@ async def ingest_csv(
             detail=f"All {rejected} rows have pre-2020 timestamps (old firmware artifact). "
                    "Flash updated firmware to stop recording millis()-since-boot as timestamps.",
         )
+    if not docs and rejected == 0:
+        # Header-only upload accepted: valid request with no data rows
+        # (e.g., a day file that was created but had zero GPS samples).
+        # This prevents the device from looping forever on a stuck 107-byte file.
+        log.info("ingest sessionId=%s header-only upload (0 data rows)", x_session_id)
+        return JSONResponse(
+            content={
+                "sessionId": x_session_id,
+                "received": 0,
+                "valid": 0,
+                "rejected": 0,
+                "inserted": 0,
+                "duplicates": 0,
+                "firstTsMs": 0,
+                "lastTsMs": 0,
+            },
+            status_code=200,
+        )
     if not docs:
         raise HTTPException(status_code=400, detail="no parseable rows")
 
@@ -1821,6 +1839,17 @@ async def ingest_csv_merge(
 
     text = body.decode("utf-8", errors="replace")
     docs, rejected = _parse_csv(text, x_session_id, x_device_id, x_tracker_id, x_firmware)
+    if not docs and rejected == 0:
+        # Header-only upload: valid request with no data rows.
+        log.info("ingest-merge sessionId=%s header-only upload (0 data rows)", x_session_id)
+        return JSONResponse({
+            "sessionId":  x_session_id,
+            "valid":      0,
+            "rejected":   0,
+            "inserted":   0,
+            "modified":   0,
+            "unchanged":  0,
+        })
     if not docs:
         raise HTTPException(status_code=400, detail="no parseable rows")
 

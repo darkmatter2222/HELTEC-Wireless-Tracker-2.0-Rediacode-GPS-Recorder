@@ -20,6 +20,7 @@ public:
         SCREEN_LIFETIME2,
         SCREEN_PICKER,
         SCREEN_NORMAL_COUNT = SCREEN_PICKER, // STATS/GPS/STORAGE/DOSE/RATIO_TREND/LIFETIME/LIFETIME2 cycle
+        SCREEN_CRASH,                          // 8: crash recovery screen
     };
 
     void begin();
@@ -40,6 +41,10 @@ public:
     // Picker entry / exit
     void enterPicker(const std::vector<RadiaCode::ScanResult>& results);
     void exitPicker() { screen_ = SCREEN_STATS; forceFullRedraw_ = true; }
+
+    // Crash screen entry. Called once after boot if the previous boot crashed.
+    void enterCrashScreen(const char* reason, const char* phase,
+                          uint32_t lastUptimeMs, int vbatMv);
 
     void tick();
 
@@ -84,6 +89,7 @@ private:
     void renderLifetime();
     void renderLifetime2();
     void renderPicker();
+    void renderCrash();
 
     Screen        screen_ = SCREEN_STATS;
     GpsModule*     gps_ = nullptr;
@@ -103,6 +109,14 @@ private:
     // so the legacy double-long-press stop-confirmation no longer exists.
     bool               forceFullRedraw_ = true;
     Screen             lastDrawnScreen_ = SCREEN_NORMAL_COUNT;
+
+    // Crash screen state — populated once at boot, read by renderCrash().
+    // Initialized to nullptr/0/-1 so renderCrash() can detect 'not set yet'.
+    const char*        crashReason_   = nullptr;
+    const char*        crashPhase_    = nullptr;
+    uint32_t           crashUptimeMs_ = 0;
+    int                crashVbatMv_   = -1;
+
 
     static constexpr int MAX_FIELDS = 50;
     String   prevText_[MAX_FIELDS];
@@ -156,4 +170,6 @@ private:
     // Redraw & thread safety
     bool  ratioChartDirty_ = true;
     portMUX_TYPE ratioMux_ = portMUX_INITIALIZER_UNLOCKED;
+
+    // Note: crash screen state members are defined above, not duplicated here.
 };

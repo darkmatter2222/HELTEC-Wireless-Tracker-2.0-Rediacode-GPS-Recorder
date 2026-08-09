@@ -269,25 +269,59 @@ bool WifiUploader::connectWifi() {
     // ---- 1. Try home profile first ----------------------------------------
     const bool hasHome = hasProfile(secrets::WIFI_SSID, secrets::INGEST_URL);
     if (hasHome) {
-        if (tryConnect(secrets::WIFI_SSID, secrets::WIFI_PASSWORD)) {
-            activeIngestUrl_ = secrets::INGEST_URL;
-            activeNet_ = (uint8_t)ActiveNet::Home;
-            return true;
+        // v1.0.4: quick-fail — if home AP has been unreachable for 5+ cycles,
+        // skip it for 10 cycles to save time. The counter decrements each cycle
+        // and the fail count resets after a successful connect.
+        if (homeSkipCount_ > 0) {
+            --homeSkipCount_;
+            Serial.printf("[WIFI] skipping home (unreachable, skip=%u)\n",
+                          (unsigned)homeSkipCount_);
+        } else {
+            if (tryConnect(secrets::WIFI_SSID, secrets::WIFI_PASSWORD)) {
+                activeIngestUrl_ = secrets::INGEST_URL;
+                activeNet_ = (uint8_t)ActiveNet::Home;
+                // Reset both failure counters on success
+                homeFailCount_   = 0;
+                remoteFailCount_ = 0;
+                return true;
+            }
+            ++homeFailCount_;
+            // Reset remote fail count (only one network can be "unreachable" at a time)
+            remoteFailCount_ = 0;
+            if (homeFailCount_ >= 5) {
+                homeSkipCount_ = 10;  // skip home for next 10 cycles
+                Serial.printf("[WIFI] home unreachable %u cycles, skipping for 10 cycles\n",
+                              (unsigned)homeFailCount_);
+            }
         }
     }
 
     // ---- 2. Fall back to remote (mobile hotspot) --------------------------
     const bool hasRemote = hasProfile(secrets::WIFI_SSID2, secrets::INGEST_URL2);
     if (hasRemote) {
-        if (tryConnect(secrets::WIFI_SSID2, secrets::WIFI_PASSWORD2)) {
-            activeIngestUrl_ = secrets::INGEST_URL2;
-            // Apply Basic Auth credentials if configured for remote endpoint.
-            if (secrets::INGEST_USER && secrets::INGEST_USER[0] != '\0') {
-                activeIngestUser_ = secrets::INGEST_USER;
-                activeIngestPass_ = secrets::INGEST_PASS;
+        if (remoteSkipCount_ > 0) {
+            --remoteSkipCount_;
+            Serial.printf("[WIFI] skipping remote (unreachable, skip=%u)\n",
+                          (unsigned)remoteSkipCount_);
+        } else {
+            if (tryConnect(secrets::WIFI_SSID2, secrets::WIFI_PASSWORD2)) {
+                activeIngestUrl_ = secrets::INGEST_URL2;
+                if (secrets::INGEST_USER && secrets::INGEST_USER[0] != '\0') {
+                    activeIngestUser_ = secrets::INGEST_USER;
+                    activeIngestPass_ = secrets::INGEST_PASS;
+                }
+                activeNet_ = (uint8_t)ActiveNet::Remote;
+                homeFailCount_   = 0;
+                remoteFailCount_ = 0;
+                return true;
             }
-            activeNet_ = (uint8_t)ActiveNet::Remote;
-            return true;
+            ++remoteFailCount_;
+            homeFailCount_ = 0;
+            if (remoteFailCount_ >= 5) {
+                remoteSkipCount_ = 10;
+                Serial.printf("[WIFI] remote unreachable %u cycles, skipping for 10 cycles\n",
+                              (unsigned)remoteFailCount_);
+            }
         }
     }
 
@@ -356,6 +390,23 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
     if (fileSize == 0) {
         Serial.printf("[UPLOAD] %s: zero bytes, skipping\n", sessionId.c_str());
         store_->closeSessionStream();
+        return false;
+    }
+
+    // v1.0.4: detect header-only files (CSV header only, no data rows).
+    // The server rejects these with HTTP 400, so don't even attempt to upload.
+    // The CSV header row is ~160 bytes. Files <= 200 bytes are treated as
+    // header-only and auto-removed. This prevents the device from looping
+    // forever on stuck upload files.
+    if (fileSize <= 200) {
+        Serial.printf("[UPLOAD] %s: header-only file (%u bytes), removing\n",
+                      sessionId.c_str(), (unsigned)fileSize);
+        store_->closeSessionStream();
+        if (store_->removePendingUpload(filename)) {
+            Serial.printf("[UPLOAD] %s: header-only file cleaned\n", sessionId.c_str());
+            return true;  // Treat as successful cleanup (not a failure)
+        }
+        Serial.printf("[UPLOAD] %s: header-only file cleanup failed\n", sessionId.c_str());
         return false;
     }
 

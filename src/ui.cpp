@@ -110,12 +110,24 @@ void Ui::onShortPress() {
         forceFullRedraw_ = true;     // redraw rows so cursor is visible
         return;
     }
+    // Crash screen: short press does nothing — prevents cycling past crash.
+    if (screen_ == SCREEN_CRASH) return;
     // Cycle STATS -> GPS -> STORAGE -> STATS
     screen_ = (Screen)((screen_ + 1) % SCREEN_NORMAL_COUNT);
     forceFullRedraw_ = true;
 }
 
 void Ui::onLongPress() {
+    // Crash screen: long press exits to STATS and clears the crash state.
+    if (screen_ == SCREEN_CRASH) {
+        crashReason_ = nullptr;
+        crashPhase_  = nullptr;
+        crashUptimeMs_ = 0;
+        crashVbatMv_ = -1;
+        screen_ = SCREEN_STATS;
+        forceFullRedraw_ = true;
+        return;
+    }
     switch (screen_) {
         case SCREEN_STATS:
             pendingAction_ = ACTION_START_PICKER;
@@ -141,6 +153,13 @@ void Ui::onLongPress() {
             break;
         case SCREEN_RATIO_TREND:
             // Intentionally no-op: D/C TREND has no long-press action.
+            break;
+        case SCREEN_CRASH:
+            // Long-press on crash screen: clear the crash state and
+            // exit to STATS screen. The user acknowledges the crash
+            // and opts into normal operation.
+            screen_ = SCREEN_STATS;
+            forceFullRedraw_ = true;
             break;
         case SCREEN_PICKER:
             if (pickerCursor_ >= (int)pickList_.size()) {
@@ -239,7 +258,10 @@ void Ui::tick() {
         lastDrawnScreen_ = screen_;
     }
 
-    renderHeader();
+    // Crash screen has no header — fills the full 160×80 canvas.
+    if (screen_ != SCREEN_CRASH) {
+        renderHeader();
+    }
     switch (screen_) {
         case SCREEN_STATS:    renderStats();    break;
         case SCREEN_GPS:      renderGps();      break;
@@ -249,6 +271,7 @@ void Ui::tick() {
         case SCREEN_LIFETIME:  renderLifetime();  break;
         case SCREEN_LIFETIME2: renderLifetime2(); break;
         case SCREEN_PICKER:   renderPicker();   break;
+        case SCREEN_CRASH:    renderCrash();    break;
         default: break;
     }
     forceFullRedraw_ = false;
@@ -828,6 +851,103 @@ void Ui::renderPicker() {
             tft.setCursor(2, y + 2); tft.print(line);
         }
     }
+}
+
+// ============================================================================
+// Crash screen (v1.0.4)
+// Displayed after a crash boot to inform the user what happened.
+// Short press does nothing (prevents cycling past crash).
+// Long press clears the crash state and goes to STATS screen.
+// ============================================================================
+
+// Map internal reset reason to user-friendly label and color.
+static const char* crashReasonLabel(const char* reason) {
+    if (strcmp(reason, "BROWNOUT") == 0)      return "Low Battery";
+    if (strcmp(reason, "PANIC") == 0)          return "System Error";
+    if (strcmp(reason, "TASK_WDT") == 0)       return "Software Timeout";
+    if (strcmp(reason, "INT_WDT") == 0)        return "Watchdog Reset";
+    if (strcmp(reason, "WDT") == 0)            return "Watchdog Reset";
+    return "Unknown";
+}
+static uint16_t crashReasonColor(const char* reason) {
+    if (strcmp(reason, "BROWNOUT") == 0)       return COL_AMBER;  // low battery = caution
+    return COL_RED;  // all others = error
+}
+
+void Ui::enterCrashScreen(const char* reason, const char* phase,
+                          uint32_t lastUptimeMs, int vbatMv) {
+    screen_             = SCREEN_CRASH;
+    crashReason_        = reason;
+    crashPhase_         = phase;
+    crashUptimeMs_      = lastUptimeMs;
+    crashVbatMv_        = vbatMv;
+    forceFullRedraw_    = true;
+    Serial.printf("[CRASH] showing crash screen: %s phase=%s uptime=%ums vbat=%dmV\n",
+                  reason, phase, lastUptimeMs, vbatMv);
+}
+
+void Ui::renderCrash() {
+    tft.setTextSize(2);
+    tft.setTextColor(COL_RED, COL_BG);
+    tft.setCursor(10, 8);
+    tft.print("CRASH DETECTED");
+
+    // Crash reason on next line (amber for brownout, red for others).
+    tft.setTextSize(1);
+    const char* reason = (crashReason_ != nullptr) ? crashReason_ : "UNKNOWN";
+    uint16_t reasonColor = crashReasonColor(reason);
+    tft.setTextColor(reasonColor, COL_BG);
+    tft.setCursor(10, 26);
+    tft.print("Reason: ");
+    tft.print(crashReasonLabel(reason));
+
+    // Human explanation
+    tft.setTextColor(COL_DIM, COL_BG);
+    tft.setCursor(10, 38);
+    if (strcmp(reason, "BROWNOUT") == 0) {
+        tft.print("Device lost power");
+    } else if (strcmp(reason, "PANIC") == 0) {
+        tft.print("Software crashed");
+    } else {
+        tft.print("Device rebooted");
+    }
+
+    // Phase tag (if available)
+    if (crashPhase_ && strcmp(crashPhase_, "NONE") != 0) {
+        tft.setCursor(10, 50);
+        tft.print("Phase: ");
+        tft.print(crashPhase_);
+    } else {
+        tft.setCursor(10, 50);
+        tft.print("Phase: unknown");
+    }
+
+    // Uptime and battery
+    tft.setCursor(10, 60);
+    char uptimeBuf[20];
+    uint32_t secs = crashUptimeMs_ / 1000;
+    if (secs < 60) {
+        snprintf(uptimeBuf, sizeof(uptimeBuf), "Uptime: %us", (unsigned)secs);
+    } else if (secs < 3600) {
+        snprintf(uptimeBuf, sizeof(uptimeBuf), "Uptime: %um %us",
+                 (unsigned)(secs / 60), (unsigned)(secs % 60));
+    } else {
+        snprintf(uptimeBuf, sizeof(uptimeBuf), "Uptime: %uh %um",
+                 (unsigned)(secs / 3600), (unsigned)((secs % 3600) / 60));
+    }
+    tft.print(uptimeBuf);
+
+    if (crashVbatMv_ > 0) {
+        tft.setCursor(100, 60);
+        char vbuf[12];
+        snprintf(vbuf, sizeof(vbuf), "%.2fV", crashVbatMv_ / 1000.0f);
+        tft.print(vbuf);
+    }
+
+    // Instruction to exit
+    tft.setCursor(10, 72);
+    tft.setTextColor(COL_DIM, COL_BG);
+    tft.print("Hold button to continue");
 }
 
 // ============================================================================

@@ -16,6 +16,9 @@ constexpr size_t      kLogMaxBytes = 12 * 1024;   // roll over at ~12 KB
 
 bool g_ready = false;
 bool g_lastResetWasCrash = false;  // set in beginBoot(); read by main.cpp
+const char* g_lastCrashReason = "NONE";  // set in beginBoot() if last was a crash
+const char* g_lastCrashPhase = "NONE";   // set in beginBoot() from RTC phase
+uint32_t g_lastCrashUptimeMs = 0;        // uptime of last boot cycle (from RTC)
 
 // RTC slow memory survives software resets, brown-outs, and watchdog
 // reboots (cleared only by full power-off or deep sleep). We use it to
@@ -72,6 +75,9 @@ namespace event_log {
 
 bool ready()             { return g_ready; }
 bool wasLastResetCrash() { return g_lastResetWasCrash; }
+const char* lastCrashReason() { return g_lastCrashReason; }
+const char* lastCrashPhase()  { return g_lastCrashPhase; }
+uint32_t lastCrashUptimeMs() { return g_lastCrashUptimeMs; }
 
 void beginBoot() {
     // CRITICAL: do NOT call LittleFS.begin() here. SessionStore already
@@ -95,6 +101,15 @@ void beginBoot() {
                            rr == ESP_RST_TASK_WDT ||
                            rr == ESP_RST_WDT      ||
                            rr == ESP_RST_BROWNOUT);
+    if (g_lastResetWasCrash) {
+        g_lastCrashReason = rname;
+        g_lastCrashPhase  = "UNKNOWN";
+        g_lastCrashUptimeMs = 0;
+    } else {
+        g_lastCrashReason = "NONE";
+        g_lastCrashPhase  = "NONE";
+        g_lastCrashUptimeMs = 0;
+    }
     // v0.4.7: also capture the raw hardware reset reason for each CPU.
     // esp_reset_reason() returns ESP_RST_UNKNOWN when the IDF couldn't
     // classify the reset; the raw register usually still gives us a clue.

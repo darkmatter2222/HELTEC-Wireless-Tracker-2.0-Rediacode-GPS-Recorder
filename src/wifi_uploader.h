@@ -109,6 +109,14 @@ private:
     volatile int      lastHttpStatus_ = 0;
     volatile uint8_t  activeNet_      = 0;  // ActiveNet enum
 
+    // v1.0.4: per-network failure tracking for quick-fail on unreachable APs.
+    // After 5 consecutive connect failures for a specific network, skip it
+    // for 10 cycles to avoid wasting time on unreachable networks.
+    volatile uint32_t homeFailCount_   = 0;
+    volatile uint32_t remoteFailCount_ = 0;
+    volatile uint32_t homeSkipCount_   = 0;
+    volatile uint32_t remoteSkipCount_ = 0;
+
     UploadSuccessCb   uploadSuccessCb_;
 
     // Set by connectWifi() on success; cleared by disconnectWifi().

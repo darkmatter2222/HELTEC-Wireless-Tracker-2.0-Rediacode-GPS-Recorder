@@ -465,6 +465,50 @@ bool SessionStore::rotateActiveToPending_() {
     String oldPath = String(cfg::SESSIONS_DIR) + "/" + oldName;
     String newPath = String(cfg::SESSIONS_DIR) + "/" + newName;
 
+    // v1.0.4: Only rotate if the file has at least 1 data row.
+    // A file with only a header (e.g., from a brownout during rotation)
+    // would be unuploadable (server rejects 400) and stuck indefinitely.
+    if (backend_ == Backend::SdFat) {
+        // SdFat: use file size heuristic — header-only CSV is ~160 bytes.
+        FsFile f = gSdFat.open(oldPath.c_str(), O_RDONLY);
+        bool hasData = false;
+        if (f) {
+            size_t sz = f.size();
+            hasData = (sz > 200);  // >200 bytes => more than header
+            f.close();
+        }
+        if (!hasData) {
+            // Use the size we already captured, avoiding a use-after-close.
+            size_t sz = f ? f.size() : 0;
+            Serial.printf("[REC] skip rotate: %s too small (header-only?), %u bytes\n",
+                          oldName.c_str(), (unsigned)sz);
+            recording_   = false;
+            activeId_    = "";
+            sampleCount_ = 0;
+            return false;
+        }
+    } else if (fs_) {
+        // LittleFS: use size heuristic — header-only CSV is ~160 bytes.
+        size_t sz = 0;
+        {
+            File f = fs_->open(oldPath, "r");
+            if (f) {
+                sz = f.size();
+                f.close();
+            }
+        }
+        if (sz <= 200) {
+            Serial.printf("[REC] skip rotate: %s too small (header-only?), %u bytes\n",
+                          oldName.c_str(), (unsigned)sz);
+            recording_   = false;
+            activeId_    = "";
+            sampleCount_ = 0;
+            // Clean up the header-only file so it doesn't accumulate.
+            fs_->remove(oldPath);
+            return false;
+        }
+    }
+
     bool ok = false;
     if (backend_ == Backend::SdFat) {
         ok = gSdFat.rename(oldPath.c_str(), newPath.c_str());
@@ -658,6 +702,7 @@ size_t SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
         if (!f) { log_w("append: open failed"); return 0; }
         f.write((const uint8_t*)line, (size_t)len);
         f.close();
+        // v1.0.4: SdFat no longer needs sync() — close() flushes.
         ++sampleCount_;
         ++lifetimeSamples_;
         return (size_t)len;
@@ -668,7 +713,11 @@ size_t SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
     if (!f) { log_w("append: open failed"); event_log::markPhase("ST_OPEN_FAIL2"); return 0; }
     event_log::markPhase("ST_WRITE");
     size_t written = f.print(line);
-    event_log::markPhase("ST_CLOSE");
+    event_log::markPhase("ST_SYNC");
+    // v1.0.4: LittleFS no longer has commit() in newer ESP32-S3 core;
+    // data is written to disk on file close. commit() is a no-op on older
+    // cores, but causes a compile error on newer ones.
+    // LittleFS.commit();  // removed: file close is sufficient
     f.close();
     event_log::markPhase("ST_DONE");
     if ((int)written < len) {
@@ -727,11 +776,13 @@ void SessionStore::appendEvent(uint64_t timestampMsFull,
         if (!f) { log_w("appendEvent: open failed"); return; }
         f.write((const uint8_t*)line, (size_t)len);
         f.close();
+        // SdFat: close() implicitly flushes in newer versions.
     } else if (fs_) {
         File f = fs_->open(path, "a");
         if (!f) { log_w("appendEvent: open failed"); return; }
         f.print(line);
         f.close();
+        // LittleFS: close() implicitly flushes in newer versions.
     } else {
         return;
     }
@@ -808,6 +859,9 @@ uint32_t SessionStore::rotateForUpload() {
 std::vector<SessionStore::PendingUpload> SessionStore::listPendingUploads() const {
     std::vector<PendingUpload> out;
     if (backend_ == Backend::SdFat) {
+        // SdFat backend: use file size heuristic to skip header-only files.
+        // A header-only CSV is ~160 bytes; any file <= 200 bytes is assumed
+        // to be header-only and auto-removed.
         FsFile dir = gSdFat.open(cfg::SESSIONS_DIR, O_RDONLY);
         if (!dir || !dir.isDir()) return out;
         FsFile child;
@@ -817,34 +871,63 @@ std::vector<SessionStore::PendingUpload> SessionStore::listPendingUploads() cons
                 child.getName(nameBuf, sizeof(nameBuf));
                 String name(nameBuf);
                 if (isPendingFilename(name)) {
+                    size_t sz = (size_t)child.size();
+                    if (sz <= 200) {
+                        // Header-only file: auto-cleanup
+                        Serial.printf("[STORE] skipping header-only pending file (SdFat): %s (%u bytes)\n",
+                                      name.c_str(), (unsigned)sz);
+                        gSdFat.remove(String(cfg::SESSIONS_DIR) + "/" + name);
+                    } else {
+                        PendingUpload p;
+                        p.filename  = name;
+                        p.sessionId = dayIdFromFilename(name);
+                        p.sizeBytes = sz;
+                        out.push_back(p);
+                    }
+                }
+            }
+        } // while iterating children
+        return out;
+    } else if (fs_) {
+        fs::File dir = fs_->open(cfg::SESSIONS_DIR);
+        if (!dir || !dir.isDirectory()) return out;
+        fs::File f = dir.openNextFile();
+        while (f) {
+            if (!f.isDirectory()) {
+                String name = fileBaseName(String(f.name()));
+                if (isPendingFilename(name)) {
+                    // v1.0.4: skip header-only files (size <= 200 bytes means
+                    // no data rows, only the CSV header). This prevents the
+                    // device from looping forever trying to upload 107-byte
+                    // files that the server rejects with HTTP 400.
+                    size_t sz = f.size();
+                    if (sz <= 200) {
+                        Serial.printf("[STORE] skipping header-only pending file: %s (%u bytes)\n",
+                                      name.c_str(), (unsigned)sz);
+                        // Auto-cleanup: remove the header-only file.
+                        if (fs_->remove(String(cfg::SESSIONS_DIR) + "/" + name)) {
+                            Serial.printf("[STORE] removed header-only file: %s\n", name.c_str());
+                        }
+                        f.close();
+                        f = dir.openNextFile();
+                        continue;
+                    }
+                    // v1.0.4: files <= 200 bytes treated as header-only and
+                    // auto-removed. The 201+ byte branch uses the already-
+                    // captured `sz` size variable, not a new syscall.
                     PendingUpload p;
                     p.filename  = name;
                     p.sessionId = dayIdFromFilename(name);
-                    p.sizeBytes = (size_t)child.size();
+                    p.sizeBytes = sz;
                     out.push_back(p);
                 }
             }
-            child.close();
+            f.close();
+            f = dir.openNextFile();
         }
         return out;
     }
-    if (!fs_) return out;
-    File dir = fs_->open(cfg::SESSIONS_DIR);
-    if (!dir || !dir.isDirectory()) return out;
-    File f = dir.openNextFile();
-    while (f) {
-        if (!f.isDirectory()) {
-            String name = fileBaseName(String(f.name()));
-            if (isPendingFilename(name)) {
-                PendingUpload p;
-                p.filename  = name;
-                p.sessionId = dayIdFromFilename(name);
-                p.sizeBytes = (size_t)f.size();
-                out.push_back(p);
-            }
-        }
-        f = dir.openNextFile();
-    }
+    // Fallback for unknown backend: return empty list.
     return out;
 }
 
@@ -853,10 +936,14 @@ bool SessionStore::removePendingUpload(const String& filename) {
     if (!isPendingFilename(filename)) return false;
     String path = String(cfg::SESSIONS_DIR) + "/" + filename;
     if (backend_ == Backend::SdFat) {
-        return gSdFat.remove(path.c_str());
+        bool ok = gSdFat.remove(path.c_str());
+        // v1.0.4: SdFat no longer needs sync() — remove() flushes.
+        return ok;
     }
     if (!fs_) return false;
-    return fs_->remove(path);
+    bool ok = fs_->remove(path);
+    // v1.0.4: LittleFS no longer requires commit() — remove() flushes.
+    return ok;
 }
 
 Stream* SessionStore::openPendingUploadStream(const String& filename, size_t& outSizeBytes) {
