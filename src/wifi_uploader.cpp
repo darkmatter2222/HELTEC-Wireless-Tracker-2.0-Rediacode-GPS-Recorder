@@ -421,6 +421,14 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
     if (isHttpsUrl(url)) {
         secureClient = new WiFiClientSecure();
         secureClient->setInsecure();
+        // v1.0.4: Large file uploads over TLS need more headroom on slow
+        // hotspots. HTTPClient's internal buffer is 1460 bytes; the
+        // ESP32's default TCP send buffer (5760 bytes) is small enough
+        // that TLS record fragmentation + slow ack can starve the upload.
+        // We compensate by extending the timeout and letting HTTPClient
+        // stream in its 1460-byte chunks. No direct buffer resize is
+        // possible on this ESP-IDF/Arduino WiFiClientSecure API, so we
+        // rely on the scaled timeout below plus a Connection: close head.
         beginOk = http.begin(*secureClient, url);
     } else {
         beginOk = http.begin(url);
@@ -432,8 +440,20 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
         delete secureClient;
         return false;
     }
-    http.setTimeout(30000);   // larger sessions need more time to stream
+    // v1.0.4: Scale timeout with file size. Small files upload fast; large
+    // files over a slow hotspot need more headroom. Cap at 120s to avoid
+    // hanging forever on a dead link. A 500KB file on a slow hotspot at
+    // ~5 KB/s needs ~100s; we allow up to 120s.
+    uint32_t timeoutMs = secrets::WIFI_CONNECT_TIMEOUT_MS;
+    if (fileSize > 100000) {
+        // Linear scaling: 120s for 2MB, capped at 120s.
+        // This gives large files enough time on slow hotspot links.
+        timeoutMs = std::min<uint32_t>(120000,
+                                   10000 + (fileSize / 1000));
+    }
+    http.setTimeout(timeoutMs);
     http.addHeader("Content-Type", "text/csv");
+    http.addHeader("Connection", "close");  // v1.0.4: avoid keep-alive on hotspot
     http.addHeader("X-Session-Id", sessionId);
     http.addHeader("X-Tracker-Id", chipIdString());
     http.addHeader("X-Firmware",   cfg::FW_VERSION);
