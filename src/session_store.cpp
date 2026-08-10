@@ -664,6 +664,20 @@ size_t SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
     Lock lk(mutex_);
     event_log::markPhase("ST_APPEND");
 
+    // v1.0.5: stop writing when the disk is at or near capacity.  This
+    // prevents a write loop from corrupting the card or the device from
+    // pretending it has space it no longer has.
+    {
+        const size_t total = totalBytes();
+        const size_t used = usedBytes();
+        if (total > 0 && (int)((used * 100ULL) / total) >= 95) {
+            event_log::markPhase("ST_FULL");
+            Serial.printf("[REC] disk full (%u/%u K), stopping writes\n",
+                          (unsigned)(used / 1024), (unsigned)(total / 1024));
+            return 0;
+        }
+    }
+
     // ---- Auto-rotate on day rollover / first sample ---------------------
     if (!recording_ || activeId_ != day) {
         if (recording_ && activeId_.length() && activeId_ != day) {
@@ -805,7 +819,25 @@ size_t SessionStore::totalBytes() const {
 
 size_t SessionStore::usedBytes() const {
     if (backend_ == Backend::Sd)       return (size_t)std::min<uint64_t>(SD.usedBytes(), SIZE_MAX);
-    if (backend_ == Backend::SdFat)    return 0;     // SdFat freeClusterCount() is slow
+    if (backend_ == Backend::SdFat) {
+        // SdFat freeClusterCount() is slow, so we sum file sizes in the
+        // sessions dir instead. This is O(N) but N is small and only
+        // called from the UI, not every sample.
+        int64_t total = 0;
+        FsFile dir = gSdFat.open(cfg::SESSIONS_DIR, O_RDONLY);
+        if (dir && dir.isDir()) {
+            FsFile child;
+            while (child.openNext(&dir, O_RDONLY)) {
+                if (!child.isDir()) {
+                    size_t sz = child.size();
+                    if (sz == (size_t)-1) continue;
+                    total += (int64_t)sz;
+                }
+                child.close();
+            }
+        }
+        return (size_t)std::max<int64_t>(0, total);
+    }
     if (backend_ == Backend::LittleFs) return LittleFS.usedBytes();
     return 0;
 }
@@ -848,6 +880,15 @@ uint32_t SessionStore::rotateForUpload() {
     if (!hasUsableBackend()) return 0;
     Lock lk(mutex_);
     event_log::markPhase("ST_ROT_FOR_UP");
+    // v1.0.5: do not create new pending files when disk is near full.
+    {
+        const size_t total = totalBytes();
+        const size_t used = usedBytes();
+        if (total > 0 && (int)((used * 100ULL) / total) >= 95) {
+            event_log::markPhase("ST_FULL");
+            return 0;
+        }
+    }
     if (recording_ && sampleCount_ > 0) {
         rotateActiveToPending_();
     }
