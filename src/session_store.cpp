@@ -945,11 +945,12 @@ std::vector<SessionStore::PendingUpload> SessionStore::listPendingUploads() cons
                     if (sz <= 200) {
                         Serial.printf("[STORE] skipping header-only pending file: %s (%u bytes)\n",
                                       name.c_str(), (unsigned)sz);
-                        // Auto-cleanup: remove the header-only file.
+                        // Auto-cleanup: close the directory iterator first,
+                        // then remove the stale file.
+                        f.close();
                         if (fs_->remove(String(cfg::SESSIONS_DIR) + "/" + name)) {
                             Serial.printf("[STORE] removed header-only file: %s\n", name.c_str());
                         }
-                        f.close();
                         f = dir.openNextFile();
                         continue;
                     }

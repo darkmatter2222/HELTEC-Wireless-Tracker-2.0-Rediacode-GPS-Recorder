@@ -94,6 +94,10 @@ private:
     bool connectWifi();
     void disconnectWifi();
     bool uploadOne(const String& filename, const String& sessionId, size_t expectedBytes);
+    // v1.0.6: helper that performs the actual HTTP POST. Called for both
+    // home and remote URL retries.
+    bool uploadOneRetry(const String& filename, const String& sessionId,
+                      size_t fileSize, Stream* fileStream);
 
     SessionStore* store_          = nullptr;
     TaskHandle_t  task_           = nullptr;
@@ -124,4 +128,8 @@ private:
     const char* activeIngestUrl_  = nullptr;
     const char* activeIngestUser_ = nullptr;
     const char* activeIngestPass_ = nullptr;
+    // v1.0.6: cached remote URL/creds for automatic intra-cycle fallback.
+    const char* remoteIngestUrl_  = nullptr;
+    const char* remoteIngestUser_ = nullptr;
+    const char* remoteIngestPass_ = nullptr;
 };

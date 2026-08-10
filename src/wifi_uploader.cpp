@@ -111,6 +111,15 @@ void WifiUploader::begin(SessionStore* store) {
         return;
     }
 
+    // v1.0.6: cache remote URL/creds for automatic intra-cycle fallback.
+    if (hasRemote) {
+        remoteIngestUrl_ = secrets::INGEST_URL2;
+        if (secrets::INGEST_USER && secrets::INGEST_USER[0] != '\0') {
+            remoteIngestUser_ = secrets::INGEST_USER;
+            remoteIngestPass_ = secrets::INGEST_PASS;
+        }
+    }
+
     Serial.printf("[WIFI] uploader armed; home='%s' remote='%s' interval=%us trackerId=%s\n",
                   hasHome ? secrets::WIFI_SSID   : "(disabled)",
                   hasRemote ? secrets::WIFI_SSID2 : "(disabled)",
@@ -346,10 +355,87 @@ void WifiUploader::disconnectWifi() {
 }
 
 
+// Internal helper: performs the HTTP POST using the given url/user/pass.
+// The caller is responsible for restoring activeIngestUrl_/* after a retry.
+bool WifiUploader::uploadOneRetry(const String& filename, const String& sessionId,
+                               size_t fileSize, Stream* fileStream) {
+    const char* url = activeIngestUrl_ ? activeIngestUrl_ : secrets::INGEST_URL;
+
+    HTTPClient http;
+    String body;  // for SdFat backend fallback
+    WiFiClientSecure* secureClient = nullptr;
+    bool beginOk;
+    if (isHttpsUrl(url)) {
+        secureClient = new WiFiClientSecure();
+        secureClient->setInsecure();
+        beginOk = http.begin(*secureClient, url);
+    } else {
+        beginOk = http.begin(url);
+    }
+    if (!beginOk) {
+        Serial.printf("[UPLOAD] %s: http.begin('%s') failed\n",
+                      sessionId.c_str(), url);
+        store_->closeSessionStream();
+        delete secureClient;
+        return false;
+    }
+    uint32_t timeoutMs = secrets::WIFI_CONNECT_TIMEOUT_MS;
+    if (fileSize > 100000) {
+        timeoutMs = std::min<uint32_t>(120000,
+                                   10000 + (fileSize / 1000));
+    }
+    http.setTimeout(timeoutMs);
+    http.addHeader("Content-Type", "text/csv");
+    http.addHeader("Connection", "close");
+    http.addHeader("X-Session-Id", sessionId);
+    http.addHeader("X-Tracker-Id", chipIdString());
+    http.addHeader("X-Firmware", cfg::FW_VERSION);
+    if (activeIngestUser_ && activeIngestUser_[0] != '\0') {
+        http.setAuthorization(activeIngestUser_, activeIngestPass_ ? activeIngestPass_ : "");
+    }
+
+    const uint32_t t0 = millis();
+    int code;
+    esp_task_wdt_reset();
+    if (fileStream) {
+        code = http.sendRequest("POST", fileStream, fileSize);
+    } else {
+        code = http.POST((uint8_t*)body.c_str(), body.length());
+    }
+    esp_task_wdt_reset();
+    const String resp = (code > 0) ? http.getString() : String();
+    http.end();
+    store_->closeSessionStream();
+    delete secureClient;
+    secureClient = nullptr;
+    lastHttpStatus_ = code;
+
+    if (code >= 200 && code < 300) {
+        Serial.printf("[UPLOAD] %s OK http=%d %ums file_bytes=%u resp=%s\n",
+                      sessionId.c_str(), code, (unsigned)(millis() - t0),
+                      (unsigned)fileSize,
+                      resp.length() > 200 ? "<truncated>" : resp.c_str());
+        return true;
+    }
+    Serial.printf("[UPLOAD] %s FAIL http=%d %ums resp=%s\n",
+                  sessionId.c_str(), code, (unsigned)(millis() - t0),
+                  resp.length() > 200 ? "<truncated>" : resp.c_str());
+    return false;
+}
+
 bool WifiUploader::uploadOne(const String& filename, const String& sessionId, size_t expectedBytes) {
     // Use the URL selected when connectWifi() succeeded. Fall back to the
     // primary URL as a safety net (should never be needed in normal flow).
     const char* url = activeIngestUrl_ ? activeIngestUrl_ : secrets::INGEST_URL;
+
+    // v1.0.6: memory guard. Large uploads need ~12 KB overhead for HTTPClient
+    // state + TCP buffers. If we're below 120 KB free, skip this cycle to
+    // avoid OOM-induced panics mid-POST.
+    if (ESP.getFreeHeap() < 120 * 1024) {
+        Serial.printf("[UPLOAD] %s: low heap (%u KB), skipping\n",
+                      sessionId.c_str(), (unsigned)(ESP.getFreeHeap() / 1024));
+        return false;
+    }
 
     Serial.printf("[UPLOAD] %s (file=%s): file_bytes=%u heap_free=%u net=%s url=%s\n",
                   sessionId.c_str(), filename.c_str(), (unsigned)expectedBytes,
@@ -497,6 +583,26 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
     Serial.printf("[UPLOAD] %s FAIL http=%d %ums resp=%s\n",
                   sessionId.c_str(), code, (unsigned)(millis() - t0),
                   resp.length() > 200 ? "<truncated>" : resp.c_str());
+
+    // v1.0.6: automatic intra-cycle fallback to the remote (hotspot) network.
+    // The home network's server drops long-lived connections after ~30s.
+    // If the home URL fails and we have a remote URL cached, retry once.
+    if (code < 200 && remoteIngestUrl_ != nullptr && activeNet_ == (uint8_t)ActiveNet::Home) {
+        Serial.printf("[UPLOAD] %s: retrying on remote network...\n",
+                      sessionId.c_str());
+        const char* oldUrl = activeIngestUrl_;
+        const char* oldUser = activeIngestUser_;
+        const char* oldPass = activeIngestPass_;
+        activeIngestUrl_ = remoteIngestUrl_;
+        activeIngestUser_ = remoteIngestUser_;
+        activeIngestPass_ = remoteIngestPass_;
+        bool retryOk = uploadOneRetry(filename, sessionId, fileSize, fileStream);
+        // Restore original state
+        activeIngestUrl_ = oldUrl;
+        activeIngestUser_ = oldUser;
+        activeIngestPass_ = oldPass;
+        return retryOk;
+    }
     return false;
 }
 
