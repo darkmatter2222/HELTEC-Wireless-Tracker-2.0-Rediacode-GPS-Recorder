@@ -381,8 +381,11 @@ bool WifiUploader::uploadOneRetry(const String& filename, const String& sessionI
     }
     uint32_t timeoutMs = secrets::WIFI_CONNECT_TIMEOUT_MS;
     if (fileSize > 100000) {
+        // v1.0.7: scale timeout with file size.  The prior formula
+        // `10000 + (fileSize / 1000)` was 10× too short (gave only
+        // ~16s for a 6MB file instead of the intended ~120s).
         timeoutMs = std::min<uint32_t>(120000,
-                                   10000 + (fileSize / 1000));
+                                   100000 + (fileSize / 100));
     }
     http.setTimeout(timeoutMs);
     http.addHeader("Content-Type", "text/csv");
@@ -526,16 +529,17 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
         delete secureClient;
         return false;
     }
-    // v1.0.4: Scale timeout with file size. Small files upload fast; large
-    // files over a slow hotspot need more headroom. Cap at 120s to avoid
-    // hanging forever on a dead link. A 500KB file on a slow hotspot at
-    // ~5 KB/s needs ~100s; we allow up to 120s.
+    // v1.0.4/1.0.7: Scale timeout with file size. Small files upload fast;
+    // large files over a slow hotspot need more headroom. Cap at 120s to
+    // avoid hanging forever on a dead link. A 500KB file on a slow
+    // hotspot at ~5 KB/s needs ~100s; we allow up to 120s.
+    // v1.0.7: Fixed 10× underestimation — `10000 + (fileSize/1000)`
+    // gave only 16s for a 6MB file. New formula: `100000 + (fileSize/100)`
     uint32_t timeoutMs = secrets::WIFI_CONNECT_TIMEOUT_MS;
     if (fileSize > 100000) {
         // Linear scaling: 120s for 2MB, capped at 120s.
-        // This gives large files enough time on slow hotspot links.
         timeoutMs = std::min<uint32_t>(120000,
-                                   10000 + (fileSize / 1000));
+                                   100000 + (fileSize / 100));
     }
     http.setTimeout(timeoutMs);
     http.addHeader("Content-Type", "text/csv");
@@ -549,6 +553,114 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
         http.setAuthorization(activeIngestUser_, activeIngestPass_ ? activeIngestPass_ : "");
     }
 
+    // v1.1.0: chunked upload for large files.
+    // The ESP32-S3 consistently fails large (~6 MB) single-POST uploads with
+    // http=-3 ("send payload failed") after ~30-40 s. This is caused by the
+    // server (or an intermediate proxy) dropping long-lived connections, or
+    // TCP buffer overflow on the client side. Split the file into chunks so
+    // each HTTP POST is small enough to succeed quickly.
+    const size_t CHUNK = 32 * 1024;   // 32 KB per chunk — fits in available heap
+    if (fileSize > CHUNK) {
+        Serial.printf("[UPLOAD] %s: ENTER CHUNKed PATH\n", sessionId.c_str());
+        // Each chunk must be a self-contained CSV segment (with its own header
+        // row) so the server can parse each chunk independently.  We read the
+        // first line as the header and prepend it to each chunk.
+        String header;
+        if (fileStream) {
+            while (fileStream->available()) {
+                int ch = fileStream->read();
+                if (ch == '\n' || ch == '\r') break;
+                header += (char)ch;
+            }
+        }
+        Serial.printf("[UPD] HEAD len=%u\n", (unsigned)header.length());
+        size_t av = fileStream->available();
+        Serial.printf("[UPD] after header, avail=%u\n", (unsigned)av);
+        size_t bytesSent = 0;
+        int lastCode = 0;
+        uint32_t tStart = millis();
+        // Reuse a single String buffer for all chunks. Reserve enough space for
+        // the header + one chunk so we rarely realloc.
+        String body;
+        body.reserve(header.length() + CHUNK + 16);
+        while (bytesSent < fileSize) {
+            size_t thisChunk = (fileSize - bytesSent > CHUNK) ? CHUNK : (fileSize - bytesSent);
+            // Read this chunk + header into a buffer.
+            body = header + "\n";
+            if (fileStream) {
+                uint8_t* buf = (uint8_t*)malloc(thisChunk + 1);
+                if (!buf) {
+                    Serial.printf("[UPD] malloc failed thisChunk=%u\n", (unsigned)thisChunk);
+                    http.end();
+                    delete secureClient;
+                    return false;
+                }
+                size_t got = 0;
+                while (got < thisChunk && fileStream->available()) {
+                    int ch = fileStream->read();
+                    if (ch < 0) break;
+                    buf[got++] = (uint8_t)ch;
+                }
+                if (got > 0) {
+                    // Rebuild the HTTP body: header line + chunk data.
+                    body = header + "\n";
+                    body += String((char*)buf, got);
+                }
+                Serial.printf("[UPD] about to POST %u bytes (heap=%u) chunk %u\n",
+                              (unsigned)body.length(), (unsigned)ESP.getFreeHeap(),
+                              (unsigned)(bytesSent / CHUNK) + 1);
+                Serial.printf("[UPD] CHUNK off=%u got=%u avail=%u\n",
+                              (unsigned)bytesSent, (unsigned)got, (unsigned)fileStream->available());
+                free(buf);
+                lastCode = http.POST(body);
+                Serial.printf("[UPLOAD] %s: CHUNK (off=%u) BODY_SZ=%u http=%d RESP='%s'\n",
+                              sessionId.c_str(), (unsigned)bytesSent, (unsigned)body.length(), lastCode);
+            } else {
+                lastCode = -1;
+            }
+            const String resp = (lastCode > 0) ? http.getString() : String();
+            http.end();
+            // Re-initialize for next chunk (must reuse, can't reassign)
+            delete secureClient;
+            secureClient = nullptr;
+            if (isHttpsUrl(url)) {
+                secureClient = new WiFiClientSecure();
+                secureClient->setInsecure();
+                beginOk = http.begin(*secureClient, url);
+            } else {
+                beginOk = http.begin(url);
+            }
+            if (!beginOk) break;
+            http.setTimeout(timeoutMs);
+            http.addHeader("Content-Type", "text/csv");
+            http.addHeader("Connection", "close");
+            http.addHeader("X-Session-Id", sessionId);
+            http.addHeader("X-Tracker-Id", chipIdString());
+            http.addHeader("X-Firmware", cfg::FW_VERSION);
+            if (activeIngestUser_ && activeIngestUser_[0] != '\0') {
+                http.setAuthorization(activeIngestUser_, activeIngestPass_ ? activeIngestPass_ : "");
+            }
+            if (lastCode >= 200 && lastCode < 300) {
+                bytesSent += thisChunk;
+                esp_task_wdt_reset();  // each chunk takes several seconds
+            } else {
+                Serial.printf("[UPLOAD] %s: CHUNK (off=%u) FAIL http=%d %ums\n",
+                              sessionId.c_str(), (unsigned)bytesSent, lastCode,
+                              (unsigned)(millis() - tStart));
+                http.end();
+                delete secureClient;
+                return false;
+            }
+        }
+        // All chunks succeeded.
+        Serial.printf("[UPLOAD] %s OK http=%d %ums chunks=%u file_bytes=%u\n",
+                      sessionId.c_str(), lastCode, (unsigned)(millis() - tStart),
+                      (unsigned)((fileSize + CHUNK - 1) / CHUNK),
+                      (unsigned)fileSize);
+        delete secureClient;
+        secureClient = nullptr;
+        return true;
+    }
     const uint32_t t0 = millis();
     int code;
     // v0.7.1: pet the WDT immediately before AND after the HTTP request.

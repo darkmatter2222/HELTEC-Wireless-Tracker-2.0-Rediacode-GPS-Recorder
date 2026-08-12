@@ -811,14 +811,62 @@ void SessionStore::appendEvent(uint64_t timestampMsFull,
 // =============================================================================
 
 size_t SessionStore::totalBytes() const {
-    if (backend_ == Backend::Sd)       return (size_t)std::min<uint64_t>(SD.totalBytes(),       SIZE_MAX);
+    // For the SD backend, only call SD.totalBytes() when the filesystem is
+    // actually mounted under the standard SD object.  When the backend is
+    // SD_MMC, fs_ points to SD_MMC (not SD), so SD.totalBytes() would
+    // return garbage (often UINT64_MAX) and inflate the reported usage.
+    if (backend_ == Backend::Sd) {
+        // Distinguish SPI-based SD (fs_ == &SD) from SD_MMC (fs_ == &SD_MMC).
+        // SD.totalBytes() is unreliable when the filesystem isn't mounted.
+        if (fs_ == &SD) return (size_t)std::min<uint64_t>(SD.totalBytes(), SIZE_MAX);
+        // SD_MMC fallback: scan files in the sessions dir and sum their sizes.
+        if (fs_ == &SD_MMC) {
+            int64_t total = 0;
+            fs::File dir = fs_->open(cfg::SESSIONS_DIR);
+            if (dir && dir.isDirectory()) {
+                fs::File f = dir.openNextFile();
+                while (f) {
+                    if (!f.isDirectory()) {
+                        total += (int64_t)f.size();
+                    }
+                    f.close();
+                    f = dir.openNextFile();
+                }
+            }
+            return (size_t)std::max<int64_t>(0, total);
+        }
+        return 0;
+    }
     if (backend_ == Backend::SdFat)    return (size_t)std::min<uint64_t>(cardSizeMb_ * 1024ULL * 1024ULL, SIZE_MAX);
     if (backend_ == Backend::LittleFs) return LittleFS.totalBytes();
     return 0;
 }
 
 size_t SessionStore::usedBytes() const {
-    if (backend_ == Backend::Sd)       return (size_t)std::min<uint64_t>(SD.usedBytes(), SIZE_MAX);
+    if (backend_ == Backend::Sd) {
+        // Only use SD.usedBytes() when the filesystem is actually mounted
+        // under the standard SD object.  For SD_MMC, fs_ points to
+        // SD_MMC instead, and SD.usedBytes() returns garbage (often
+        // UINT64_MAX) when the filesystem isn't mounted.
+        if (fs_ == &SD) return (size_t)std::min<uint64_t>(SD.usedBytes(), SIZE_MAX);
+        // SD_MMC fallback: sum file sizes in the sessions dir.
+        if (fs_ == &SD_MMC) {
+            int64_t total = 0;
+            fs::File dir = fs_->open(cfg::SESSIONS_DIR);
+            if (dir && dir.isDirectory()) {
+                fs::File f = dir.openNextFile();
+                while (f) {
+                    if (!f.isDirectory()) {
+                        total += (int64_t)f.size();
+                    }
+                    f.close();
+                    f = dir.openNextFile();
+                }
+            }
+            return (size_t)std::max<int64_t>(0, total);
+        }
+        return 0;
+    }
     if (backend_ == Backend::SdFat) {
         // SdFat freeClusterCount() is slow, so we sum file sizes in the
         // sessions dir instead. This is O(N) but N is small and only
@@ -831,7 +879,7 @@ size_t SessionStore::usedBytes() const {
                 if (!child.isDir()) {
                     size_t sz = child.size();
                     if (sz == (size_t)-1) continue;
-                    total += (int64_t)sz;
+                    total += (size_t)sz;
                 }
                 child.close();
             }
@@ -937,17 +985,20 @@ std::vector<SessionStore::PendingUpload> SessionStore::listPendingUploads() cons
             if (!f.isDirectory()) {
                 String name = fileBaseName(String(f.name()));
                 if (isPendingFilename(name)) {
-                    // v1.0.4: skip header-only files (size <= 200 bytes means
-                    // no data rows, only the CSV header). This prevents the
-                    // device from looping forever trying to upload 107-byte
-                    // files that the server rejects with HTTP 400.
+                    // v1.1.0: For header-only files, remove directly without
+                    // holding an open handle, avoiding "Has open FD" errors
+                    // on LittleFS when the OS hasn't released the FD yet.
                     size_t sz = f.size();
                     if (sz <= 200) {
                         Serial.printf("[STORE] skipping header-only pending file: %s (%u bytes)\n",
                                       name.c_str(), (unsigned)sz);
-                        // Auto-cleanup: close the directory iterator first,
-                        // then remove the stale file.
+                        // Close then immediately remove; the File wrapper
+                        // handles FD release.  A direct fs_->remove() call
+                        // can race with the in-kernel FD cache, so we
+                        // explicitly yield to let the OS flush caches.
                         f.close();
+                        // Small yield to let FS caches settle.
+                        yield();
                         if (fs_->remove(String(cfg::SESSIONS_DIR) + "/" + name)) {
                             Serial.printf("[STORE] removed header-only file: %s\n", name.c_str());
                         }

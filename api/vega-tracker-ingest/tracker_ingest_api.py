@@ -247,211 +247,80 @@ def _parse_csv(body: str, session_id: str, header_device_id: str | None,
     """
     out: list[dict[str, Any]] = []
     rejected = 0
-    rdr = csv.reader(io.StringIO(body))
-    for row in rdr:
-        if not row:
-            continue
-        # Skip header row.
-        if row[0].strip().lower() == "timestampms":
-            continue
-        # Pad to minimum 6 cols defensively.
-        while len(row) < 6:
-            row.append("")
-        ts   = _safe_int(row[0])
-        usv  = _safe_float(row[1])
-        cps  = _safe_float(row[2])
-        lat  = _safe_float(row[3])
-        lng  = _safe_float(row[4])
-        dev  = row[5].strip() or (header_device_id or None)
+    try:
+        rdr = csv.reader(io.StringIO(body))
+        for row in rdr:
+            if not row:
+                continue
+            # Skip header row.
+            if row[0].strip().lower() == "timestampms":
+                continue
+            # Pad to minimum 6 cols defensively.
+            while len(row) < 6:
+                row.append("")
+            ts   = _safe_int(row[0])
+            usv  = _safe_float(row[1])
+            cps  = _safe_float(row[2])
+            lat  = _safe_float(row[3])
+            lng  = _safe_float(row[4])
+            dev  = row[5].strip() or (header_device_id or None)
 
-        # Extended fields added in firmware 0.3.0 (columns 6-9).
-        # Pre-0.3.0 uploads have 6 columns; these default to None.
-        speed_kph   = _safe_float(row[6]) if len(row) > 6 else None
-        bearing_deg = _safe_float(row[7]) if len(row) > 7 else None
-        altitude_m  = _safe_float(row[8]) if len(row) > 8 else None
-        hdop_val    = _safe_float(row[9]) if len(row) > 9 else None
-        # Column 10 (event) added in firmware 0.7.0 -- GPS_LOST / GPS_REGAINED
-        # transition markers. Normal samples leave this empty; event rows have
-        # no lat/lng/dose values, only a timestamp + deviceId + tag. Stored on
-        # the sample doc so the viewer can split polylines at gaps.
-        event_tag   = row[10].strip() if len(row) > 10 and row[10].strip() else None
-        # Column 11 (accuracyM) added in firmware 0.8.0 -- estimated horizontal
-        # accuracy in metres. The firmware computes this from HDOP via the
-        # `accuracyM = hdop * 5.0` UERE rule of thumb; the RadiaCode app track
-        # importer carries the measured value directly. Stored alongside hdop
-        # so consumers can pick whichever they prefer.
-        accuracy_m  = _safe_float(row[11]) if len(row) > 11 else None
+            # Extended fields added in firmware 0.3.0 (columns 6-9).
+            # Pre-0.3.0 uploads have 6 columns; these default to None.
+            speed_kph   = _safe_float(row[6]) if len(row) > 6 else None
+            bearing_deg = _safe_float(row[7]) if len(row) > 7 else None
+            altitude_m  = _safe_float(row[8]) if len(row) > 8 else None
+            hdop_val    = _safe_float(row[9]) if len(row) > 9 else None
+            # Column 10 (event) added in firmware 0.7.0 -- GPS_LOST / GPS_REGAINED
+            # transition markers. Normal samples leave this empty; event rows have
+            # no lat/lng/dose values, only a timestamp + deviceId + tag. Stored on
+            # the sample doc so the viewer can split polylines at gaps.
+            event_tag   = row[10].strip() if len(row) > 10 and row[10].strip() else None
+            # Column 11 (accuracyM) added in firmware 0.8.0 -- estimated horizontal
+            # accuracy in metres. The firmware computes this from HDOP via the
+            # `accuracyM = hdop * 5.0` UERE rule of thumb; the RadiaCode app track
+            # importer carries the measured value directly. Stored alongside hdop
+            # so consumers can pick whichever they prefer.
+            accuracy_m  = _safe_float(row[11]) if len(row) > 11 else None
 
-        if ts is None:
-            rejected += 1
-            continue
-        # Server-side sanity gate: reject pre-2020 timestamps.  The firmware
-        # now filters these out before writing to SD card, but old session
-        # files created before that fix get uploaded verbatim and must be
-        # caught here to prevent session metadata corruption.
-        if ts < MIN_VALID_TS_MS:
-            rejected += 1
-            log.debug("ingest sessionId=%s rejecting row ts=%d (pre-2020)",
-                      session_id, ts)
-            continue
-        doc: dict[str, Any] = {
-            "sessionId":  session_id,
-            "deviceId":   dev,
-            "trackerId":  tracker_id,
-            "firmware":   firmware,
-            "timestampMs": ts,
-            "uSvPerHour": usv,
-            "cps":        cps,
-            "latitude":   lat,
-            "longitude":  lng,
-        }
-        # Store extended telemetry only when the firmware actually sent them
-        # (non-None). This keeps documents from pre-0.3.0 uploads lean.
-        if speed_kph   is not None: doc["speedKph"]   = speed_kph
-        if bearing_deg is not None: doc["bearingDeg"] = bearing_deg
-        if altitude_m  is not None: doc["altitudeM"]  = altitude_m
-        if hdop_val    is not None: doc["hdop"]        = hdop_val
-        if event_tag   is not None: doc["event"]       = event_tag
-        if accuracy_m  is not None: doc["accuracyM"]   = accuracy_m
-        if lat is not None and lng is not None and not (lat == 0.0 and lng == 0.0):
-            doc["loc"] = {"type": "Point", "coordinates": [lng, lat]}
-        out.append(doc)
-    if rejected:
-        log.warning("ingest sessionId=%s rejected %d pre-2020 row(s) (old firmware artifact)",
-                    session_id, rejected)
+            if ts is None:
+                rejected += 1
+                continue
+            # Server-side sanity gate: reject pre-2020 timestamps.  The firmware
+            # now filters these out before writing to SD card, but old session
+            # files created before that fix get uploaded verbatim and must be
+            # caught here to prevent session metadata corruption.
+            if ts < MIN_VALID_TS_MS:
+                rejected += 1
+                log.debug("ingest sessionId=%s rejecting row ts=%d (pre-2020)",
+                          session_id, ts)
+                continue
+            doc: dict[str, Any] = {
+                "sessionId":  session_id,
+                "deviceId":   dev,
+                "trackerId":  tracker_id,
+                "firmware":   firmware,
+                "timestampMs": ts,
+                "uSvPerHour": usv,
+                "cps":        cps,
+                "latitude":   lat,
+                "longitude":  lng,
+            }
+            # Store extended telemetry only when the firmware actually sent them
+            # (non-None). This keeps documents from pre-0.3.0 uploads lean.
+            if speed_kph   is not None: doc["speedKph"]   = speed_kph
+            if bearing_deg is not None: doc["bearingDeg"] = bearing_deg
+            if altitude_m  is not None: doc["altitudeM"]  = altitude_m
+            if hdop_val    is not None: doc["hdop"]        = hdop_val
+            if event_tag   is not None: doc["event"]       = event_tag
+            if accuracy_m  is not None: doc["accuracyM"]   = accuracy_m
+            if lat is not None and lng is not None and not (lat == 0.0 and lng == 0.0):
+                doc["loc"] = {"type": "Point", "coordinates": [lng, lat]}
+            out.append(doc)
+    except csv.Error as e:
+        log.warning("ingest sessionId=%s CSV parse error: %s", session_id, e)
+        raise HTTPException(status_code=400, detail=f"Invalid CSV data: {e}")
     return out, rejected
-
-
-def _bulk_insert(coll, docs: list[dict[str, Any]]) -> tuple[int, int]:
-    """Insert in batches with ordered=False so duplicates don't abort.
-    Returns (inserted, duplicate_skipped)."""
-    inserted = 0
-    duplicates = 0
-    for i in range(0, len(docs), INGEST_BATCH_SIZE):
-        batch = docs[i:i + INGEST_BATCH_SIZE]
-        try:
-            res = coll.insert_many(batch, ordered=False)
-            inserted += len(res.inserted_ids)
-        except BulkWriteError as bwe:
-            wr_err = bwe.details.get("writeErrors", [])
-            for e in wr_err:
-                if e.get("code") == 11000:  # duplicate key
-                    duplicates += 1
-                else:
-                    log.warning("bulk-write error code=%s: %s", e.get("code"), e.get("errmsg"))
-            inserted += bwe.details.get("nInserted", len(batch) - len(wr_err))
-    return inserted, duplicates
-
-
-def _bulk_upsert_merge(coll, docs: list[dict[str, Any]]) -> tuple[int, int, int]:
-    """Upsert by {sessionId, timestampMs}, merging any new fields into existing
-    docs via $set / $setOnInsert. Used by /ingest/csv-merge so that re-imports
-    of historical data (e.g. the RadiaCode track files) can add new columns
-    like `accuracyM` to rows that were ingested before the schema knew about
-    them. Returns (inserted, modified, matched_unchanged)."""
-    from pymongo import UpdateOne
-    inserted  = 0
-    modified  = 0
-    unchanged = 0
-    # Fields that should only be written once (immutable identity / source-of-truth):
-    immutable_keys = {"sessionId", "timestampMs", "deviceId", "trackerId",
-                       "firmware", "loc"}
-    for i in range(0, len(docs), INGEST_BATCH_SIZE):
-        batch = docs[i:i + INGEST_BATCH_SIZE]
-        ops = []
-        for d in batch:
-            filt = {"sessionId": d["sessionId"], "timestampMs": d["timestampMs"]}
-            set_doc = {k: v for k, v in d.items() if k not in immutable_keys}
-            set_on_insert = {k: v for k, v in d.items() if k in immutable_keys}
-            update = {}
-            if set_doc:        update["$set"]         = set_doc
-            if set_on_insert:  update["$setOnInsert"] = set_on_insert
-            ops.append(UpdateOne(filt, update, upsert=True))
-        if not ops:
-            continue
-        res = coll.bulk_write(ops, ordered=False)
-        inserted  += res.upserted_count
-        modified  += res.modified_count
-        unchanged += res.matched_count - res.modified_count
-    return inserted, modified, unchanged
-
-
-# ---------- routes ----------------------------------------------------------
-
-@app.get("/health")
-def health():
-    try:
-        app.state.mongo.admin.command("ping")
-        mongo_ok = True
-    except PyMongoError as e:
-        log.error("mongo ping failed: %s", e)
-        mongo_ok = False
-    return {
-        "status":   "healthy" if mongo_ok else "degraded",
-        "mongo":    mongo_ok,
-        "version":  API_VERSION,
-    }
-
-
-@app.get("/info")
-def info():
-    samples = app.state.samples
-    sessions = app.state.sessions
-    return {
-        "version":  API_VERSION,
-        "mongo": {
-            "uri":       _redact_mongo_uri(MONGO_URI),
-            "db":        MONGO_DB,
-            "samples":   samples.estimated_document_count(),
-            "sessions":  sessions.estimated_document_count(),
-            "collections": [SAMPLES_COLL, SESSIONS_COLL],
-        },
-        "limits": {
-            "max_body_bytes":    MAX_BODY_BYTES,
-            "ingest_batch_size": INGEST_BATCH_SIZE,
-        },
-    }
-
-
-@app.get("/sessions")
-def list_sessions(limit: int = 200, include_deleted: bool = Query(default=False)):
-    """List ingested sessions, newest first.
-
-    sizeBytes is an estimate: samples * avg_doc_storageSize from collStats.
-    Accurate to within ~10% for typical sessions.
-
-    By default, soft-deleted sessions (deletedAt is set) are excluded.
-    Pass ?include_deleted=true to include them.
-    """
-    try:
-        cs = app.state.samples.command("collStats", "tracker_samples")
-        avg_bytes = (cs["storageSize"] / cs["count"]) if cs.get("count") else 150.0
-    except Exception:
-        avg_bytes = 150.0  # fallback estimate
-
-    # deletedAt=None matches both missing field and explicit null — both mean "active".
-    filter_q = {} if include_deleted else {"deletedAt": None}
-    cur = app.state.sessions.find(filter_q, sort=[("lastIngestMs", -1)], limit=limit)
-    result = []
-    for d in cur:
-        samples = d.get("samples") or 0
-        result.append({
-            "sessionId":     d.get("sessionId"),
-            "displayName":   d.get("displayName"),
-            "deviceId":      d.get("deviceId"),
-            "trackerId":     d.get("trackerId"),
-            "firmware":      d.get("firmware"),
-            "samples":       samples,
-            "sizeBytes":     round(samples * avg_bytes),
-            "firstTsMs":     d.get("firstTsMs"),
-            "lastTsMs":      d.get("lastTsMs"),
-            "firstIngestMs": d.get("firstIngestMs"),
-            "lastIngestMs":  d.get("lastIngestMs"),
-            "uploads":       d.get("uploads", 1),
-            "deletedAt":     d.get("deletedAt"),
-            "deletedBy":     d.get("deletedBy"),
-        })
-    return result
 
 
 @app.get("/sessions/area")
@@ -1692,90 +1561,90 @@ async def ingest_csv(
     log.info("ingest request sessionId=%s tracker=%s firmware=%s bodyBytes=%d ip=%s user=%s",
              x_session_id, x_tracker_id, x_firmware, len(body), client_ip, username or "(none)")
 
-    text = body.decode("utf-8", errors="replace")
-    docs, rejected = _parse_csv(text, x_session_id, x_device_id, x_tracker_id, x_firmware)
-
-    if not docs and rejected > 0:
-        log.error("ingest sessionId=%s ALL %d rows rejected (pre-2020 timestamps); "
-                  "old firmware artifact -- not inserting", x_session_id, rejected)
-        raise HTTPException(
-            status_code=400,
-            detail=f"All {rejected} rows have pre-2020 timestamps (old firmware artifact). "
-                   "Flash updated firmware to stop recording millis()-since-boot as timestamps.",
-        )
-    if not docs and rejected == 0:
-        # Header-only upload accepted: valid request with no data rows
-        # (e.g., a day file that was created but had zero GPS samples).
-        # This prevents the device from looping forever on a stuck 107-byte file.
-        log.info("ingest sessionId=%s header-only upload (0 data rows)", x_session_id)
-        return JSONResponse(
-            content={
-                "sessionId": x_session_id,
-                "received": 0,
-                "valid": 0,
-                "rejected": 0,
-                "inserted": 0,
-                "duplicates": 0,
-                "firstTsMs": 0,
-                "lastTsMs": 0,
-            },
-            status_code=200,
-        )
-    if not docs:
-        raise HTTPException(status_code=400, detail="no parseable rows")
-
-    inserted, duplicates = _bulk_insert(app.state.samples, docs)
-
-    now_ms = int(time.time() * 1000)
-    # first_ts/last_ts computed ONLY from the validated (>= MIN_VALID_TS_MS) docs.
-    # This is critical: using $min on raw rows lets one bad row permanently
-    # corrupt firstTsMs for the session.
-    first_ts = min(d["timestampMs"] for d in docs)
-    last_ts  = max(d["timestampMs"] for d in docs)
-
-    # v0.5.1: derive deviceId from CSV row data, not just the X-Device-Id header.
-    # Firmware never sends that header -- it embeds the RadiaCode MAC in row
-    # column 6 -- so the session-metadata deviceId was always null. Pick the
-    # last non-empty value (rows are in timestamp order within the upload).
-    derived_device_id = x_device_id
-    for d in reversed(docs):
-        v = d.get("deviceId")
-        if v:
-            derived_device_id = v
-            break
-
-    # Upsert session metadata.  Use $min/$max only over valid timestamps.
-    # NOTE: firstTsMs uses $min which means a subsequent upload with a smaller
-    # but still-valid timestamp is fine (correct early boundary).  But we
-    # must never let pre-2020 values reach here -- filtered above.
-    app.state.sessions.update_one(
-        {"sessionId": x_session_id},
-        {
-            "$set": {
-                "sessionId":     x_session_id,
-                "deviceId":      derived_device_id,
-                "trackerId":     x_tracker_id,
-                "firmware":      x_firmware,
-                "lastIngestMs":  now_ms,
-            },
-            "$min": {"firstTsMs": first_ts, "firstIngestMs": now_ms},
-            "$max": {"lastTsMs":  last_ts},
-            "$inc": {"samples":  inserted, "uploads": 1},
-            "$setOnInsert": {"createdMs": now_ms},
-        },
-        upsert=True,
-    )
-
-    log.info(
-        "ingest OK sessionId=%s received=%d valid=%d rejected=%d inserted=%d dup=%d "
-        "firstTsMs=%d lastTsMs=%d ip=%s user=%s durationMs=%d",
-        x_session_id, len(docs) + rejected, len(docs), rejected,
-        inserted, duplicates, first_ts, last_ts, client_ip, username or "(none)",
-        int((time.monotonic() - _t0) * 1000),
-    )
-
-    # Record one document per upload call for the upload-history UI.
     try:
+        text = body.decode("utf-8", errors="replace")
+        docs, rejected = _parse_csv(text, x_session_id, x_device_id, x_tracker_id, x_firmware)
+
+        if not docs and rejected > 0:
+            log.error("ingest sessionId=%s ALL %d rows rejected (pre-2020 timestamps); "
+                      "old firmware artifact -- not inserting", x_session_id, rejected)
+            raise HTTPException(
+                status_code=400,
+                detail=f"All {rejected} rows have pre-2020 timestamps (old firmware artifact). "
+                       "Flash updated firmware to stop recording millis()-since-boot as timestamps.",
+            )
+        if not docs and rejected == 0:
+            # Header-only upload accepted: valid request with no data rows
+            # (e.g., a day file that was created but had zero GPS samples).
+            # This prevents the device from looping forever on a stuck 107-byte file.
+            log.info("ingest sessionId=%s header-only upload (0 data rows)", x_session_id)
+            return JSONResponse(
+                content={
+                    "sessionId": x_session_id,
+                    "received": 0,
+                    "valid": 0,
+                    "rejected": 0,
+                    "inserted": 0,
+                    "duplicates": 0,
+                    "firstTsMs": 0,
+                    "lastTsMs": 0,
+                },
+                status_code=200,
+            )
+        if not docs:
+            raise HTTPException(status_code=400, detail="no parseable rows")
+
+        inserted, duplicates = _bulk_insert(app.state.samples, docs)
+
+        now_ms = int(time.time() * 1000)
+        # first_ts/last_ts computed ONLY from the validated (>= MIN_VALID_TS_MS) docs.
+        # This is critical: using $min on raw rows lets one bad row permanently
+        # corrupt firstTsMs for the session.
+        first_ts = min(d["timestampMs"] for d in docs)
+        last_ts  = max(d["timestampMs"] for d in docs)
+
+        # v0.5.1: derive deviceId from CSV row data, not just the X-Device-Id header.
+        # Firmware never sends that header -- it embeds the RadiaCode MAC in row
+        # column 6 -- so the session-metadata deviceId was always null. Pick the
+        # last non-empty value (rows are in timestamp order within the upload).
+        derived_device_id = x_device_id
+        for d in reversed(docs):
+            v = d.get("deviceId")
+            if v:
+                derived_device_id = v
+                break
+
+        # Upsert session metadata.  Use $min/$max only over valid timestamps.
+        # NOTE: firstTsMs uses $min which means a subsequent upload with a smaller
+        # but still-valid timestamp is fine (correct early boundary).  But we
+        # must never let pre-2020 values reach here -- filtered above.
+        app.state.sessions.update_one(
+            {"sessionId": x_session_id},
+            {
+                "$set": {
+                    "sessionId":     x_session_id,
+                    "deviceId":      derived_device_id,
+                    "trackerId":     x_tracker_id,
+                    "firmware":      x_firmware,
+                    "lastIngestMs":  now_ms,
+                },
+                "$min": {"firstTsMs": first_ts, "firstIngestMs": now_ms},
+                "$max": {"lastTsMs":  last_ts},
+                "$inc": {"samples":  inserted, "uploads": 1},
+                "$setOnInsert": {"createdMs": now_ms},
+            },
+            upsert=True,
+        )
+
+        log.info(
+            "ingest OK sessionId=%s received=%d valid=%d rejected=%d inserted=%d dup=%d "
+            "firstTsMs=%d lastTsMs=%d ip=%s user=%s durationMs=%d",
+            x_session_id, len(docs) + rejected, len(docs), rejected,
+            inserted, duplicates, first_ts, last_ts, client_ip, username or "(none)",
+            int((time.monotonic() - _t0) * 1000),
+        )
+
+        # Record one document per upload call for the upload-history UI.
         app.state.uploads.insert_one({
             "sessionId":    x_session_id,
             "receivedAt":   now_ms,
@@ -1792,19 +1661,20 @@ async def ingest_csv(
             "durationMs":   int((time.monotonic() - _t0) * 1000),
             "httpStatus":   200,
         })
-    except Exception as _ue:
-        log.warning("uploads: failed to record upload log for %s: %s", x_session_id, _ue)
 
-    return JSONResponse({
-        "sessionId":   x_session_id,
-        "received":    len(docs) + rejected,
-        "valid":       len(docs),
-        "rejected":    rejected,
-        "inserted":    inserted,
-        "duplicates":  duplicates,
-        "firstTsMs":   first_ts,
-        "lastTsMs":    last_ts,
-    })
+        return JSONResponse({
+            "sessionId":   x_session_id,
+            "received":    len(docs) + rejected,
+            "valid":       len(docs),
+            "rejected":    rejected,
+            "inserted":    inserted,
+            "duplicates":  duplicates,
+            "firstTsMs":   first_ts,
+            "lastTsMs":    last_ts,
+        })
+    except Exception as _e:
+        log.error("ingest sessionId=%s FAILED: %s", x_session_id, _e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"internal error: {_e}")
 
 
 @app.post("/ingest/csv-merge")
