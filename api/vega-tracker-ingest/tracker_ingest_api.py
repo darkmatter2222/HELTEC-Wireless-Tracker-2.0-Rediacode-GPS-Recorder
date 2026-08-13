@@ -580,6 +580,18 @@ def _has_gps(row: dict) -> bool:
     )
 
 
+def _bulk_insert(collection, docs):
+    """Insert a list of documents and return (inserted, duplicates)."""
+    if not docs:
+        return 0, 0
+    try:
+        result = collection.insert_many(docs, ordered=True)
+        return len(result.inserted_ids), 0
+    except Exception as e:
+        log.warning("bulk_insert failed: %s", e)
+        return 0, 0
+
+
 def _session_to_radiacode_txt(rows: list[dict], gps_only: bool = False) -> str:
     """Produce a RadiaCode native .txt format (tab-separated with FILETIME timestamps).
 

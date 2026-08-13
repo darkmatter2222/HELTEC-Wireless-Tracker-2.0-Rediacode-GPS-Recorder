@@ -775,6 +775,49 @@ uint32_t WifiUploader::runOnce() {
         return 0;
     }
 
+    // v1.1.3: aggressive cleanup when disk is near full.
+    // Before attempting uploads, try to free space so new data can be written.
+    {
+        const size_t total = store_->totalBytes();
+        const size_t used = store_->usedBytes();
+        Serial.printf("[UPD] debug: total=%u used=%u percent=%u\n",
+                      (unsigned)total, (unsigned)used, (unsigned)(used * 100 / total));
+        if (total > 0 && (int)((used * 100ULL) / total) >= 95) {
+            // Try to free space by removing oldest pending uploads.
+            auto stale = store_->listPendingUploads();
+            std::sort(stale.begin(), stale.end(),
+                      [](const SessionStore::PendingUpload& a,
+                         const SessionStore::PendingUpload& b) {
+                        return a.sizeBytes < b.sizeBytes;
+                      });
+            // v1.1.3: when disk is full, remove Pegasus pending uploads to free space.
+            // Even if there's only 1 pending upload, remove it if disk is full.
+            int scount = store_->sessionCount();
+            while (scount > 0 && (int)((store_->usedBytes() * 100ULL) / total) >= 95) {
+                auto p = stale.front();
+                if (!store_->removePendingUpload(p.filename)) {
+                    Serial.printf("[UPD] cleanup: failed to remove %s\n", p.filename.c_str());
+                    break;
+                }
+                Serial.printf("[UPD] cleanup: freed %s (%u bytes) total=%u K\n",
+                              p.filename.c_str(), (unsigned)p.sizeBytes,
+                              (unsigned)(store_->usedBytes() / 1024));
+                scount = store_->sessionCount();
+            }
+            // After cleanup, check if we freed enough space.
+            const size_t newUsed = store_->usedBytes();
+            if (total > 0 && (int)((newUsed * 100ULL) / total) >= 95) {
+                Serial.printf("[WIFI] disk still full (%u/%u K) after cleanup, skipping upload\n",
+                              (unsigned)(newUsed / 1024), (unsigned)(total / 1024));
+                event_log::appendEvent("WIFI", "skip_disk_full");
+                busy_ = false;
+                phase_ = (uint8_t)Phase::Idle;
+                event_log::markWifiInFlight(false);
+                return 0;
+            }
+        }
+    }
+
     uint32_t ok = 0;
     for (const auto& p : pending) {
         // v0.4.5: stale zero-byte .up.csv files (left over from earlier
@@ -819,7 +862,49 @@ uint32_t WifiUploader::runOnce() {
         esp_task_wdt_reset();
     }
 
-    phase_ = (uint8_t)Phase::Disconnecting;
+    // v1.1.1: cleanup stale pending uploads to prevent disk full condition.
+    // Two triggers:
+    //   1. Too many pending files — remove the oldest ones first.
+    //   2. Disk usage is high (>= 70%) — remove oldest pending uploads.
+    if (store_) {
+        // Case 1: cap on pending count.
+        if ((uint32_t)pending.size() > cfg::PENDING_UPLOAD_MAX) {
+            const uint32_t toRemove = (uint32_t)pending.size() - cfg::PENDING_UPLOAD_MAX;
+            for (uint32_t i = 0; i < toRemove; ++i) {
+                if (i < pending.size()) {
+                    const auto& p = pending[i];
+                    if (store_->removePendingUpload(p.filename)) {
+                        Serial.printf("[UPD] cleanup: removed old %s\n", p.filename.c_str());
+                    }
+                }
+            }
+        }
+        // Case 2: disk under pressure — aggressive cleanup.
+        const size_t diskPct = store_->percentUsed();
+        Serial.printf("[UPD] debug: diskPct=%u pending=%u\n", (unsigned)diskPct, (unsigned)pending.size());
+        if (diskPct >= cfg::PENDING_CLEANUP_PCT) {
+            auto stale = store_->listPendingUploads();
+            std::sort(stale.begin(), stale.end(),
+                      [](const SessionStore::PendingUpload& a,
+                         const SessionStore::PendingUpload& b) {
+                          return a.sizeBytes < b.sizeBytes;
+                      });
+            // Remove the smallest (oldest/least important) first.
+            // Cast sessionCount to int to avoid unsigned wraparound if negative.
+            int scount = store_->sessionCount();
+            while (scount > (int)cfg::PENDING_UPLOAD_MAX) {
+                // Front of ascending sort = smallest file.
+                auto p = stale.front();
+                if (!store_->removePendingUpload(p.filename)) {
+                    Serial.printf("[UPD] cleanup: failed to remove %s\n", p.filename.c_str());
+                    break;
+                }
+                Serial.printf("[UPD] cleanup: removed %s (%u bytes)\n",
+                              p.filename.c_str(), (unsigned)p.sizeBytes);
+                scount = store_->sessionCount();
+            }
+        }
+    }
     disconnectWifi();
     esp_task_wdt_reset();
     busy_ = false;

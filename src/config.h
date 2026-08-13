@@ -214,6 +214,21 @@ constexpr uint32_t DOSE_NVS_MAX_INTERVAL_MS = 300000; // 5 min hard ceiling
 // pet calls don't cover. A real wedge is still caught quickly enough.
 constexpr uint32_t TASK_WDT_TIMEOUT_S = 60;
 
+// ---------------- Pending upload cleanup (v1.1.1) ---------------------------
+// Maximum number of pending upload files to keep. If there are more, the
+// oldest ones are removed first to prevent the disk from filling up when
+// uploads fail repeatedly (e.g. network outages).
+//
+// v1.1.1: Added to fix the "red bar" issue where failed uploads accumulate
+// indefinitely, eventually filling the SD card and preventing new data from
+// being recorded (the append() function stops writing at 95% usage).
+//
+// Also: if disk usage reaches 70% or above, the oldest pending uploads are
+// removed in a batch to keep headroom. This is checked after each upload
+// cycle so the device never gets stuck in a "disk full" state.
+constexpr uint32_t PENDING_UPLOAD_MAX   = 10;  // cap on pending uploads
+constexpr uint32_t PENDING_CLEANUP_PCT  = 70; // trigger cleanup when disk is this full
+
 // ---------------- Wi-Fi upload self-heal (v0.8.1) ---------------------------
 // After this many consecutive upload failures the uploader checks heap.
 // If free heap is also below WIFI_HEAL_MIN_HEAP the task triggers a soft
