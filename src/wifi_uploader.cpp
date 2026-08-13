@@ -648,6 +648,7 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
                               sessionId.c_str(), (unsigned)bytesSent, lastCode,
                               (unsigned)(millis() - tStart));
                 http.end();
+                store_->closeSessionStream();
                 delete secureClient;
                 return false;
             }
@@ -657,6 +658,7 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
                       sessionId.c_str(), lastCode, (unsigned)(millis() - tStart),
                       (unsigned)((fileSize + CHUNK - 1) / CHUNK),
                       (unsigned)fileSize);
+        store_->closeSessionStream();
         delete secureClient;
         secureClient = nullptr;
         return true;
