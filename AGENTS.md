@@ -246,7 +246,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `0.9.5`.
+Current: `2.1`.
 
 ---
 
@@ -775,7 +775,7 @@ points that would crash the live Leaflet map.
 
 ### Native unit tests (runs on host PC — no hardware required)
 
-Seven test suites live under `test/`:
+Eight test suites live under `test/`:
 
 | Suite                    | Tests | What it validates |
 |--------------------------|-------|-------------------|
@@ -786,6 +786,7 @@ Seven test suites live under `test/`:
 | `test_gps_transition_native`     |  9    | GPS fix transition detector (first-obs, steady-state, flap) |
 | `test_link_health_native`        |  7    | BLE link-stall watchdog, including millis() wraparound |
 | `test_wifi_network_select_native`| 14    | Dual-network profile enable/disable, HTTPS URL detection, Basic Auth cred check |
+| `test_lfs_geometry_native`       |  6    | LittleFS volume-geometry gate: `total != 0 && used <= total` (v2.1) |
 
 **Prerequisites on Windows**: PlatformIO's native env calls `gcc`/`g++`/`ar` which
 are not in PATH by default. If VS Build Tools 2022 is installed, create one-time
@@ -802,11 +803,11 @@ Set-Content "$wrapDir\ar.bat"   "@echo off`r`n`"$llvm\llvm-ar.exe`" %*" -Encodin
 $env:PATH = "$wrapDir;$env:PATH"
 ```
 
-Then run all seven host-side suites:
+Then run all eight host-side suites:
 
 ```powershell
 pio test -e native
-# Expected: 83 test cases: 83 succeeded
+# Expected: 89 test cases: 89 succeeded
 ```
 
 ### Integration tests (requires device on serial port)
@@ -1990,3 +1991,59 @@ self-tests must pass. All passed on the current build:
   (May 2026). Updated in `public/config.js`, `src/api.js`, and `dist/config.js`.
   The nginx entrypoint script patches `config.js` at container start — no rebuild needed
   to change `API_BASE`.
+
+### LittleFS Mount With block_count == 0 Panics on First File Open (v2.1) — CRITICAL
+
+- **Symptom**: device crash-loops immediately after the boot banner. Serial shows
+  exactly three lines, forever, with uptime never leaving ~1 s:
+  ```
+  HTIT-Tracker firmware vX.Y starting...
+  [STORE] backend=LittleFS used=6160384 total=6160384
+  Guru Meditation Error: Core  1 panic'ed (IntegerDivideByZero). Exception was unhandled.
+  ```
+  `EXCCAUSE=0x6`, `EXCVADDR=0x00000000`, reset reason `PANIC (4)`. Observed 7 panics
+  in 45 s. Crash lands before Wi-Fi/BLE init, so `WIFISTAT` never gets a chance to run.
+- **Decoded** (addr2line on the matching ELF; verify with the ROM-reported
+  `ELF file SHA256` against `sha256(firmware.elf)`):
+  ```
+  lfs_alloc                 lfs.c:689     <-- remu by lfs->cfg->block_count == 0
+  lfs_dir_compact / splittingcompact / orphaningcommit / dir_commit
+  lfs_commitattr / lfs_setattr_
+  vfs_littlefs_update_mtime_value         (esp_littlefs sets mtime on open)
+  esp_vfs_open  <- fopen <- VFSFileImpl <- fs::FS::open
+  appendLineRaw                            src/event_log.cpp:61
+  ```
+  `event_log::beginBoot()` is the first writer after mount, so the very first
+  `LittleFS.open()` faults inside the allocator's modulo.
+- **Root cause**: the volume's superblock yields `block_count == 0`, so
+  `lfs_alloc()` divides by zero on its first block request. `total=6160384` is
+  the raw partition size from `hardware/partitions_tracker_v2.csv`
+  (`0x5E0000`), not a computed block total — the tell that geometry never
+  populated. Reached by flashing a *lower*-schema build over a volume written by
+  a newer one (here: 0.9.5 over 1.0.8's 13-column volume). A mount that
+  succeeds with `block_count == 0` never trips `format_if_mount_failed`, so the
+  wrapper's format-on-fail path does not rescue it.
+- **Fix (v2.1)** in `src/session_store.cpp`: after `LittleFS.begin()`, gate on
+  `lfsGeometryOk(totalBytes(), usedBytes())` = `total != 0 && used <= total`;
+  on failure `LittleFS.end()` → `LittleFS.format()` → re-`begin()`, and fail
+  hard if still invalid. Covered by `test_lfs_geometry_native` (6 cases).
+- **Verification**: with the *same* 0.9.5 binary, erasing only the littlefs
+  region (`esptool --chip esp32s3 erase_region 0x210000 0x5E0000`) took the
+  device from 7 panics/45 s to a clean boot — proving the volume, not the
+  code, was at fault. `erase_region` leaves NVS (`0x9000`) intact: dose kept
+  its value across the erase. Post-format healthy geometry:
+  `STATFS` shows `used=16384 total=6160384 pct=0 sessions=0`.
+- **Diagnostic recipe** for any future boot-loop panic:
+  ```bash
+  A2L=~/.platformio/packages/toolchain-xtensa-esp-elf/bin/xtensa-esp32s3-elf-addr2line.exe
+  $A2L -e .pio/build/heltec_tracker_v2/firmware.elf -f -C <backtrace addresses...>
+  # then disassemble the faulting PC:
+  OD=~/.platformio/packages/toolchain-xtensa-esp-elf/bin/xtensa-esp32s3-elf-objdump.exe
+  $OD -d --start-address=<PC-0x20> --stop-address=<PC+0x10> .pio/build/heltec_tracker_v2/firmware.elf
+  ```
+  Confirm the ELF is the one on the device by comparing `sha256sum firmware.elf`
+  with the `ELF file SHA256:` line in the panic output.
+- **Rule**: never trust a successful `LittleFS.begin()` on its own — check
+  `totalBytes() != 0` before the first write. When downgrading firmware across a
+  CSV-schema bump, erase the littlefs region so the older build recreates its own
+  volume; the on-device CSVs are redundant once ingested to MongoDB.

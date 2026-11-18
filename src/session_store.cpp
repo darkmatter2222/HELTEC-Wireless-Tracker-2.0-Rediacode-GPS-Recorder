@@ -95,6 +95,12 @@ String dayIdFromFilename(const String& name) {
     if (firstDot <= 0) return String();
     return name.substring(0, firstDot);
 }
+
+// LittleFS volume sanity gate. total == 0 means the mount produced a
+// zero-block volume; used > total is impossible for a coherent FS.
+bool lfsGeometryOk(size_t total, size_t used) {
+    return total != 0 && used <= total;
+}
 } // namespace
 
 bool SessionStore::begin() {
@@ -315,6 +321,30 @@ bool SessionStore::begin() {
     if (!LittleFS.begin(true, "/littlefs", 10, "littlefs")) {
         log_e("LittleFS mount failed even after format");
         return false;
+    }
+    // A mount can "succeed" with degenerate volume stats: total == 0 means the
+    // superblock yielded block_count == 0, and lfs_alloc()'s first modulo by
+    // block_count then panics with IntegerDivideByZero on the very first file
+    // open (used > total is likewise impossible). esp_littlefs.begin() only
+    // formats when the mount call itself fails, so catch it here instead:
+    // unmount, re-format, re-mount. 6160384-byte geometry rebuild takes <1 s.
+    if (!lfsGeometryOk(LittleFS.totalBytes(), LittleFS.usedBytes())) {
+        log_w("LittleFS geometry invalid (total=%u used=%u); reformatting",
+              (unsigned)LittleFS.totalBytes(), (unsigned)LittleFS.usedBytes());
+        LittleFS.end();
+        if (!LittleFS.format()) {
+            log_e("LittleFS format failed");
+            return false;
+        }
+        if (!LittleFS.begin(true, "/littlefs", 10, "littlefs")) {
+            log_e("LittleFS re-mount after format failed");
+            return false;
+        }
+        if (!lfsGeometryOk(LittleFS.totalBytes(), LittleFS.usedBytes())) {
+            log_e("LittleFS still invalid after format (total=%u used=%u)",
+                  (unsigned)LittleFS.totalBytes(), (unsigned)LittleFS.usedBytes());
+            return false;
+        }
     }
     if (!LittleFS.exists(cfg::SESSIONS_DIR)) {
         LittleFS.mkdir(cfg::SESSIONS_DIR);
