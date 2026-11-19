@@ -393,22 +393,88 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
     }
 
     const uint32_t t0 = millis();
-    int code;
-    // v0.7.1: pet the WDT immediately before AND after the HTTP request.
-    // sendRequest()/POST can block for up to http.setTimeout() (30 s) on a
-    // slow link; without these resets a slow upload would WDT-panic. We do
-    // not (and cannot) pet during the request itself because HTTPClient
-    // does not yield a callback hook. The 60 s WDT timeout in config.h is
-    // sized to cover the worst-case 30 s POST cleanly.
+    int code = 0;
+    String resp;
+    // v0.7.1: pet the WDT immediately before AND after every HTTP request.
+    // v2.2: the body is sent in whole-CSV-line chunks of
+    // cfg::UPLOAD_CHUNK_BYTES over one keep-alive connection, so no single
+    // un-petted window can exceed TASK_WDT_TIMEOUT_S even at ~300 B/s.
+    // One sendRequest blocks for (chunkBytes/linkRate) + 30 s response
+    // timeout ~= 57 s worst case; 8192/400 + 30 = 50.5 s at the field-
+    // measured LTE pace. The API parses each chunk independently (header
+    // rows skipped value-based, upserts idempotent), so chunked == single.
     esp_task_wdt_reset();
+    constexpr size_t CH = cfg::UPLOAD_CHUNK_BYTES;
     if (fileStream) {
-        // Stream path: no heap allocation for body.
-        code = http.sendRequest("POST", fileStream, fileSize);
+        // Stream path: no heap allocation for the whole body; one chunk
+        // buffer is reused for every POST.
+        uint8_t* cbuf = (uint8_t*)malloc(CH);
+        if (!cbuf) {
+            Serial.printf("[UPLOAD] %s: chunk buffer alloc failed (%u)\n",
+                          sessionId.c_str(), (unsigned)CH);
+            store_->closeSessionStream();
+            delete secureClient;
+            secureClient = nullptr;
+            return false;
+        }
+        size_t sent = 0;   // body bytes POSTed so far
+        size_t carry = 0;  // partial-line bytes held over to the next chunk
+        bool eof = false;
+        bool okAll = true;
+        while (okAll && (!eof || carry > 0)) {
+            size_t n = carry;
+            if (!eof) {
+                size_t want = CH - carry;
+                int got = fileStream->readBytes((char*)cbuf + carry, (unsigned)want);
+                if (got < 0) got = 0;
+                n += (size_t)got;
+                if ((size_t)got < want) eof = true;  // short read == EOF
+                if (n == 0) { okAll = false; break; }
+            }
+            // Send only whole lines: a row split across two POSTs would be
+            // rejected by the API's per-request CSV parse. On EOF the tail
+            // IS the final row, so send everything held.
+            size_t last = n;
+            if (!eof) {
+                while (last > 0 && cbuf[last - 1] != '\n') --last;
+                if (last == 0) last = n;  // single row longer than CH
+            }
+            carry = n - last;
+            if (carry) memmove(cbuf, cbuf + last, carry);
+            if (last) {
+                code = http.POST(cbuf, last);
+                if (code > 0) resp = http.getString();  // drain body for reuse
+                if (code < 200 || code >= 300) { okAll = false; break; }
+                sent += last;
+            }
+            esp_task_wdt_reset();
+        }
+        free(cbuf);
+        if (okAll && sent != fileSize) okAll = false;
+        if (!okAll && code == 0) code = HTTPC_ERROR_SEND_PAYLOAD_FAILED;
+        if (!okAll) { store_->closeSessionStream(); delete secureClient; secureClient = nullptr; return false; }
     } else {
-        code = http.POST((uint8_t*)body.c_str(), body.length());
+        // String fallback (SdFat backend): same line-aligned chunking.
+        size_t off = 0;
+        bool okAll = true;
+        while (off < fileSize && okAll) {
+            size_t want = CH;
+            if (fileSize - off < want) want = fileSize - off;
+            size_t endAt = off + want;
+            int nl = (int)endAt - 1;
+            if (endAt < fileSize) {
+                int found = body.lastIndexOf('\n', (unsigned)(endAt - 1));
+                if (found >= (int)off) nl = found;
+            }
+            size_t len = (size_t)nl - off + 1;
+            code = http.POST((uint8_t*)body.c_str() + off, len);
+            if (code > 0) resp = http.getString();
+            if (code < 200 || code >= 300) { okAll = false; break; }
+            off += len;
+            esp_task_wdt_reset();
+        }
     }
     esp_task_wdt_reset();
-    const String resp = (code > 0) ? http.getString() : String();
     http.end();
     store_->closeSessionStream();
     // Clean up the heap-allocated TLS client (if any) after http.end().

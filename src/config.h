@@ -132,7 +132,7 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "2.1";
+constexpr const char* FW_VERSION = "2.2";
 
 // ---------------- Battery / Wi-Fi safety gate (v0.4.2) -----------------------
 // Skip the Wi-Fi upload cycle entirely if VBAT is below this threshold (V).
@@ -221,6 +221,16 @@ constexpr uint32_t TASK_WDT_TIMEOUT_S = 60;
 // a real server-side problem that a reboot cannot fix.
 constexpr uint32_t WIFI_FAIL_REBOOT_THRESHOLD = 10;  // consecutive failures before check
 constexpr uint32_t WIFI_HEAL_MIN_HEAP         = 50000; // bytes; reboot only below this
+
+// ---------------- Chunked body upload (v2.2) --------------------------------
+// One HTTPClient request blocks for (bodyBytes / linkRate) + responseTimeout
+// with no WDT pet possible inside. On a congested LTE hotspot (field-measured
+// ~13.6 kbps) a ~270 KB day file alone crossed the 60 s task watchdog. The
+// body is now sent in whole-CSV-line chunks of this size, one keep-alive POST
+// per chunk, WDT-petted between chunks. Worst-case unfed window =
+// UPLOAD_CHUNK_BYTES/linkFloor + 30 s response timeout ~= 57 s at 300 B/s,
+// inside the 60 s TASK_WDT_TIMEOUT_S.
+constexpr size_t UPLOAD_CHUNK_BYTES = 8192;
 
 // ---------------- GPS reliability (v0.6.0) ----------------------------------
 // Default ESP32 HardwareSerial RX FIFO is 256 bytes -- at 115200 baud that

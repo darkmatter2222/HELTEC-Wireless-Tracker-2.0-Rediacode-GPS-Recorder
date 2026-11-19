@@ -246,7 +246,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `2.1`.
+Current: `2.2`.
 
 ---
 
@@ -2047,3 +2047,47 @@ self-tests must pass. All passed on the current build:
   `totalBytes() != 0` before the first write. When downgrading firmware across a
   CSV-schema bump, erase the littlefs region so the older build recreates its own
   volume; the on-device CSVs are redundant once ingested to MongoDB.
+
+### TASK_WDT Panic On Single Un-Petted Stream POST Over Slow Hotspot (v2.2) — CRITICAL
+
+- **Symptom** (field, phone hotspot = `INGEST_URL2`): two successful `cycle_done
+  ok=1/1`, then a crash and a brief boot loop; then normal operation. Every
+  crash line is identical:
+  `BOOT,TASK_WDT,raw0=12,raw1=12,...,lastUptimeMs=<previous cycle_start>,wifiInFlight=1`
+- **Decoded**: `raw0=12` = `TG0WDT_SYS_RESET`. `wifiInFlight=1` means the panic
+  landed inside `runOnce()`. Each crashed life = 5 s boot + 5 s grace
+  (`esp_task_wdt_add` at ~10 s) + 60 s unfed = ~70 s uptime, i.e. **exactly one
+  `TASK_WDT_TIMEOUT_S` period after the uploader subscribed**. The task never
+  reached the pets at `wifi_uploader.cpp` :403/:410 — it was still *inside*
+  `http.sendRequest("POST", fileStream, fileSize)`.
+- **Why one call can exceed 60 s**: `HTTPClient::sendRequest(Stream*)` is
+  `readBytes` + `_client->write` per chunk, and `WiFiClient::write` refills its
+  10-retry budget on every partial progress — so the *total* time is
+  `bodyBytes / linkRate`, bounded only by the link, not by `setTimeout(30000)`
+  (that bounds the response wait). The v0.7.1 pets sit *around* the call, so
+  the whole transfer is one unfed window. Measured (server-side): 266 KB in
+  19.5 s ⇒ ~13.6 kbps; 81 258 B drained in 165.26 s at 500 B/s in the repro.
+- **Reproduction** (no hardware flakiness needed): `scripts/sink_server.py
+  <port> <bytes_per_sec>` — a TCP sink that drains at a fixed pace.
+  - v2.1 binary @ 1400 B/s: `FAIL http=-11 32547ms` — the write loop alone ate
+    32.5 s of a 60 s budget before the 30 s response timeout.
+  - v2.1 binary @ 400 B/s: `rst:0xc` + `BOOT,TASK_WDT,raw0=12,...,wifiInFlight=1`
+    at ~61 s after `cycle_start` — same signature as the field crash.
+- **Fix (v2.2)** in `src/wifi_uploader.cpp::uploadOne()`: send the body as
+  whole-CSV-line chunks of `cfg::UPLOAD_CHUNK_BYTES` (8192) over one
+  keep-alive `HTTPClient` (`_reuse` default true), `esp_task_wdt_reset()`
+  between chunks. Worst-case unfed window = 8192/400 + 30 s ≈ 50.5 s < 60 s.
+  Chunks end on `\n` (a row split across requests would be rejected by the
+  API's per-request CSV parse). Chunked == single-request for the API:
+  header rows are skipped by value (`timestampms`), inserts are idempotent
+  against the unique `{sessionId, timestampMs}` index, and session metadata
+  uses `$min`/`$max`/`$inc`. Verified: same 81 258 B file, same 400 B/s sink,
+  0 panics — `cycle_done ok=1/1` after 247.9 s total (chunk drains 21–26 s).
+- **Rule**: any single blocking call whose duration is *link-rate-limited*
+  must be split so each unfed window fits inside `TASK_WDT_TIMEOUT_S`;
+  pets before/after a call only work when the call itself is bounded.
+- **Diagnostic note**: `WIFISTAT` after such a loop shows the file count
+  shrinking by ~8 KB per request; `lastHttp=-11` (read timeout) vs `-3`
+  (send payload failed) tells you whether the stall was in the write loop or
+  the response wait.
+
