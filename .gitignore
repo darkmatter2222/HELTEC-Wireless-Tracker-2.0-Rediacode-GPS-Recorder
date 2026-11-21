@@ -23,6 +23,14 @@ ride*.txt
 scan_dump.txt
 overnight*.log
 grab_watch.txt
+sink_repro.log
+*.har
+
+# ----- Cached bearer tokens from local API probing (never commit) -----
+scripts/radiaverse_tokens.json
+
+# ----- Agent local settings (machine-specific; workflows/ IS committed) -----
+.claude/settings.local.json
 
 # ----- Raw device data (not source) -----
 data/

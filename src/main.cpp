@@ -430,13 +430,48 @@ static void handleSerialCommand(const String& line) {
             case WifiUploader::ActiveNet::Remote: netStr = "remote"; break;
             default: break;
         }
-        Serial.printf("[WIFI] enabled=%d busy=%d net=%s uploaded=%u failed=%u "
-                      "lastAttempt=%ums lastSuccess=%ums lastHttp=%d heap_free=%u\n",
-                      (int)gWifi.enabled(), (int)gWifi.busy(),
+        // v2.3: phase decoded instead of numeric, plus the two numbers that
+        // explain a stall at a glance (gate state + last skip reason).
+        const char* phaseStr = "none";
+        switch (gWifi.phase()) {
+            case WifiUploader::Phase::Disabled:      phaseStr = "disabled";     break;
+            case WifiUploader::Phase::Idle:          phaseStr = "idle";         break;
+            case WifiUploader::Phase::Backoff:       phaseStr = "backoff";      break;
+            case WifiUploader::Phase::Connecting:    phaseStr = "connecting";   break;
+            case WifiUploader::Phase::Posting:       phaseStr = "posting";      break;
+            case WifiUploader::Phase::Disconnecting: phaseStr = "disconnecting";break;
+        }
+        Serial.printf("[WIFI] enabled=%d busy=%d phase=%s net=%s uploaded=%u failed=%u "
+                      "consec=%u lastAttempt=%ums lastSuccess=%ums lastHttp=%d heap_free=%u\n",
+                      (int)gWifi.enabled(), (int)gWifi.busy(), phaseStr,
                       netStr,
                       (unsigned)gWifi.uploadedCount(), (unsigned)gWifi.failedCount(),
+                      (unsigned)gWifi.consecutiveFailures(),
                       (unsigned)gWifi.lastAttemptMs(), (unsigned)gWifi.lastSuccessMs(),
                       gWifi.lastHttpStatus(), (unsigned)ESP.getFreeHeap());
+        // Line 2: the battery gate, which is the single most common reason for
+        // "no uploads" on this hardware. `lastAttempt=0` + gate=close == the
+        // cycle never reached the radio.
+        Serial.printf("[WIFI] gate=%s vbat=%.2fV open>=%.2fV close<=%.2fV chg=%u "
+                      "skip=%s(%d) skipMv=%d batterySkips=%u\n",
+                      gWifi.vbatGateOpen() ? "open" : "close",
+                      (double)trackerLastVbat(),
+                      (double)cfg::VBAT_MIN_FOR_WIFI, (double)cfg::VBAT_GATE_FLOOR,
+                      (unsigned)gWifi.charging(),
+                      wgate::skipName(gWifi.lastSkipReason()),
+                      (int)gWifi.lastSkipReason(),
+                      gWifi.lastSkipVbatMv(),
+                      (unsigned)gWifi.skippedByBattery());
+        // Line 3: link + drain accounting. nextIn lets you confirm the poked
+        // countdown without watching the TFT.
+        const uint32_t nextMs = gWifi.nextAttemptMs();
+        const int32_t  nextIn = (nextMs == 0) ? -1 : (int32_t)(nextMs - millis());
+        Serial.printf("[WIFI] connect attempts=%u last=%ums status=%d(%s) | "
+                      "cycle ms=%u bytes=%u chunks=%u nextIn=%dms\n",
+                      (unsigned)gWifi.connectAttempts(), (unsigned)gWifi.lastConnectMs(),
+                      gWifi.lastConnectStatus(), wgate::statusName(gWifi.lastConnectStatus()),
+                      (unsigned)gWifi.lastCycleMs(), (unsigned)gWifi.lastCycleBytes(),
+                      (unsigned)gWifi.lastChunks(), (int)nextIn);
         return;
     }
     if (upper == "REBOOT") {

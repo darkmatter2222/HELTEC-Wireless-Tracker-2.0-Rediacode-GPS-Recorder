@@ -1,0 +1,13 @@
+import struct
+f = open(r'C:\Users\ryans\source\repos\HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder\.pio\build\heltec_tracker_v1_2\firmware.elf', 'rb')
+d = f.read()
+f.close()
+print('File size:', len(d))
+print('Entry:', hex(struct.unpack_from('<I', d, 0x18)[0])
+print('PH off:', hex(struct.unpack_from('<I', d, 0x1c)[0])
+print('SH off:', hex(struct.unpack_from('<I', d, 0x20)[0])
+print('SH num:', struct.unpack_from('<H', d, 0x30)[0])
+print('SH size:', struct.unpack_from('<H', d, 0x2e)[0])
+print('PH num:', struct.unpack_from('<H', d, 0x2c)[0])
+print('PH size:', struct.unpack_from('<H', d, 0x2a)[0])
+print('Flags:', hex(struct.unpack_from('<I', d, 0x24)[0])

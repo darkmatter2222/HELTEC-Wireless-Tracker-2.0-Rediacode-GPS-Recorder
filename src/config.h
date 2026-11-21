@@ -132,16 +132,31 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "2.2";
+constexpr const char* FW_VERSION = "2.3";
 
-// ---------------- Battery / Wi-Fi safety gate (v0.4.2) -----------------------
+// ---------------- Battery / Wi-Fi safety gate (v0.4.2, hysteresis v2.3) ------
 // Skip the Wi-Fi upload cycle entirely if VBAT is below this threshold (V).
 // The Wi-Fi PA pulls 200-400 mA spikes during scan/associate; on a partially
 // discharged battery those spikes collapse the rail and trigger a brown-out
 // reset. 3.60 V is well above the BMS cutoff but below "fresh off charger",
 // so day-to-day operation is unaffected and only critically low cells skip
 // uploads. Recording (BLE + GPS + storage, ~80 mA) is always allowed.
-constexpr float    VBAT_MIN_FOR_WIFI = 3.60f;
+//
+// v2.3 Schmitt latch: the gate OPENS at VBAT_MIN_FOR_WIFI and only RE-BLOCKS
+// once the pack droops to VBAT_GATE_FLOOR. A single threshold chattered on the
+// boundary (2026-11-21 field log: 3.58 / 3.59 / 3.60 / 3.59 on four consecutive
+// cycles while charging), which made the effective duty cycle of the uploader
+// unpredictable. Once the PA has come up at a given charge level, that level
+// sustains it, so the re-block point sits a few tens of mV lower.
+constexpr float    VBAT_MIN_FOR_WIFI = 3.60f;   // release (open) level
+constexpr float    VBAT_GATE_FLOOR   = 3.45f;  // re-block level (must be < open)
+
+// Charge/discharge trend, used only for diagnostics (`chg=1` in the serial log
+// and WIFISTAT). A rise of >= VBAT_CHARGE_DELTA_V, VBAT_CHARGE_RUN times in a
+// row, is reported as "charging". 10 mV is well above the 12-bit ADC noise on
+// the divider (a 4-sample average of ~0.85 V sits near 1 LSB = 0.2 mV * 5.05).
+constexpr float    VBAT_CHARGE_DELTA_V = 0.010f;
+constexpr uint8_t  VBAT_CHARGE_RUN     = 2;
 
 // ----------- Always-on autonomous recording (v0.4.0) ------------------------
 // Recording is no longer user-toggled. As long as the RadiaCode is connected

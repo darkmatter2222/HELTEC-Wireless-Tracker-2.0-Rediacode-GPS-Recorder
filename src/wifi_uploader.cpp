@@ -84,7 +84,19 @@ void WifiUploader::begin(SessionStore* store) {
     // arbiter always knows where both radios are and schedules them cleanly.
     WiFi.mode(WIFI_STA);
     // Keep PA current low to avoid brown-outs on battery with BLE coex.
-    WiFi.setTxPower(WIFI_POWER_8_5dBm);
+    // v2.3: setTxPower() only works once the driver reports STA_STARTED, and
+    // that bit is set ASYNCHRONOUSLY by the WiFi event task when it dequeues
+    // ARDUINO_EVENT_WIFI_STA_START (WiFiGeneric.cpp:1043-1045). Calling the
+    // setter on the line after mode() logged "Neither AP or STA has been
+    // started" and returned false, so the PA silently stayed at the 19.5 dBm
+    // default and the brown-out mitigation was never applied. WiFi.status()
+    // only leaves WL_NO_SHIELD in that same event handler, so it is a reliable
+    // readiness probe. 50 x 10 ms = 500 ms bound; the task isn't spawned yet.
+    for (int i = 0; i < 50 && WiFi.status() == WL_NO_SHIELD; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    // Keep PA current low to avoid brown-outs on battery with BLE coex.
+    const bool txSet = WiFi.setTxPower(WIFI_POWER_8_5dBm);
     // v0.4.8: persistent=true so the WiFi driver caches the AP info (BSSID,
     // channel, etc.) in NVS. Subsequent connects can use that cache to skip
     // a full scan. Was false, which forced a full active scan every cycle
@@ -116,9 +128,22 @@ void WifiUploader::begin(SessionStore* store) {
                   hasRemote ? secrets::WIFI_SSID2 : "(disabled)",
                   (unsigned)(secrets::UPLOAD_INTERVAL_MS / 1000),
                   chipIdString().c_str());
+    // v2.3: state the two numbers that decide whether an upload can happen at
+    // all, so a boot log alone is enough to interpret later skip lines.
+    // `tx_applied=0` means the PA stayed at the 19.5 dBm default. `tx_raw` is
+    // the driver readback in 0.25 dBm units: 34 == 8.5 dBm, 78 == 19.5 dBm.
+    Serial.printf("[WIFI] gate: vbat open>=%.2fV close<=%.2fV | connect budget=%ums/profile | tx_applied=%d tx_raw=%d\n",
+                  (double)cfg::VBAT_MIN_FOR_WIFI, (double)cfg::VBAT_GATE_FLOOR,
+                  (unsigned)secrets::WIFI_CONNECT_TIMEOUT_MS, (int)txSet,
+                  (int)WiFi.getTxPower());
 }
 
 void WifiUploader::requestNow() {
+    // v2.3: stamp the deadline as "now" so the STORAGE countdown flips to
+    // "Next sync: soon" immediately. Previously nextAttempt_ kept the pre-poke
+    // value, so the screen kept showing e.g. "Next sync: 3m 12s" while the
+    // poked cycle was already running -- which read as "the button does nothing".
+    nextAttempt_ = millis();
     if (task_) xTaskNotifyGive(task_);
 }
 
@@ -178,12 +203,11 @@ void WifiUploader::taskLoop() {
         // exponentially (60s -> 120s -> 240s -> ... cap 16 min). Previously
         // we ramped from the 2nd failure, which made every post-boot retry
         // take 2 min because the first two attempts after boot always fail.
-        uint32_t mult = 1u;
-        if (consecutiveFailures_ > 2) {
-            uint32_t shift = consecutiveFailures_ - 2;
-            if (shift > 4) shift = 4;   // cap at 16x
-            mult = 1u << shift;
-        }
+        // v2.3: the ladder itself lives in wgate:: so the native suite can
+        // assert it. Note a battery/no-pending skip changes neither counter,
+        // so it deliberately holds the current multiplier instead of ramping:
+        // a gated cycle is not a link failure.
+        const uint32_t mult = wgate::backoffMultiplier(consecutiveFailures_);
         uint32_t sleepMs = secrets::UPLOAD_INTERVAL_MS * mult;
         // v0.4.7: drain the queue. If we just succeeded and there is still
         // more work in the active day file (i.e. samples have been written
@@ -215,6 +239,47 @@ void WifiUploader::taskLoop() {
 }
 
 
+// One association attempt against one SSID. Uses the whole per-SSID budget
+// (secrets::WIFI_CONNECT_TIMEOUT_MS) and reports both the measured duration
+// and the driver status code so the caller can log why it failed.
+bool WifiUploader::tryConnect(const char* ssid, const char* pass,
+                              uint32_t* elapsedMs, int* statusCode) {
+    Serial.printf("[WIFI] trying '%s' (budget %ums)...\n", ssid,
+                  (unsigned)secrets::WIFI_CONNECT_TIMEOUT_MS);
+    const uint32_t start    = millis();
+    WiFi.begin(ssid, pass);
+    const uint32_t deadline = start + secrets::WIFI_CONNECT_TIMEOUT_MS;
+    while (WiFi.status() != WL_CONNECTED && (int32_t)(deadline - millis()) > 0) {
+        esp_task_wdt_reset();   // v0.7.1: pet inside the blocking wait
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    const uint32_t took = millis() - start;
+    const int      st   = (int)WiFi.status();
+    if (elapsedMs)  *elapsedMs  = took;
+    if (statusCode) *statusCode = st;
+    ++connectAttempts_;
+    lastConnectMs_     = took;
+    lastConnectStatus_ = st;
+    if (st == (int)WL_CONNECTED) {
+        Serial.printf("[WIFI] connected ip=%s rssi=%d dBm in %ums ch=%d\n",
+                      WiFi.localIP().toString().c_str(), WiFi.RSSI(),
+                      (unsigned)took, WiFi.channel());
+        return true;
+    }
+    // v2.3: decode the driver status. `status=6(DISCONNECTED)` means the
+    // supplicant never got past scan/assoc (AP absent or too weak), whereas
+    // `4(CONNECT_FAILED)` is a wrong password / refused association. Those two
+    // looked identical before and cost a full debug cycle to separate.
+    Serial.printf("[WIFI] '%s' timeout status=%d(%s) after %ums\n",
+                  ssid, st, wgate::statusName(st), (unsigned)took);
+    // Between SSIDs: stop the current association attempt without cycling
+    // the radio stack (that's what triggers INT_WDT on the second attempt).
+    WiFi.disconnect(false, false);
+    vTaskDelay(pdMS_TO_TICKS(wgate::INTER_SSID_SETTLE_MS));
+    return false;
+}
+
+
 bool WifiUploader::connectWifi() {
     // Reset per-cycle state so a stale pointer from a previous cycle is never
     // used if begin() was somehow called twice or in a weird order.
@@ -236,50 +301,35 @@ bool WifiUploader::connectWifi() {
     // are enabled"). The BLE coexistence arbiter requires WIFI_PS_MIN_MODEM.
     // ------------------------------------------------------------------ //
     WiFi.disconnect(false, false);
-    vTaskDelay(pdMS_TO_TICKS(100));   // brief settle before begin()
-
-    // ------------------------------------------------------------------ //
-    // Inner helper: associate with one SSID. Already in WIFI_STA mode;
-    // only calls begin() / disconnect() -- never mode().
-    // ------------------------------------------------------------------ //
-    auto tryConnect = [&](const char* ssid, const char* pass) -> bool {
-        Serial.printf("[WIFI] trying '%s'...\n", ssid);
-        WiFi.begin(ssid, pass);
-        const uint32_t start    = millis();
-        const uint32_t deadline = start + secrets::WIFI_CONNECT_TIMEOUT_MS;
-        while (WiFi.status() != WL_CONNECTED && (int32_t)(deadline - millis()) > 0) {
-            esp_task_wdt_reset();   // v0.7.1: pet inside the blocking wait
-            vTaskDelay(pdMS_TO_TICKS(200));
-        }
-        if (WiFi.status() == WL_CONNECTED) {
-            Serial.printf("[WIFI] connected ip=%s rssi=%d dBm in %ums ch=%d\n",
-                          WiFi.localIP().toString().c_str(), WiFi.RSSI(),
-                          (unsigned)(millis() - start), WiFi.channel());
-            return true;
-        }
-        Serial.printf("[WIFI] '%s' timeout (status=%d after %ums)\n",
-                      ssid, (int)WiFi.status(), (unsigned)(millis() - start));
-        // Between SSIDs: stop the current association attempt without cycling
-        // the radio stack (that's what triggers INT_WDT on the second attempt).
-        WiFi.disconnect(false, false);
-        vTaskDelay(pdMS_TO_TICKS(300));
-        return false;
-    };
+    vTaskDelay(pdMS_TO_TICKS(wgate::CONNECT_SETTLE_MS));   // brief settle before begin()
 
     // ---- 1. Try home profile first ----------------------------------------
-    const bool hasHome = hasProfile(secrets::WIFI_SSID, secrets::INGEST_URL);
+    const bool hasHome   = hasProfile(secrets::WIFI_SSID,   secrets::INGEST_URL);
+    const bool hasRemote = hasProfile(secrets::WIFI_SSID2,  secrets::INGEST_URL2);
+    const int  nProfiles = (hasHome ? 1 : 0) + (hasRemote ? 1 : 0);
+
+    // v2.3: print the arithmetic budget up front. Comparing this number to the
+    // observed cycle_start -> connect_fail delta is what identifies a burnt
+    // timeout vs. an early success, straight from the persistent log.
+    Serial.printf("[WIFI] profiles=%d timeout=%ums worst_case=%ums\n",
+                  nProfiles, (unsigned)secrets::WIFI_CONNECT_TIMEOUT_MS,
+                  (unsigned)wgate::worstCaseConnectMs(secrets::WIFI_CONNECT_TIMEOUT_MS,
+                                                      nProfiles));
+
+    uint32_t elapsed  = 0;
+    int      status   = 0;
     if (hasHome) {
-        if (tryConnect(secrets::WIFI_SSID, secrets::WIFI_PASSWORD)) {
+        if (tryConnect(secrets::WIFI_SSID, secrets::WIFI_PASSWORD, &elapsed, &status)) {
             activeIngestUrl_ = secrets::INGEST_URL;
             activeNet_ = (uint8_t)ActiveNet::Home;
+            Serial.printf("[WIFI] home ok in %ums net=home\n", (unsigned)elapsed);
             return true;
         }
     }
 
     // ---- 2. Fall back to remote (mobile hotspot) --------------------------
-    const bool hasRemote = hasProfile(secrets::WIFI_SSID2, secrets::INGEST_URL2);
     if (hasRemote) {
-        if (tryConnect(secrets::WIFI_SSID2, secrets::WIFI_PASSWORD2)) {
+        if (tryConnect(secrets::WIFI_SSID2, secrets::WIFI_PASSWORD2, &elapsed, &status)) {
             activeIngestUrl_ = secrets::INGEST_URL2;
             // Apply Basic Auth credentials if configured for remote endpoint.
             if (secrets::INGEST_USER && secrets::INGEST_USER[0] != '\0') {
@@ -287,6 +337,8 @@ bool WifiUploader::connectWifi() {
                 activeIngestPass_ = secrets::INGEST_PASS;
             }
             activeNet_ = (uint8_t)ActiveNet::Remote;
+            Serial.printf("[WIFI] remote ok in %ums net=remote auth=%d\n",
+                          (unsigned)elapsed, activeIngestUser_ ? 1 : 0);
             return true;
         }
     }
@@ -419,6 +471,7 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
         }
         size_t sent = 0;   // body bytes POSTed so far
         size_t carry = 0;  // partial-line bytes held over to the next chunk
+        uint32_t chunks = 0;
         bool eof = false;
         bool okAll = true;
         while (okAll && (!eof || carry > 0)) {
@@ -446,16 +499,29 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
                 if (code > 0) resp = http.getString();  // drain body for reuse
                 if (code < 200 || code >= 300) { okAll = false; break; }
                 sent += last;
+                ++chunks;
             }
             esp_task_wdt_reset();
         }
         free(cbuf);
+        lastChunks_ = chunks;
         if (okAll && sent != fileSize) okAll = false;
         if (!okAll && code == 0) code = HTTPC_ERROR_SEND_PAYLOAD_FAILED;
-        if (!okAll) { store_->closeSessionStream(); delete secureClient; secureClient = nullptr; return false; }
+        if (!okAll) {
+            // v2.3: report how far the drain got. `sent` vs the ceil division
+            // tells a stalled write apart from a rejected chunk immediately:
+            // sent == 0 -> nothing left the radio; sent < expected -> mid-body
+            // stop; chunks == expected with a bad code -> server-side refusal.
+            Serial.printf("[UPLOAD] %s: chunk %u/%u failed at %u/%u bytes http=%d\n",
+                          sessionId.c_str(), (unsigned)chunks,
+                          (unsigned)wgate::chunkCount(fileSize, CH),
+                          (unsigned)sent, (unsigned)fileSize, code);
+            store_->closeSessionStream(); delete secureClient; secureClient = nullptr; return false;
+        }
     } else {
         // String fallback (SdFat backend): same line-aligned chunking.
         size_t off = 0;
+        uint32_t chunks = 0;
         bool okAll = true;
         while (off < fileSize && okAll) {
             size_t want = CH;
@@ -471,8 +537,10 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
             if (code > 0) resp = http.getString();
             if (code < 200 || code >= 300) { okAll = false; break; }
             off += len;
+            ++chunks;
             esp_task_wdt_reset();
         }
+        lastChunks_ = chunks;
     }
     esp_task_wdt_reset();
     http.end();
@@ -483,12 +551,19 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
     lastHttpStatus_ = code;
 
     if (code >= 200 && code < 300) {
-        Serial.printf("[UPLOAD] %s OK http=%d %ums file_bytes=%u resp=%s\n",
-                      sessionId.c_str(), code, (unsigned)(millis() - t0),
-                      (unsigned)fileSize,
+        const uint32_t took = (uint32_t)(millis() - t0);
+        lastCycleMs_    = took;
+        lastCycleBytes_ = fileSize;
+        // v2.3: add chunks + effective rate so a slow-link diagnosis no longer
+        // needs a server-side stopwatch. rate is in bytes/s (integer).
+        const uint32_t rate = took ? (uint32_t)((uint64_t)fileSize * 1000u / took) : 0u;
+        Serial.printf("[UPLOAD] %s OK http=%d %ums file_bytes=%u chunks=%u rate=%uB/s resp=%s\n",
+                      sessionId.c_str(), code, (unsigned)took,
+                      (unsigned)fileSize, (unsigned)lastChunks_, (unsigned)rate,
                       resp.length() > 200 ? "<truncated>" : resp.c_str());
         return true;
     }
+    lastCycleBytes_ = fileSize;
     Serial.printf("[UPLOAD] %s FAIL http=%d %ums resp=%s\n",
                   sessionId.c_str(), code, (unsigned)(millis() - t0),
                   resp.length() > 200 ? "<truncated>" : resp.c_str());
@@ -496,19 +571,58 @@ bool WifiUploader::uploadOne(const String& filename, const String& sessionId, si
 }
 
 
+// Evaluates the VBAT hysteresis latch for this cycle and refreshes the charge
+// trend from the same sample pair. Pure decisions live in wgate:: so the host
+// suite can exercise them without hardware (see test/test_wifi_gate_native).
+bool WifiUploader::vbatGateAllows() {
+    const float vbat = trackerLastVbat();
+    const bool  ok   = wgate::vbatGateOk(vbat, vbatGateOpen_,
+                                          cfg::VBAT_MIN_FOR_WIFI,
+                                          cfg::VBAT_GATE_FLOOR);
+    // 60 s between cycles; the charger's CC phase moves a 1S cell ~20 mV/min,
+    // so the 10 mV dead band separates "rising" from ADC noise cleanly.
+    const bool rising = wgate::voltageRising(vbatPrev_, vbat, cfg::VBAT_CHARGE_DELTA_V);
+    chargeRun_ = wgate::chargeRun(chargeRun_, rising);
+    vbatPrev_  = vbat;
+    charging_  = (uint8_t)(chargeRun_ >= (uint32_t)cfg::VBAT_CHARGE_RUN ? 1u : 0u);
+
+    if (ok != vbatGateOpen_) {
+        Serial.printf("[WIFI] gate %s vbat=%.2fV (opens>=%.2fV closes<=%.2fV) chg=%u\n",
+                      ok ? "OPEN" : "CLOSED", (double)vbat,
+                      (double)cfg::VBAT_MIN_FOR_WIFI, (double)cfg::VBAT_GATE_FLOOR,
+                      (unsigned)charging_);
+    }
+    vbatGateOpen_ = ok;
+    return ok;
+}
+
+
 uint32_t WifiUploader::runOnce() {
     if (!enabled_ || !store_) return 0;
 
-    // v0.4.2: VBAT gate. The Wi-Fi PA spikes (200-400 mA) collapse a weak
-    // battery rail and brown-out the MCU mid-cycle, leading to reboots
-    // every 1-2 minutes on a partially discharged pack. Recording (BLE +
-    // GPS, ~80 mA steady) is fine; only the radio is risky. Skip the cycle
-    // and try again next interval -- pending files stay queued.
-    const float vbat = trackerLastVbat();
-    if (vbat > 0.0f && vbat < cfg::VBAT_MIN_FOR_WIFI) {
-        char msg[64];
-        snprintf(msg, sizeof(msg), "skip vbat=%.2fV<%.2fV",
-                 vbat, cfg::VBAT_MIN_FOR_WIFI);
+    // v2.3: list the queue first (cheap, ~16 entries) so BOTH the gated and
+    // the ungated path can report the backlog size, and the rotate decision
+    // below needs only one listing. Read-only, so the "no pending -> never
+    // open the radio" optimization is unchanged.
+    auto pending = store_->listPendingUploads();
+    size_t pendingBytes = 0;
+    for (const auto& p : pending) pendingBytes += p.sizeBytes;
+
+    // v0.4.2 / v2.3: VBAT gate with hysteresis. The Wi-Fi PA spikes (200-400
+    // mA) collapse a weak battery rail and brown-out the MCU mid-cycle, leading
+    // to reboots every 1-2 minutes on a partially discharged pack. Recording
+    // (BLE + GPS, ~80 mA steady) is fine; only the radio is risky. Skip the
+    // cycle and try again next interval -- pending files stay queued.
+    if (!vbatGateAllows()) {
+        ++skippedCount_;
+        lastSkipReason_ = wgate::SkipBattery;
+        lastSkipMv_     = (int)(trackerLastVbat() * 1000.0f + 0.5f);
+        char msg[120];
+        snprintf(msg, sizeof(msg),
+                 "skip vbat=%.2fV<%.2fV gate=closed floor=%.2fV chg=%u pend=%u bytes=%u",
+                 (double)trackerLastVbat(), (double)cfg::VBAT_MIN_FOR_WIFI,
+                 (double)cfg::VBAT_GATE_FLOOR,
+                 (unsigned)charging_, (unsigned)pending.size(), (unsigned)pendingBytes);
         Serial.printf("[WIFI] %s -- recording continues\n", msg);
         event_log::appendEvent("WIFI", msg);
         return 0;
@@ -520,39 +634,77 @@ uint32_t WifiUploader::runOnce() {
     // Wi-Fi range for a long time -- recording keeps appending to the
     // existing day file and we make a single, larger pending file once we
     // succeed in uploading whatever was already queued.
-    auto pending = store_->listPendingUploads();
     if (pending.empty()) {
         store_->rotateForUpload();
         pending = store_->listPendingUploads();
+        pendingBytes = 0;
+        for (const auto& p : pending) pendingBytes += p.sizeBytes;
     }
 
     if (pending.empty()) {
-        return 0;   // nothing pending; don't bring up Wi-Fi
+        // Nothing queued; don't bring up the radio at all.
+        lastSkipReason_ = wgate::SkipNoPending;
+        lastSkipMv_     = -1;
+        // v2.3: print it. Before this, an idle device emitted nothing at all
+        // around a poked SYNC, which made "nothing to send" indistinguishable
+        // from "uploader wedged" on serial. One line per cadence is cheap next
+        // to the 3 s heartbeat.
+        Serial.printf("[WIFI] skip=no_pending radio=off heap_free=%u\n",
+                      (unsigned)ESP.getFreeHeap());
+        return 0;
     }
 
     busy_ = true;
     phase_ = (uint8_t)Phase::Connecting;
     lastAttempt_ = millis();
-    Serial.printf("[UPLOAD] cycle start; %u file(s) pending heap_free=%u\n",
-                  (unsigned)pending.size(), (unsigned)ESP.getFreeHeap());
+    lastSkipReason_ = wgate::SkipNone;
+    // v2.3: `bytes=` lets the drain be reconciled against LS byte-for-byte,
+    // and `vbat=` puts the gate input next to the outcome in one line.
+    Serial.printf("[UPLOAD] cycle start; %u file(s) pending bytes=%u heap_free=%u "
+                  "vbat=%.2fV gate=open chg=%u\n",
+                  (unsigned)pending.size(), (unsigned)pendingBytes,
+                  (unsigned)ESP.getFreeHeap(),
+                  (double)trackerLastVbat(), (unsigned)charging_);
 
     // Plant the RTC marker BEFORE turning on the radio. If we brown-out
     // during connect, the next boot will see wifiInFlight=1 in the log
     // and we can correlate the reset reason to the PA current spike.
     event_log::markWifiInFlight(true);
     event_log::markPhase("WIFI_CONNECT");
-    event_log::appendEvent("WIFI", "cycle_start");
+    {
+        // v2.3: put the queue size in the persistent log too. Before this a
+        // `cycle_start` line told you nothing about how much work was queued,
+        // so a partial drain could not be identified without `LS`.
+        char startMsg[48];
+        snprintf(startMsg, sizeof(startMsg), "cycle_start files=%u bytes=%u",
+                 (unsigned)pending.size(), (unsigned)pendingBytes);
+        event_log::appendEvent("WIFI", startMsg);
+    }
 
     if (!connectWifi()) {
         ++failedCount_;
         busy_ = false;
         phase_ = (uint8_t)Phase::Idle;
         event_log::markWifiInFlight(false);
-        event_log::appendEvent("WIFI", "connect_fail");
+        // v2.3: record the driver status of the last attempt. `status=6`
+        // (DISCONNECTED) means no association happened at all; 4 is a refused
+        // association. Distinguishing "AP absent" from "wrong password" from
+        // the persistent log saves a whole debug cycle next time.
+        char failMsg[48];
+        snprintf(failMsg, sizeof(failMsg), "connect_fail attempts=%u last_status=%d(%s)",
+                 (unsigned)connectAttempts_, lastConnectStatus_,
+                 wgate::statusName(lastConnectStatus_));
+        event_log::appendEvent("WIFI", failMsg);
+        Serial.printf("[WIFI] no network; %u attempt(s) this cycle last_status=%d(%s)\n",
+                      (unsigned)connectAttempts_, lastConnectStatus_,
+                      wgate::statusName(lastConnectStatus_));
         return 0;
     }
 
     uint32_t ok = 0;
+    size_t   bytesSent  = 0;
+    uint32_t totalChunks = 0;
+    const uint32_t cycleT0 = millis();
     for (const auto& p : pending) {
         // v0.4.5: stale zero-byte .up.csv files (left over from earlier
         // panic-crashes that rotated but died before writing) would pile
@@ -572,6 +724,8 @@ uint32_t WifiUploader::runOnce() {
         if (uploadOne(p.filename, p.sessionId, p.sizeBytes)) {
             ++ok;
             ++uploadedCount_;
+            bytesSent   += p.sizeBytes;
+            totalChunks += lastChunks_;
             lastSuccess_ = millis();
             // v0.4.0: always delete after confirmed server receipt.
             // The "never duplicate data on device" contract is the whole
@@ -600,11 +754,14 @@ uint32_t WifiUploader::runOnce() {
     busy_ = false;
     phase_ = (uint8_t)Phase::Idle;
     event_log::markWifiInFlight(false);
-    char done[48];
-    snprintf(done, sizeof(done), "cycle_done ok=%u/%u",
-             (unsigned)ok, (unsigned)pending.size());
+    const uint32_t cycleMs = (uint32_t)(millis() - cycleT0);
+    lastCycleMs_ = cycleMs;
+    lastCycleBytes_ = bytesSent;
+    char done[64];
+    snprintf(done, sizeof(done), "cycle_done ok=%u/%u bytes=%u chunks=%u ms=%u",
+             (unsigned)ok, (unsigned)pending.size(), (unsigned)bytesSent,
+             (unsigned)totalChunks, (unsigned)cycleMs);
     event_log::appendEvent("WIFI", done);
-    Serial.printf("[UPLOAD] cycle done; ok=%u/%u heap_free=%u\n",
-                  (unsigned)ok, (unsigned)pending.size(), (unsigned)ESP.getFreeHeap());
+    Serial.printf("[UPLOAD] %s heap_free=%u\n", done, (unsigned)ESP.getFreeHeap());
     return ok;
 }

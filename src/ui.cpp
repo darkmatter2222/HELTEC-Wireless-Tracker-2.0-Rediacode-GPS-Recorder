@@ -530,6 +530,16 @@ void Ui::renderStorage() {
             wifiCol = COL_DIM;
             break;
         default: {
+            // v2.3: when the last cycle ended on the battery gate, say so
+            // explicitly. A bare "Next sync: 42s" looked like a stuck uploader;
+            // the gate is an intentional pause and the reason is now on screen.
+            if (wifi_->lastSkipReason() == wgate::SkipBattery &&
+                wifi_->lastSkipVbatMv() > 0) {
+                snprintf(wifiBuf, sizeof(wifiBuf), "Wi-Fi: batt low %.2fV",
+                         (double)(wifi_->lastSkipVbatMv() / 1000.0f));
+                wifiCol = COL_AMBER;
+                break;
+            }
             // Idle / Backoff -> show countdown.
             const uint32_t next = wifi_->nextAttemptMs();
             const uint32_t now  = millis();
@@ -556,8 +566,13 @@ void Ui::renderStorage() {
     field(36, 4, 64, 156, 8, wifiBuf, wifiCol, COL_BG, 1);
     // Hold-to-sync hint. Cleared with a blank field when Wi-Fi is disabled
     // so a previous force-full-redraw doesn't leave stale text.
+    // v2.3: while the battery gate is closed a poke cannot do anything, so the
+    // hint changes to the action that actually unblocks the uploader.
     if (wifi_ && wifi_->enabled()) {
-        field(37, 4, 72, 156, 8, "Hold: sync now", COL_DIM, COL_BG, 1);
+        const bool gated = (wifi_->lastSkipReason() == wgate::SkipBattery);
+        field(37, 4, 72, 156, 8,
+              gated ? "Charge pack to sync" : "Hold: sync now",
+              gated ? COL_AMBER : COL_DIM, COL_BG, 1);
     } else {
         field(37, 4, 72, 156, 8, "", COL_DIM, COL_BG, 1);
     }

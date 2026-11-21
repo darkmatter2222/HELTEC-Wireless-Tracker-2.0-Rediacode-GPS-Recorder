@@ -78,6 +78,7 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 │   ├── radiacode.{h,cpp}         # NimBLE central + RadiaCode protocol
 │   ├── session_store.{h,cpp}     # SD/SdFat CSV writer + LittleFS fallback
 │   ├── ui.{h,cpp}                # ST7735 TFT screens + button state machine
+│   ├── wifi_gate.h               # header-only uploader decision logic (v2.3)
 │   └── wifi_uploader.{h,cpp}     # FreeRTOS uploader task (core 0)
 ├── scripts/                      # Python dev-tools (serial, data, mapping)
 │   ├── drive.py                  # serial console wrapper: cmd/listen/auto-connect
@@ -246,7 +247,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `2.2`.
+Current: `2.3`.
 
 ---
 
@@ -362,6 +363,12 @@ namespace secrets {
   `Hold: sync now` shown at y=72 when Wi-Fi is configured. GPS long-press still advances the screen.
   STORAGE screen layout (v0.9.1): y=14 REC/AUTO/Samp; y=26 Day; y=38 Disk%; y=50 bar; y=56 Pending;
   y=64 Wi-Fi status; y=72 `Hold: sync now` hint.
+- **STORAGE screen while battery-gated** (v2.3): the Wi-Fi line reads
+  `Wi-Fi: batt low X.XXV` (COL_AMBER) and the y=72 hint changes to
+  `Charge pack to sync`, because a `SYNC` poke cannot do anything until the
+  pack recovers. Previously both lines kept their normal text, so a gated
+  uploader looked identical to a stuck one. `requestNow()` also stamps
+  `nextAttempt_ = millis()` so the countdown reads "soon" during a poked cycle.
 
 ### Wi-Fi Uploader — `wifi_uploader.{h,cpp}`
 
@@ -369,6 +376,31 @@ namespace secrets {
 - Uploads completed sessions via `POST /ingest/csv` every 60 seconds
 - Deletes session file from SD after successful 2xx response
 - Headers: `X-Session-Id`, `X-Device-Id`, `X-Tracker-Id`, `X-Firmware`
+- Body is sent as **line-aligned 8 KB chunks** (`cfg::UPLOAD_CHUNK_BYTES`) over one
+  keep-alive connection, with `esp_task_wdt_reset()` between chunks (v2.2)
+- Pure decision logic (gate hysteresis, charge trend, connect budget, chunk
+  arithmetic, retry ladder, `WL_*` decoding) lives in `src/wifi_gate.h`
+  (namespace `wgate`) and is included **directly** by the native suites, so a
+  test can never drift from the code that runs on the device (v2.3)
+
+**Battery gate (v2.3, Schmitt latch)** — `WifiUploader::vbatGateAllows()`:
+
+| State | Condition |
+|-------|-----------|
+| opens (radio allowed) | `vbat >= cfg::VBAT_MIN_FOR_WIFI` (3.60 V) |
+| holds open | `vbat > cfg::VBAT_GATE_FLOOR` (3.45 V) |
+| re-blocks | `vbat <= cfg::VBAT_GATE_FLOOR` |
+| unmeasured (`vbat <= 0`) | always allowed (ADC sample pending at boot) |
+
+A gated cycle logs `skip vbat=...V gate=closed floor=3.45V chg=N pend=N bytes=N`
+to serial **and** `/system.log`, increments `skippedByBattery()`, and leaves both
+`uploadedCount()`/`failedCount()` untouched — a battery skip is not a link
+failure, so it deliberately does **not** ramp the exponential backoff.
+
+**Per-cycle diagnostics** (v2.3, all readable through `WIFISTAT`):
+`vbatGateOpen()`, `lastSkipReason()` (`wgate::SkipReason`), `lastSkipVbatMv()`,
+`skippedByBattery()`, `charging()`, `connectAttempts()`, `lastConnectMs()`,
+`lastChunks()`, `lastCycleMs()`, `lastCycleBytes()`, `lastConnectStatus()`.
 
 ---
 
@@ -397,7 +429,7 @@ Connection: 115200 baud, USB-CDC. Type `?` for the live list on device.
 | `GPASSTHRU [s]`   | pipe raw GPS NMEA to serial (default 10s) |
 | `GREBAUD`         | re-probe GPS baud rates |
 | `SYNC`            | force immediate Wi-Fi upload cycle |
-| `WIFISTAT`        | Wi-Fi uploader diagnostics (enabled, busy, net=home\|remote\|none, counts, last HTTP status, heap_free) |
+| `WIFISTAT`        | Wi-Fi uploader diagnostics — 3 decoded lines, see format below (v2.3) |
 | `REBOOT`          | soft-reset device; LittleFS/SD data is safe (use to force self-heal manually) |
 
 Commands that **do not exist** (do not add them):
@@ -409,8 +441,58 @@ Commands that **do not exist** (do not add them):
 
 Heartbeat format (every 3 s):
 ```
-[HB] uptime=Xs fix=N sats=N hdop=H gpsB=N gpsAge=Xms baud=N rcState=N rec=0/1 samples=N
+[HB] uptime=Xs fix=N sats=N hdop=H acc=A.Am gpsB=N gpsAge=Xms baud=N rcState=N rec=0/1 samples=N life=N dose=X.XXXXuSv
 ```
+Fields are `key=value` and are only ever appended at the end, so parse them by
+key: `acc` is the metre-level fix accuracy (`-1.0` before the first fix),
+`samples` is the open day-file count (resets on rotate) and `life` is the
+monotonic per-boot counter.
+
+`WIFISTAT` format (v2.3 — three lines, every enum decoded):
+```
+[WIFI] enabled=1 busy=0 phase=idle net=home uploaded=29 failed=0 consec=0 lastAttempt=123456ms lastSuccess=180912ms lastHttp=200 heap_free=211304
+[WIFI] gate=open vbat=3.82V open>=3.60V close<=3.45V chg=1 skip=none(0) skipMv=-1 batterySkips=8
+[WIFI] connect attempts=1 last=3807ms status=3(CONNECTED) | cycle ms=247900 bytes=5542309 chunks=687 nextIn=5012ms
+```
+
+| Field | Meaning |
+|-------|---------|
+| `phase=` | `disabled` / `idle` / `backoff` / `connecting` / `posting` / `disconnecting` |
+| `consec=` | consecutive link failures driving the backoff multiplier (battery skips excluded) |
+| `gate=` | `open` = PA allowed, `close` = latched below the floor |
+| `chg=` | 1 = pack measurably charging (>= `cfg::VBAT_CHARGE_RUN` rising samples) |
+| `skip=` | last no-HTTP reason: `none` / `battery` / `no_pending` / `disabled` |
+| `skipMv=` | mV of the VBAT sample that produced that decision (-1 = not a battery skip) |
+| `batterySkips=` | total cycles ended early on the gate since boot |
+| `status=` | `WL_*` driver code of the last association, decoded (6 = `DISCONNECTED` = AP absent, 4 = `CONNECT_FAILED` = refused/wrong password) |
+| `chunks=` / `bytes=` | drain accounting for the last cycle; reconcile byte-for-byte with `LS` |
+| `nextIn=` | ms until the next scheduled cycle (-1 = never scheduled) |
+
+`/system.log` `WIFI` entries (v2.3 field set):
+```
+<n>,WIFI,cycle_start files=15 bytes=5542309
+<n>,WIFI,cycle_done ok=15/15 bytes=5542309 chunks=687 ms=247900
+<n>,WIFI,connect_fail attempts=2 last_status=6(DISCONNECTED)
+<n>,WIFI,skip vbat=3.36V<3.60V gate=closed floor=3.45V chg=1 pend=15 bytes=5542309
+```
+
+Serial lines emitted by the uploader (v2.3):
+```
+[WIFI] gate: vbat open>=3.60V close<=3.45V | connect budget=25000ms/profile | tx_applied=1 tx_raw=34
+[WIFI] gate OPEN vbat=3.82V (opens>=3.60V closes<=3.45V) chg=0        # only on state change
+[WIFI] skip=no_pending radio=off heap_free=184796                     # idle cycle, radio untouched
+[WIFI] profiles=2 timeout=25000ms worst_case=50700ms
+[WIFI] trying 'Dr.Nerd' (budget 25000ms)...
+[WIFI] connected ip=192.168.86.29 rssi=-44 dBm in 612ms ch=11
+[WIFI] home ok in 612ms net=home
+[WIFI] '<ssid>' timeout status=6(DISCONNECTED) after 25000ms
+[UPLOAD] cycle start; 1 file(s) pending bytes=662 heap_free=182460 vbat=3.85V gate=open chg=0
+[UPLOAD] <sid> OK http=200 164ms file_bytes=662 chunks=1 rate=4036B/s resp={...}
+[UPLOAD] <sid>: chunk 3/196 failed at 16384/1604185 bytes http=-3
+[UPLOAD] cycle_done ok=1/1 bytes=662 chunks=1 ms=278 heap_free=182252
+```
+`tx_raw` is the PA readback in 0.25 dBm units: 34 = 8.5 dBm (applied),
+78 = 19.5 dBm (default, setter was a no-op).
 
 ---
 
@@ -775,7 +857,7 @@ points that would crash the live Leaflet map.
 
 ### Native unit tests (runs on host PC — no hardware required)
 
-Eight test suites live under `test/`:
+Ten test suites live under `test/`:
 
 | Suite                    | Tests | What it validates |
 |--------------------------|-------|-------------------|
@@ -787,6 +869,12 @@ Eight test suites live under `test/`:
 | `test_link_health_native`        |  7    | BLE link-stall watchdog, including millis() wraparound |
 | `test_wifi_network_select_native`| 14    | Dual-network profile enable/disable, HTTPS URL detection, Basic Auth cred check |
 | `test_lfs_geometry_native`       |  6    | LittleFS volume-geometry gate: `total != 0 && used <= total` (v2.1) |
+| `test_wifi_gate_native`          | 27    | `wgate::` helpers: VBAT hysteresis latch, charge trend, connect budget model, chunk arithmetic vs. the WDT window, retry ladder, `WL_*` decoding (v2.3) |
+| `test_wifi_cycle_sim_native`     | 13    | Full-cycle device simulation with injected scenarios: gated ramp then drain, both-APs-absent budget, 5 s vs 25 s timeout A/B, home-preferred fallback, poke fast path, per-window WDT coverage (v2.3) |
+
+`test_wifi_gate_native` and `test_wifi_cycle_sim_native` `#include`
+`../../src/wifi_gate.h` directly instead of re-declaring the logic, so they
+cannot drift from the firmware (v2.3).
 
 **Prerequisites on Windows**: PlatformIO's native env calls `gcc`/`g++`/`ar` which
 are not in PATH by default. If VS Build Tools 2022 is installed, create one-time
@@ -794,7 +882,7 @@ batch wrappers in any temp dir and prepend that dir to PATH:
 
 ```powershell
 # Run once per shell session (or add to profile)
-$wrapDir = "$env:TEMP\pio_gcc_wrap"
+$wrapDir = "C:\Users\ryans\AppData\Local\Temp\opencode\pio_gcc_wrap"
 New-Item -ItemType Directory -Force -Path $wrapDir | Out-Null
 $llvm = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Tools\Llvm\x64\bin"
 Set-Content "$wrapDir\gcc.bat"  "@echo off`r`n`"$llvm\clang.exe`" %*"   -Encoding Ascii
@@ -803,11 +891,20 @@ Set-Content "$wrapDir\ar.bat"   "@echo off`r`n`"$llvm\llvm-ar.exe`" %*" -Encodin
 $env:PATH = "$wrapDir;$env:PATH"
 ```
 
-Then run all eight host-side suites:
+Then run all ten host-side suites:
 
 ```powershell
 pio test -e native
-# Expected: 89 test cases: 89 succeeded
+# Expected: 129 test cases: 129 succeeded
+```
+
+**Gotcha**: the `$env:PATH` edit and `pio test` must be in the **same** shell
+invocation — each tool call starts a fresh process, so a PATH set in a previous
+call is gone and the run fails with `'gcc' is not recognized`. With the
+`$wrapDir` above the whole thing is one line:
+
+```powershell
+$env:PATH = "C:\Users\ryans\AppData\Local\Temp\opencode\pio_gcc_wrap;" + $env:PATH; pio test -e native
 ```
 
 ### Integration tests (requires device on serial port)
@@ -815,11 +912,29 @@ pio test -e native
 ```powershell
 # Device must be connected to USB-CDC before running.
 python scripts\test_device.py                 # defaults to COM4
-python scripts\test_device.py --port COM3
+python scripts\test_device.py --port COM3     # this dev machine: COM3
+$env:TRACKER_PORT = "COM3"; python scripts\test_device.py
 ```
 
 Tests heartbeat format/cadence, every REPL command timing, sample-count
 consistency, and 30-second serial latency loop (the non-blocking BLE regression).
+
+v2.3 adds six upload-path checks that inject activity (`SYNC` pokes) and assert
+on the emitted trace: `wifistat_diagnostics`, `gate_vbat_consistent`,
+`sync_forces_cycle`, `chunked_drain_integrity` (per-file `file_bytes`/`chunks`
+must sum to the `cycle_done` totals), `uptime_monotonic_cycle` (no reset across
+a full connect+drain window), and `event_log_new_fields`. They SKIP rather than
+fail when the battery gate is closed or the queue is empty, since no cycle can
+complete by design. 19/19 pass with the device recording (GPS fix + RC ready).
+
+Two test-harness details learned from the v2.3 run:
+
+- `[HB]` lines must be parsed **by key**, not by one rigid positional regex — the
+  firmware appends fields over time (`life=`, `dose=`, and `acc=` sits between
+  `hdop=` and `gpsB=`), and a positional pattern then matches nothing and reports
+  "0 heartbeats" on a healthy device.
+- Integer fields carry unit suffixes (`uptime=10s`, `lastAttempt=123456ms`); the
+  shared `parse_all_int()` takes the leading integer so both are usable.
 
 ---
 
@@ -915,6 +1030,20 @@ All in `src/config.h` under `namespace cfg`. Edit here and recompile.
 | `FIELD_ALTITUDE_M`      | `true`     | `true`       | Write GPS altitude (m above MSL) column to CSV |
 | `FIELD_HDOP`            | `true`     | `true`       | Write HDOP accuracy indicator column to CSV |
 | `BEARING_HISTORY_POINTS`| 4          | 4            | GPS history points for bearing calc (2–8); higher = smoother, more lag |
+| `TASK_WDT_TIMEOUT_S`    | 60         | 60           | panic-on-timeout watchdog; every unfed blocking window must fit inside it |
+| `UPLOAD_CHUNK_BYTES`    | 8192       | 8192         | line-aligned POST chunk size; worst un-petted window = chunk/rate + 30 s |
+| `VBAT_MIN_FOR_WIFI`     | 3.60 V     | 3.60 V       | battery gate **release** level (opens here) |
+| `VBAT_GATE_FLOOR`       | 3.45 V     | 3.45 V       | battery gate **re-block** level; hysteresis width is 150 mV (v2.3) |
+| `VBAT_CHARGE_DELTA_V`   | 0.010 V    | 0.010 V      | min per-cycle rise counted as "charging"; dead band above ADC noise |
+| `VBAT_CHARGE_RUN`       | 2          | 2            | consecutive rising samples required before `chg=1` (diagnostic only) |
+
+`secrets::WIFI_CONNECT_TIMEOUT_MS` is **25000** per SSID (both `secrets.h` and
+`secrets.h.example`). The two must match — the pre-2.3 local file had drifted to
+5000, which is short enough to miss every cold association with BLE coex active
+(see Lessons Learned). The worst-case connect window per cycle is
+`100 + profiles × (timeout + 300)` ms = **50 700 ms** for two profiles, and is
+printed at boot as `connect budget=…/profile` plus on every cycle as
+`worst_case=…ms`.
 
 > **Note:** `default_envs = heltec_tracker_v2` — for V2 builds SD is skipped entirely at boot.
 
@@ -2090,4 +2219,82 @@ self-tests must pass. All passed on the current build:
   shrinking by ~8 KB per request; `lastHttp=-11` (read timeout) vs `-3`
   (send payload failed) tells you whether the stall was in the write loop or
   the response wait.
+
+### Upload Blackout: Battery Gate Ran Before lastAttempt_ Was Stamped, And secrets.h Timeout Had Drifted To 5 s (v2.3) — CRITICAL
+
+- **Symptom**: 15 `.up.csv` files (5 542 309 bytes) queued on-device, `WIFISTAT`
+  reported `lastAttempt=0ms lastHttp=0` — i.e. "the cycle never ran" — while the
+  persistent log was full of `skip vbat=3.xxV<3.60V` lines. Server side was
+  healthy (`/health`, `/info`, and `tracker_uploads` showed 200s with
+  `rowsInserted == rowsSeen` for firmware `2.2`), which ruled out the API.
+- **Root cause 1 — the gate is the outcome, and it was invisible.**
+  `runOnce()` returns from the VBAT check *before* stamping `lastAttempt_`, so a
+  gated device looks exactly like a wedged one (`lastAttempt=0`, `lastHttp=0`).
+  Three independent evidence sets:
+  1. ~73 `skip vbat=` lines against 19 `cycle_start` and zero `cycle_done`.
+  2. Per-row VBAT in the same lines rises monotonically: 3.145 → 3.293 → 3.376 →
+     3.435 → 3.482 → 3.506 → 3.545 → 3.567 → 3.621 V (~20 mV/min = LiPo CC slope).
+  3. Live A/B: the instant the charge crossed 3.60 V the very next cycle
+     connected in **3807 ms** and drained **29/29** files
+     (`lastHttp=200`, disk 91 % → 0 %). Same radio, same code path, only the
+     gate input changed.
+- **Root cause 2 — `secrets.h` had drifted to `WIFI_CONNECT_TIMEOUT_MS = 5000`**
+  while `.env.example`/AGENTS.md documented 25 000. Identified *from the log
+  alone*: every `cycle_start` → `connect_fail` delta was 10.82–11.57 s, and the
+  only model that lands there is `100 + 2 × (5000 + 300) = 10 700 ms` — a 25 s
+  window predicts 50 700 ms, unmistakably different. A 5 s budget has ~1.2 s of
+  margin over the worst association measured with BLE coex (10–15 s, v0.4.8
+  lesson), so cold attempts burned the full window every time.
+- **Root cause 3 — `WiFi.setTxPower()` was a silent no-op.** The boot log
+  carried `E WiFiGeneric: setTxPower(): Neither AP or STA has been started`
+  because the setter requires `STA_STARTED_BIT`, which the core sets
+  *asynchronously* in the WiFi event task on `ARDUINO_EVENT_WIFI_STA_START`
+  (`WiFiGeneric.cpp:1043-1045`). It was called on the line after
+  `WiFi.mode(WIFI_STA)`, so the PA stayed at 19.5 dBm and the brown-out
+  mitigation from v0.4.1 was never actually applied.
+- **Fixes (v2.3)**:
+  - `src/wifi_gate.h` (new, header-only): `vbatGateOk`, `voltageRising`,
+    `chargeRun`, `worstCaseConnectMs`, `chunkCount`, `worstCasePostMs`,
+    `backoffMultiplier`, `statusName`, `skipName`, plus
+    `CONNECT_SETTLE_MS` / `INTER_SSID_SETTLE_MS` as the single source of truth
+    for the pacing the task actually uses.
+  - Hysteresis latch instead of one threshold: opens at 3.60 V, re-blocks only at
+    ≤ 3.45 V. A single threshold chattered (3.58 / 3.59 / 3.60 / 3.59 across four
+    cycles) so the effective duty cycle was unpredictable.
+  - **Charging is NOT used to widen the gate.** A charging cell reads *higher*
+    than its resting OCV because of the IR drop, so the number is already
+    optimistic while current flows; `chg=` is diagnostic-only.
+  - `secrets.h` timeout restored to 25000.
+  - `setTxPower()` moved after a bounded (500 ms) wait for `WiFi.status() !=
+    WL_NO_SHIELD`; boot line now proves it: `tx_applied=1 tx_raw=34`
+    (34 × 0.25 dBm = 8.5 dBm). `ESP_ERR_NOT_SUPPORTED` from
+    `esp_ble_tx_power_set` in the NimBLE banner is unrelated and pre-existing.
+  - `requestNow()` stamps `nextAttempt_ = millis()` (countdown read "soon"
+    instead of a stale deadline during the poked cycle).
+  - Diagnostics: 11 new accessors, decoded `phase=`, `skip=`, `status=N(NAME)`,
+    `chunks=` / `rate=` per file, `bytes=`/`chunks=`/`ms=` on `cycle_done`, and
+    the same fields in `/system.log`.
+- **Verification**: `pio test -e native` → **129/129** (two new suites, 40 cases,
+  both including `src/wifi_gate.h` directly). Device suite **19/19, 0 skipped** on
+  COM3 with the device recording (`wifistat_diagnostics`, `gate_vbat_consistent`,
+  `sync_forces_cycle`, `chunked_drain_integrity`, `uptime_monotonic_cycle`,
+  `event_log_new_fields` all executing, not skipping). Build: RAM 16.8 %,
+  Flash 59.7 %. Boot log: `v2.3`, `connect budget=25000ms/profile`,
+  `tx_applied=1 tx_raw=34`, `gate OPEN vbat=3.82V`. Cycle trace:
+  `worst_case=50700ms`, `connected ... in 612ms`, `OK http=200 ... chunks=1
+  rate=4036B/s`, `cycle_done ok=1/1 bytes=662 chunks=1 ms=278`. Server-side
+  `tracker_uploads` shows `"firmware":"2.3"` with `rowsInserted == rowsSeen`,
+  `rowsDuplicate: 0`, `httpStatus: 200` — the chunked body reassembles exactly.
+- **Rules for future code**:
+  1. Keep `secrets.h` and `secrets.h.example` numerically in sync — the drift was
+     only detectable arithmetically. Print the compiled budget at boot
+     (`connect budget=`) so the log carries the truth.
+  2. Any early-return path in `runOnce()` must record a machine-readable reason
+     (`lastSkipReason_`) — a bare `return 0` makes "blocked" and "wedged"
+     indistinguishable.
+  3. A battery skip must not touch `consecutiveFailures` (it is not a link
+     failure), or the retry ladder ratches to 16 min for no reason.
+  4. Arduino WiFi setters that check `STA_STARTED_BIT` are no-ops until the
+     driver's event task has run. Poll `WiFi.status() != WL_NO_SHIELD` first, or
+     check the return value.
 

@@ -26,6 +26,8 @@
 #include <freertos/task.h>
 #include <vector>
 
+#include "wifi_gate.h"
+
 class SessionStore;
 
 class WifiUploader {
@@ -57,6 +59,8 @@ public:
     void tick() {}
 
     // Force an upload cycle as soon as possible. Safe to call from any task.
+    // Also clears the on-screen countdown so the STORAGE screen shows the
+    // cycle as imminent instead of the stale pre-poke deadline (v2.3).
     void requestNow();
 
     // Run one full upload cycle synchronously on the calling task. Blocks.
@@ -79,6 +83,30 @@ public:
     // Which network was used during the last (or current) upload cycle.
     ActiveNet activeNet()      const { return (ActiveNet)activeNet_; }
 
+    // ---- v2.3 cycle diagnostics -------------------------------------------
+    // These exist because the v2.2 field log could not distinguish "the gate
+    // blocked us" from "the AP was unreachable" without cross-referencing
+    // lastAttempt=0 against the raw event log.
+    // Latched VBAT gate state (true = PA allowed to run).
+    bool      vbatGateOpen()    const { return vbatGateOpen_; }
+    // Why the last cycle ended with no HTTP request (wgate::SkipReason).
+    uint8_t   lastSkipReason()  const { return lastSkipReason_; }
+    // Millivolts of the VBAT sample that produced that decision (-1 = none).
+    int       lastSkipVbatMv()  const { return lastSkipMv_; }
+    // Number of cycles that ended early on the battery gate.
+    uint32_t  skippedByBattery() const { return skippedCount_; }
+    // 1 while the pack is measurably charging (consecutive rising samples).
+    uint8_t   charging()         const { return charging_; }
+    // Association attempts made so far, and duration of the most recent one.
+    uint32_t  connectAttempts()  const { return connectAttempts_; }
+    uint32_t  lastConnectMs()    const { return lastConnectMs_; }
+    // Chunked-POST bookkeeping for the most recent file.
+    uint32_t  lastChunks()       const { return lastChunks_; }
+    uint32_t  lastCycleMs()      const { return lastCycleMs_; }
+    size_t    lastCycleBytes()   const { return lastCycleBytes_; }
+    // Wi-Fi driver status code of the last failed association (WL_* enum).
+    int       lastConnectStatus() const { return lastConnectStatus_; }
+
 private:
     static void taskTrampoline(void* arg);
     void taskLoop();
@@ -86,6 +114,12 @@ private:
     bool connectWifi();
     void disconnectWifi();
     bool uploadOne(const String& filename, const String& sessionId, size_t expectedBytes);
+    // One association attempt against a single SSID. Fills *elapsedMs with the
+    // measured duration and *statusCode with the driver status on failure.
+    bool tryConnect(const char* ssid, const char* pass,
+                    uint32_t* elapsedMs, int* statusCode);
+    // Evaluates + latches the VBAT hysteresis gate for this cycle.
+    bool vbatGateAllows();
 
     SessionStore* store_          = nullptr;
     TaskHandle_t  task_           = nullptr;
@@ -100,6 +134,22 @@ private:
     volatile uint32_t failedCount_    = 0;
     volatile int      lastHttpStatus_ = 0;
     volatile uint8_t  activeNet_      = 0;  // ActiveNet enum
+
+    // ---- v2.3 diagnostics (written by the wifi_up task, read from loop) ----
+    volatile bool     vbatGateOpen_      = false;
+    volatile uint8_t  lastSkipReason_    = wgate::SkipNone;
+    volatile int      lastSkipMv_        = -1;
+    volatile uint32_t skippedCount_      = 0;
+    volatile uint8_t  charging_          = 0;
+    volatile uint32_t connectAttempts_   = 0;
+    volatile uint32_t lastConnectMs_     = 0;
+    volatile uint32_t lastChunks_        = 0;
+    volatile uint32_t lastCycleMs_       = 0;
+    volatile size_t   lastCycleBytes_    = 0;
+    volatile int      lastConnectStatus_ = 0;
+    // Charge-trend tracker: previous sample + run length of rising samples.
+    float             vbatPrev_          = -1.0f;
+    uint32_t          chargeRun_         = 0;
 
     // Set by connectWifi() on success; cleared by disconnectWifi().
     // Only accessed from the wifi_up task (no lock needed).
