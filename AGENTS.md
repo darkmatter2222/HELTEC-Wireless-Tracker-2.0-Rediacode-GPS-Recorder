@@ -378,10 +378,14 @@ namespace secrets {
 - Headers: `X-Session-Id`, `X-Device-Id`, `X-Tracker-Id`, `X-Firmware`
 - Body is sent as **line-aligned 8 KB chunks** (`cfg::UPLOAD_CHUNK_BYTES`) over one
   keep-alive connection, with `esp_task_wdt_reset()` between chunks (v2.2)
-- Pure decision logic (gate hysteresis, charge trend, connect budget, chunk
-  arithmetic, retry ladder, `WL_*` decoding) lives in `src/wifi_gate.h`
-  (namespace `wgate`) and is included **directly** by the native suites, so a
-  test can never drift from the code that runs on the device (v2.3)
+- Pure decision logic (gate hysteresis, charge trend, connect budget model,
+  line-aligned chunk arithmetic, WDT window arithmetic, retry ladder, cadence
+  choice, self-heal gate, `WL_*` / phase / skip decoding) lives in
+  `src/wifi_gate.h` (namespace `wgate`) and is included **directly** by the
+  native suites, so a test can never drift from the code that runs on the
+  device (v2.3). `main.cpp` decodes `phase=` through `wgate::phaseName` for the
+  same reason, and `taskLoop()` uses `wgate::nextGapMs` /
+  `wgate::selfHealNeeded` instead of inline arithmetic.
 
 **Battery gate (v2.3, Schmitt latch)** — `WifiUploader::vbatGateAllows()`:
 
@@ -869,8 +873,8 @@ Ten test suites live under `test/`:
 | `test_link_health_native`        |  7    | BLE link-stall watchdog, including millis() wraparound |
 | `test_wifi_network_select_native`| 14    | Dual-network profile enable/disable, HTTPS URL detection, Basic Auth cred check |
 | `test_lfs_geometry_native`       |  6    | LittleFS volume-geometry gate: `total != 0 && used <= total` (v2.1) |
-| `test_wifi_gate_native`          | 27    | `wgate::` helpers: VBAT hysteresis latch, charge trend, connect budget model, chunk arithmetic vs. the WDT window, retry ladder, `WL_*` decoding (v2.3) |
-| `test_wifi_cycle_sim_native`     | 13    | Full-cycle device simulation with injected scenarios: gated ramp then drain, both-APs-absent budget, 5 s vs 25 s timeout A/B, home-preferred fallback, poke fast path, per-window WDT coverage (v2.3) |
+| `test_wifi_gate_native`          | 40    | `wgate::` helpers: VBAT hysteresis latch, charge trend, connect budget model + guards, line-aligned chunk arithmetic, WDT window arithmetic, retry ladder + cap, cadence/self-heal choices, `WL_*` / phase / skip decoding (v2.3) |
+| `test_wifi_cycle_sim_native`     | 23    | Full-cycle device simulation with injected scenarios and chained events: gated ramp then drain, both-APs-absent budget, 5 s vs 25 s timeout A/B, home-preferred fallback, poke fast path, per-window WDT coverage, partial drain mid-chunk, dead-link then recovery, zero-byte debris, charge/unplug/recharge lifecycle, `no_pending` chains, deadline-edge association, phase-trace tables, long-outage ladder (v2.3) |
 
 `test_wifi_gate_native` and `test_wifi_cycle_sim_native` `#include`
 `../../src/wifi_gate.h` directly instead of re-declaring the logic, so they
@@ -895,7 +899,7 @@ Then run all ten host-side suites:
 
 ```powershell
 pio test -e native
-# Expected: 129 test cases: 129 succeeded
+# Expected: 152 test cases: 152 succeeded
 ```
 
 **Gotcha**: the `$env:PATH` edit and `pio test` must be in the **same** shell
@@ -925,16 +929,45 @@ on the emitted trace: `wifistat_diagnostics`, `gate_vbat_consistent`,
 must sum to the `cycle_done` totals), `uptime_monotonic_cycle` (no reset across
 a full connect+drain window), and `event_log_new_fields`. They SKIP rather than
 fail when the battery gate is closed or the queue is empty, since no cycle can
-complete by design. 19/19 pass with the device recording (GPS fix + RC ready).
+complete by design.
 
-Two test-harness details learned from the v2.3 run:
+The v2.3 coverage pass adds 31 more records, taking the suite to **50** (49 pass
++ 1 legitimate skip on a drained queue):
+
+| Group    | New records |
+|----------|-------------|
+| `[HB]` field set | `hb_lines_captured`, `hb_acc_field`, `hb_life_monotonic`, `hb_dose_field`, `hb_uptime_monotonic` |
+| GPS pipe | `gps_passthru_nmea`, `gps_passthru_checksum`, `gps_passthru_matches_parsed` (raw GGA fix flag vs `g` output) |
+| BLE REPL | `ble_scan_issued`, `ble_list_responds`, `ble_list_table_consistent`, `ble_scan_nonblocking`, `ble_grab_pattern_set`, `ble_grab_pattern_clear`, `ble_disconnect_acked`, `ble_cancel_acked`, `ble_auto_reconnect_ready`, `ble_reconnect_no_reset` |
+| Guards   | `wipe_no_arg_prints_usage`, `wipe_mismatch_aborts`, `wipe_abort_reports_have`, `wipe_guard_preserves_store` |
+| Log      | `log_dump_responds`, `logclear_acks`, `logclear_empties_ring`, `log_writes_after_clear` |
+| Drain    | `chunk_count_matches_bytes`, `multi_chunk_drain` |
+| Reset    | `reboot_acks`, `reboot_banner`, `reboot_firmware_version`, `reboot_uptime_restarts` |
+
+`ble_auto_reconnect_ready` is the chain check for the BLE state machine: after
+`D` (disconnect, pin kept) and `x` (cancel scan) it samples `rcState` and wants
+`5 -> 3 -> 4` (Disconnected -> Connecting -> Ready). A **frozen** `rcState=1` is
+the v0.3.6 regression and fails; cycling without a Ready landing means the peer
+stopped advertising and SKIPs.
+
+Four test-harness details learned from the v2.3 runs:
 
 - `[HB]` lines must be parsed **by key**, not by one rigid positional regex — the
   firmware appends fields over time (`life=`, `dose=`, and `acc=` sits between
   `hdop=` and `gpsB=`), and a positional pattern then matches nothing and reports
   "0 heartbeats" on a healthy device.
-- Integer fields carry unit suffixes (`uptime=10s`, `lastAttempt=123456ms`); the
-  shared `parse_all_int()` takes the leading integer so both are usable.
+- Integer *and* float fields carry unit suffixes (`uptime=10s`,
+  `lastAttempt=123456ms`, `acc=21.4m`); the shared `parse_all_int()` /
+  `_num_prefix()` take the leading number so both are usable.
+- `send_cmd_collect()` exits 0.4 s after the last byte, which is *shorter than the
+  per-command work*: `LS` needs ~0.4 s to count the rows of a 1.6 MB day file, so
+  the helper returned only `[LS] 1 sessions on /sessions:` and lost the
+  `[LS-END] count=1` marker. Multi-line responses must be read with
+  `collect_window()` (fixed window, no early exit), and one-shot command acks that
+  can land inside an NMEA tail use `send_for()` (re-sends up to twice).
+- `REBOOT` must be read from the **same** handle: the boot banner lands ~1.5 s
+  after the ack, and closing/reopening the native CDC port loses it. The reopen
+  is only a fallback for the uptime check.
 
 ---
 
@@ -2285,6 +2318,17 @@ self-tests must pass. All passed on the current build:
   rate=4036B/s`, `cycle_done ok=1/1 bytes=662 chunks=1 ms=278`. Server-side
   `tracker_uploads` shows `"firmware":"2.3"` with `rowsInserted == rowsSeen`,
   `rowsDuplicate: 0`, `httpStatus: 200` — the chunked body reassembles exactly.
+- **Coverage pass (same firmware)**: every remaining decision point became a
+  `wgate::` function so it could be asserted — `chunksLineAligned` (line-aligned
+  POST budget), `assocWithinWindow` (deadline-edge association), `phaseName` /
+  `phaseSeqOk` / `phaseSeqConnect` (the `phase=` table `main.cpp` now uses),
+  `nextGapMs` (5 s drain vs base × ladder) and `selfHealNeeded` (fail count AND
+  low heap). The simulator gained a per-chunk drain with injected failures plus a
+  deduplicated phase trace. Totals: native **152/152**, device **50 records /
+  49 passed / 1 skipped** (`multi_chunk_drain` skips on a drained queue). New
+  on-device evidence: `rcState` walks `5 -> 3 -> 4` after `D` + `x`, the per-file
+  `chunks=1` reconciles byte-for-byte with `file_bytes`, and the boot banner
+  re-appears after `REBOOT` with the uptime restarting from ~3 s.
 - **Rules for future code**:
   1. Keep `secrets.h` and `secrets.h.example` numerically in sync — the drift was
      only detectable arithmetically. Print the compiled budget at boot

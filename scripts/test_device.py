@@ -65,6 +65,7 @@ except ImportError:
 # Configuration
 # ---------------------------------------------------------------------------
 DEFAULT_PORT    = os.environ.get("TRACKER_PORT", "COM4")
+FW_EXPECTED     = "2.3"          # src/config.h FW_VERSION, checked in the boot banner
 DEFAULT_BAUD    = 115200
 CMD_TIMEOUT_S   = 2.0   # individual command must respond within this many seconds
 HB_WINDOW_S     = 12.0  # collect heartbeats for this long
@@ -719,6 +720,417 @@ def test_event_log_new_fields(ser: serial.Serial, suite: Suite) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Helpers for the extended (v2.3 coverage pass) checks
+# ---------------------------------------------------------------------------
+
+def _int_prefix(token: str | None) -> int | None:
+    """`1234ms`, `123s`, `-1` -> 1234 / 123 / -1 (leading integer only)."""
+    if token is None:
+        return None
+    m = re.match(r"(-?\d+)", token)
+    return int(m.group(1)) if m else None
+
+
+def _num_prefix(token: str | None) -> float | None:
+    """`21.4m`, `0.142`, `-1.0` -> float. Field values carry unit suffixes."""
+    if token is None:
+        return None
+    m = re.match(r"-?\d+(?:\.\d+)?", token)
+    return float(m.group(0)) if m else None
+
+
+def collect_window(ser: serial.Serial, seconds: float,
+                   prefix: str | None = None) -> list[str]:
+    """
+    Read every line for a fixed window (no early break, unlike collect_until).
+    `prefix` filters to one line family, e.g. "[HB]" so key/value parsing cannot
+    be poisoned by a same-named key in another subsystem's line.
+    """
+    out: list[str] = []
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < seconds:
+        try:
+            raw = ser.readline()
+        except Exception:
+            break               # port vanished (reset re-enumeration) -- caller reopens
+        if not raw:
+            continue
+        try:
+            line = raw.decode(errors="replace").rstrip()
+        except Exception:
+            continue
+        if not line:
+            continue
+        if prefix is None or line.startswith(prefix):
+            out.append(line)
+    return out
+
+
+def send_for(ser: serial.Serial, cmd: str, token: str,
+             timeout: float = 3.0, attempts: int = 2) -> tuple[bool, list[str]]:
+    """
+    Send `cmd` and look for `token` in the reply, re-sending up to `attempts`
+    times. The single-shot idle-exit reader can lose an ack that lands inside a
+    stream tail (the NMEA flood after GPASSTHRU), so the retry is what makes
+    these checks deterministic rather than ordering-dependent.
+    """
+    got: list[str] = []
+    for _ in range(max(1, attempts)):
+        ser.reset_input_buffer()
+        ser.write((cmd + "\r\n").encode())
+        ser.flush()
+        got = collect_window(ser, timeout)
+        if any(token in l for l in got):
+            return True, got
+    return False, got
+
+
+def read_hb_key(ser: serial.Serial, key: str, window: float = 6.0) -> str | None:
+    """Passively wait for one [HB] line and return the value of `key`."""
+    lines = collect_window(ser, window, "[HB]")
+    return parse_kv(lines, key)
+
+
+def wait_hb_key(ser: serial.Serial, key: str, value: str,
+                timeout: float) -> tuple[bool, float]:
+    """Poll [HB] lines until key==value, or the timeout elapses."""
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < timeout:
+        left = max(0.4, t0 + timeout - time.monotonic())
+        lines = collect_window(ser, min(4.0, left), "[HB]")
+        if parse_kv(lines, key) == value:
+            return True, time.monotonic() - t0
+    return False, time.monotonic() - t0
+
+
+def session_count(ser: serial.Serial) -> int | None:
+    """
+    Current on-device session count. Reads the [LS-END] marker first and falls
+    back to the [LS] header, both from one fixed window: the per-session line
+    count takes ~0.4 s for a 1.6 MB day file, which is longer than the idle
+    exit of send_cmd_collect, so that helper returns only the header line.
+    """
+    ser.reset_input_buffer()
+    ser.write(b"LS\r\n")
+    ser.flush()
+    lines = collect_window(ser, 2.5)
+    for line in reversed(lines):
+        m = re.search(r"\[LS-END\]\s+count=(\d+)", line)
+        if m:
+            return int(m.group(1))
+    for line in lines:
+        m = re.search(r"\[LS\]\s+(\d+) sessions", line)
+        if m:
+            return int(m.group(1))
+    return None
+
+
+# ---------------------------------------------------------------------------
+# v2.3 coverage pass: heartbeat field set
+# ---------------------------------------------------------------------------
+
+def test_heartbeat_v23_fields(ser: serial.Serial, suite: Suite) -> None:
+    """acc=, life= and dose= were appended to [HB]; they must be parseable by
+    key, and `life` (the per-boot monotonic counter) must never go backwards."""
+    lines = collect_window(ser, max(10.0, HB_WINDOW_S), "[HB]")
+    acc      = parse_kv(lines, "acc")
+    life     = parse_all_int(lines, "life")
+    dose     = parse_kv(lines, "dose")
+    uptime   = parse_all_int(lines, "uptime")
+
+    ok_hdr = len(lines) >= 2
+    suite.record("hb_lines_captured", ok_hdr, 0.0,
+                 "" if ok_hdr else f"only {len(lines)} [HB] line(s) in the window")
+
+    acc_num = _num_prefix(acc)
+    ok_acc = acc_num is not None and acc_num >= -1.0     # -1.0 = no fix yet
+    suite.record("hb_acc_field", ok_acc, 0.0,
+                 "" if ok_acc else f"acc={acc} in {len(lines)} HB line(s)")
+
+    ok_life = len(life) >= 2 and all(life[i + 1] >= life[i] for i in range(len(life) - 1))
+    suite.record("hb_life_monotonic", ok_life, 0.0,
+                 "" if ok_life else f"life sequence {life}")
+
+    ok_dose = dose is not None and dose.endswith("uSv") and _num_prefix(dose) is not None
+    suite.record("hb_dose_field", ok_dose, 0.0,
+                 "" if ok_dose else f"dose={dose}")
+
+    ok_up = len(uptime) >= 2 and all(uptime[i + 1] >= uptime[i]
+                                      for i in range(len(uptime) - 1))
+    suite.record("hb_uptime_monotonic", ok_up, 0.0,
+                 "" if ok_up else f"uptime sequence {uptime}")
+
+
+# ---------------------------------------------------------------------------
+# v2.3 coverage pass: BLE REPL commands
+# ---------------------------------------------------------------------------
+
+def test_ble_scan_and_list(ser: serial.Serial, suite: Suite) -> None:
+    """`s <secs>` arms an async scan (must not block the loop), `l` dumps the
+    result table with address/addrType/RSSI/name per entry."""
+    ok_start, lines = send_for(ser, "s 3", "starting manual scan", timeout=4.0)
+    suite.record("ble_scan_issued", ok_start, 0.0,
+                 "" if ok_start else f"no scan ack: {lines[:2]}")
+
+    # The scan runs on the BLE stack task; give the 3 s window time to close.
+    time.sleep(3.2)
+    ok_list, lines2 = send_for(ser, "l", "scan results", timeout=2.5)
+    suite.record("ble_list_responds", ok_list, 0.0,
+                 "" if ok_list else f"no table header: {lines2[:2]}")
+
+    header = [l for l in lines2 if "scan results" in l]
+    claimed = 0
+    if header:
+        m2 = re.search(r"(\d+) scan results", header[0])
+        claimed = int(m2.group(1)) if m2 else 0
+    entries = [l for l in lines2
+               if re.search(r"\[\d+\]\s+[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}", l)]
+    ok_tbl = bool(header) and (claimed == len(entries) or claimed == 0)
+    suite.record("ble_list_table_consistent", ok_tbl, 0.0,
+                 "" if ok_tbl else f"header={claimed} entries={len(entries)}")
+    # The scan must not have stalled the main loop: heartbeats keep flowing.
+    ok_hb = read_hb_key(ser, "uptime", 6.0) is not None
+    suite.record("ble_scan_nonblocking", ok_hb, 0.0,
+                 "" if ok_hb else "no [HB] while/after scanning")
+
+
+def test_ble_grab_pattern_roundtrip(ser: serial.Serial, suite: Suite) -> None:
+    """`t <pattern>` arms the name auto-grab, bare `t` clears it."""
+    ok_set, lines = send_for(ser, "t RadiaCode", "auto-grab armed", timeout=2.5)
+    suite.record("ble_grab_pattern_set", ok_set, 0.0,
+                 "" if ok_set else f"got {lines[:2]}")
+    ok_clr, lines2 = send_for(ser, "t", "auto-grab cleared", timeout=2.5)
+    suite.record("ble_grab_pattern_clear", ok_clr, 0.0,
+                 "" if ok_clr else f"got {lines2[:2]}")
+
+
+def test_ble_disconnect_reconnect_chain(ser: serial.Serial, suite: Suite) -> None:
+    """Chain: `D` drops the link (pin kept) and `x` cancels any scan; the async
+    auto-scan loop must bring rcState back to 4 (Ready) with no reboot -- the
+    v0.3.6 'stuck in Scanning' regression and the v0.3.4 blocking-scan fix."""
+    before = read_hb_key(ser, "rcState")
+    uptime_before = _int_prefix(read_hb_key(ser, "uptime"))
+
+    lines, _ = send_cmd_collect(ser, "D")
+    ok_d = any("keep pin" in l for l in lines)
+    suite.record("ble_disconnect_acked", ok_d, 0.0,
+                 "" if ok_d else f"'D' -> {lines[:2]}")
+    lines2, _ = send_cmd_collect(ser, "x")
+    ok_x = any("cancel scan" in l for l in lines2)
+    suite.record("ble_cancel_acked", ok_x, 0.0, "" if ok_x else f"'x' -> {lines2[:2]}")
+
+    # Sample rcState over ~24 s. Two answers matter:
+    #   4 (Ready)      -> the v0.3.6 auto-scan state machine recovered the link.
+    #   1 <-> 5 cycling-> the loop is alive; the peer is simply not advertising
+    #                    (RC-110 sleeps after inactivity) -> informative SKIP.
+    #   frozen at 1    -> the v0.3.6 'stuck in Scanning' regression -> FAIL.
+    samples: list[str] = []
+    t0 = time.monotonic()
+    while time.monotonic() - t0 < 24.0:
+        v = read_hb_key(ser, "rcState", 4.0)
+        if v is None:
+            continue
+        samples.append(v)
+        if v == "4":
+            break
+    ready = "4" in samples
+    cycling = len(set(samples)) > 1
+    if ready:
+        suite.record("ble_auto_reconnect_ready", True, time.monotonic() - t0,
+                     f"rcState samples {samples}")
+    elif cycling:
+        suite.record("ble_auto_reconnect_ready", True, time.monotonic() - t0,
+                     f"skipped: auto loop cycling {sorted(set(samples))}, "
+                     f"peer not advertising", skipped=True)
+    else:
+        suite.record("ble_auto_reconnect_ready", False, time.monotonic() - t0,
+                     f"rcState frozen at {samples[:1]} (was {before} before the poke)")
+
+    uptime_after = _int_prefix(read_hb_key(ser, "uptime"))
+    ok_no_reset = (uptime_before is not None and uptime_after is not None
+                   and uptime_after >= uptime_before)
+    suite.record("ble_reconnect_no_reset", ok_no_reset, 0.0,
+                 "" if ok_no_reset
+                 else f"uptime {uptime_before} -> {uptime_after} (device reset)")
+
+
+# ---------------------------------------------------------------------------
+# v2.3 coverage pass: raw GPS pipe, WIPE guard, LOG lifecycle
+# ---------------------------------------------------------------------------
+
+def test_gps_passthru(ser: serial.Serial, suite: Suite) -> None:
+    """GPASSTHRU pipes the UC6580 UART straight to USB -- ground truth that the
+    NMEA path works independently of the TinyGPS++ parser."""
+    ok, lines = send_for(ser, "GPASSTHRU 3", "$", timeout=4.0, attempts=2)
+    nmea = [l for l in lines if l.startswith("$")]
+    suite.record("gps_passthru_nmea", ok and len(nmea) > 0, 0.0,
+                 "" if ok else f"no NMEA in {len(lines)} line(s)")
+    ok_ck = any("*" in l for l in nmea)          # every sentence is checksummed
+    suite.record("gps_passthru_checksum", ok_ck, 0.0,
+                 "" if ok_ck else "sentences carry no checksum")
+    # Parsed vs raw: the same fix verdict must appear in the structured `g` output.
+    raw_fix = any(l.startswith("$GNGGA") and ",1," in l for l in nmea)
+    g_lines, _ = send_cmd_collect(ser, "g")
+    parsed_fix = "fix=1" in " ".join(g_lines)
+    ok_pair = bool(raw_fix) == parsed_fix
+    suite.record("gps_passthru_matches_parsed", ok_pair, 0.0,
+                 "" if ok_pair else f"raw GGA fix={raw_fix} parsed fix={parsed_fix}")
+
+
+def test_wipe_guard(ser: serial.Serial, suite: Suite) -> None:
+    """The count guard is what makes WIPE safe: a mismatched or missing count
+    must abort and leave the append-only store untouched."""
+    before = session_count(ser)
+    lines, _ = send_cmd_collect(ser, "WIPE")
+    ok_usage = any("usage" in l for l in lines)
+    suite.record("wipe_no_arg_prints_usage", ok_usage, 0.0,
+                 "" if ok_usage else f"got {lines[:2]}")
+
+    lines2, _ = send_cmd_collect(ser, "WIPE 999999")
+    abort = [l for l in lines2 if "WIPE-ABORT" in l]
+    suite.record("wipe_mismatch_aborts", bool(abort), 0.0,
+                 "" if abort else f"no WIPE-ABORT: {lines2[:2]}")
+
+    reported = None
+    if abort:
+        m = re.search(r"have=(\d+)", abort[0])
+        reported = int(m.group(1)) if m else None
+    suite.record("wipe_abort_reports_have", reported == before, 0.0,
+                 "" if reported == before else f"have={reported} LS={before}")
+
+    after = session_count(ser)
+    ok_same = before is not None and after == before
+    suite.record("wipe_guard_preserves_store", ok_same, 0.0,
+                 "" if ok_same else f"count changed {before} -> {after}")
+
+
+def test_log_clear_and_dump(ser: serial.Serial, suite: Suite) -> None:
+    """LOG dumps the persistent ring (both files + byte total); LOGCLEAR empties
+    it and the next dump must read as empty/short. Diagnostic surface only --
+    session CSVs are untouched."""
+    lines, e1 = send_cmd_collect(ser, "LOG", timeout=CMD_TIMEOUT_S + 1.0)
+    totals_before = [int(m.group(1)) for l in lines
+                     for m in [re.search(r"\((\d+) bytes total\)", l)] if m]
+    ok_dump = len(lines) > 0 and bool(totals_before)
+    suite.record("log_dump_responds", ok_dump, e1,
+                 "" if ok_dump else f"no byte-total footer: {lines[:2]}")
+
+    lines2, e2 = send_cmd_collect(ser, "LOGCLEAR")
+    ok_clear = any("cleared" in l for l in lines2)
+    suite.record("logclear_acks", ok_clear, e2,
+                 "" if ok_clear else f"got {lines2[:2]}")
+
+    lines3, _ = send_cmd_collect(ser, "LOG", timeout=CMD_TIMEOUT_S + 1.0)
+    totals_after = [int(m.group(1)) for l in lines3
+                    for m in [re.search(r"\((\d+) bytes total\)", l)] if m]
+    empty_flag = any("empty" in l for l in lines3)
+    shrunk = (not totals_after) or (totals_before and
+                                     totals_after[0] <= totals_before[0])
+    suite.record("logclear_empties_ring", bool(totals_after) and shrunk or empty_flag, 0.0,
+                 "" if (shrunk or empty_flag)
+                 else f"{totals_before} -> {totals_after} bytes")
+
+    # A fresh event must appear again after the clear -- but only if the poked
+    # cycle actually reached the radio. A `skip=no_pending` cycle writes nothing
+    # to the persistent log by design (see runOnce()), so that is a SKIP.
+    send_cmd_collect(ser, "SYNC")
+    trail = collect_window(ser, 8.0)
+    idle_cycle = any("skip=no_pending" in l for l in trail)
+    lines4, _ = send_cmd_collect(ser, "LOG", timeout=CMD_TIMEOUT_S + 1.0)
+    grew = [int(m.group(1)) for l in lines4
+            for m in [re.search(r"\((\d+) bytes total\)", l)] if m]
+    wrote = bool(grew) and grew[0] > 0
+    if not wrote and idle_cycle:
+        suite.record("log_writes_after_clear", True, 0.0,
+                     "skipped (cycle reported skip=no_pending: no log line by design)",
+                     skipped=True)
+    else:
+        suite.record("log_writes_after_clear", wrote, 0.0,
+                     "" if wrote else "no new records written after LOGCLEAR")
+
+
+def test_multi_chunk_drain_observed(ser: serial.Serial, suite: Suite) -> None:
+    """At least one file must drain in >1 chunk on a full backlog, which is what
+    proves the v2.2 chunking path (not the single-request path) is live."""
+    send_cmd_collect(ser, "SYNC")
+    lines = collect_until(ser, ("[UPLOAD] cycle start", "cycle start;",
+                                "cycle_done ok=", "cycle done",
+                                "skip=no_pending"), 45.0)
+    pairs: list[tuple[int, int]] = []
+    for l in lines:
+        if "OK http=" not in l:
+            continue
+        mc = re.search(r"chunks=(\d+)", l)
+        mb = re.search(r"file_bytes=(\d+)", l)
+        if mc and mb:
+            pairs.append((int(mb.group(1)), int(mc.group(1))))
+    if not pairs:
+        suite.record("multi_chunk_drain", True, 0.0,
+                     "skipped (no file completed this cycle: queue empty)",
+                     skipped=True)
+        return
+    # Arithmetic identity: chunks == ceil(file_bytes / 8192), possibly +1 because
+    # every POST is cut at the last newline at or before the limit.
+    ceil_ = lambda b: max(1, (b + 8191) // 8192)
+    bad = [(b, c) for (b, c) in pairs if c not in (ceil_(b), ceil_(b) + 1)]
+    suite.record("chunk_count_matches_bytes", not bad, 0.0,
+                 "" if not bad else f"mismatched (bytes, chunks) pairs: {bad[:4]}")
+    seen_multi = any(c >= 2 for _, c in pairs)
+    all_small  = all(b <= 8192 for b, _ in pairs)
+    ok = seen_multi or all_small          # 1 chunk is correct for a small day file
+    suite.record("multi_chunk_drain", ok, 0.0,
+                 f"{len(pairs)} file(s); max {max(c for _, c in pairs)} chunk(s)"
+                 + (" [all single-chunk files]" if all_small else ""))
+
+
+def test_reboot_restart(ser: serial.Serial, suite: Suite,
+                        port: str = DEFAULT_PORT) -> serial.Serial:
+    """REBOOT must restart the firmware: banner again, uptime restarts from a
+    smaller value, NVS-backed state survives. Runs LAST -- the port may
+    re-enumerate, so the handle is replaced and returned."""
+    uptime_before = _int_prefix(read_hb_key(ser, "uptime"))
+    # The boot banner lands ~1.5 s after the ack (500 ms flush delay + boot), so
+    # read it from the same window instead of chasing it with a reopen.
+    ok_ack, lines = send_for(ser, "REBOOT", "soft-resetting", timeout=6.0, attempts=1)
+    suite.record("reboot_acks", ok_ack, 0.0, "" if ok_ack else f"got {lines[:2]}")
+
+    banner = [l for l in lines if "firmware v" in l]
+    t0 = time.monotonic()
+    while not banner and time.monotonic() - t0 < 15.0:
+        got = collect_window(ser, 3.0)
+        b2 = [l for l in got if "firmware v" in l]
+        if b2:
+            banner = b2
+    if not banner:
+        # Native CDC can drop its buffer across the reset; reopen and try once.
+        try:
+            ser.close()
+        except Exception:
+            pass
+        for _ in range(4):
+            try:
+                ser = open_port(port)
+                break
+            except Exception:
+                time.sleep(1.0)
+        got = collect_window(ser, 12.0)
+        banner = [l for l in got if "firmware v" in l]
+
+    suite.record("reboot_banner", bool(banner), 0.0,
+                 "" if banner else "no boot banner within 15 s")
+    ok_ver = bool(banner) and f"v{FW_EXPECTED}" in banner[0]
+    suite.record("reboot_firmware_version", ok_ver, 0.0,
+                 "" if ok_ver else f"banner: {banner[:1]} (want v{FW_EXPECTED})")
+
+    uptime_after = _int_prefix(read_hb_key(ser, "uptime", 12.0))
+    ok_restart = (uptime_before is not None and uptime_after is not None
+                  and uptime_after < uptime_before)
+    suite.record("reboot_uptime_restarts", ok_restart, 0.0,
+                 "" if ok_restart
+                 else f"uptime {uptime_before} -> {uptime_after}")
+    return ser
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -775,8 +1187,26 @@ def main() -> int:
         # Long-running latency test (~30 s).
         test_serial_loop_latency(ser, suite)
 
+        # Coverage pass: full [HB] field set, BLE REPL commands, raw GPS pipe,
+        # guard paths, persistent-log lifecycle.
+        test_heartbeat_v23_fields(ser, suite)
+        test_gps_passthru(ser, suite)
+        test_ble_scan_and_list(ser, suite)
+        test_ble_grab_pattern_roundtrip(ser, suite)
+        test_ble_disconnect_reconnect_chain(ser, suite)
+        test_wipe_guard(ser, suite)
+        test_log_clear_and_dump(ser, suite)
+        test_multi_chunk_drain_observed(ser, suite)
+
+        # Reset check goes last: the native CDC port re-enumerates and the
+        # handle is replaced, so nothing may run before it.
+        ser = test_reboot_restart(ser, suite, args.port)
+
     finally:
-        ser.close()
+        try:
+            ser.close()
+        except Exception:
+            pass
 
     passed, failed, skipped = suite.summary()
     total = len(suite.results)

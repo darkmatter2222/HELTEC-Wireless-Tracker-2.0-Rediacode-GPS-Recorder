@@ -182,7 +182,9 @@ void WifiUploader::taskLoop() {
             // so all pending .up.csv files and the active day file are safe.
             if (consecutiveFailures_ >= cfg::WIFI_FAIL_REBOOT_THRESHOLD) {
                 const uint32_t freeHeap = ESP.getFreeHeap();
-                if (freeHeap < cfg::WIFI_HEAL_MIN_HEAP) {
+                if (wgate::selfHealNeeded(consecutiveFailures_, freeHeap,
+                                          cfg::WIFI_FAIL_REBOOT_THRESHOLD,
+                                          cfg::WIFI_HEAL_MIN_HEAP)) {
                     Serial.printf("[WIFI] self-heal: %u failures + heap=%u < %u -- rebooting\n",
                                   (unsigned)consecutiveFailures_,
                                   (unsigned)freeHeap,
@@ -208,16 +210,15 @@ void WifiUploader::taskLoop() {
         // so it deliberately holds the current multiplier instead of ramping:
         // a gated cycle is not a link failure.
         const uint32_t mult = wgate::backoffMultiplier(consecutiveFailures_);
-        uint32_t sleepMs = secrets::UPLOAD_INTERVAL_MS * mult;
-        // v0.4.7: drain the queue. If we just succeeded and there is still
-        // more work in the active day file (i.e. samples have been written
-        // since rotateForUpload was last called), kick another cycle in 5s
-        // instead of waiting the full 60s. The store-side rotate is gated
-        // by "only when no pending files", so this is safe — it just lets
-        // a backlog drain quickly when the AP is finally in range.
-        if (uploadedCount_ > okBefore && store_) {
-            sleepMs = 5000;
-        }
+        // v0.4.7: drain the queue. If we just made progress -- a full drain or
+        // even a partial one -- kick another cycle in 5 s instead of waiting the
+        // full 60 s. The store-side rotate is gated by "only when no pending
+        // files", so this is safe; it just lets a backlog drain quickly when the
+        // AP is finally in range. Both the ladder and this two-way choice are
+        // wgate:: functions now, so the native suite asserts the running code.
+        const uint32_t sleepMs = wgate::nextGapMs(secrets::UPLOAD_INTERVAL_MS,
+                                                  5000u, mult,
+                                                  (uploadedCount_ > okBefore) && store_);
         nextAttempt_ = millis() + sleepMs;
         phase_ = (uint8_t)(mult > 1 ? Phase::Backoff : Phase::Idle);
         if (mult > 1) {

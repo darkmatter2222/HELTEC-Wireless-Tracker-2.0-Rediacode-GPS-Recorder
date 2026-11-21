@@ -194,6 +194,42 @@ void test_25s_budget_covers_measured_associations(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Connect budget: guards and wider configurations
+// ---------------------------------------------------------------------------
+void test_connect_budget_negative_and_zero(void) {
+    TEST_ASSERT_EQUAL_UINT32(0, wgate::worstCaseConnectMs(25000, -1));  // guard
+    TEST_ASSERT_EQUAL_UINT32(0, wgate::worstCaseConnectMs(25000, 0));
+    // Zero timeout still pays the two fixed settles.
+    TEST_ASSERT_EQUAL_UINT32(400, wgate::worstCaseConnectMs(0, 1));     // 100+300
+    TEST_ASSERT_EQUAL_UINT32(700, wgate::worstCaseConnectMs(0, 2));     // 100+2*300
+}
+
+void test_connect_budget_three_profiles_vs_watchdog(void) {
+    // A hypothetical third profile pushes the TOTAL past the watchdog, but the
+    // watchdog only ever sees one attempt at a time (the poll loop pets every
+    // 200 ms), so the invariant is per-attempt, not per-cycle.
+    const uint32_t total = wgate::worstCaseConnectMs(25000, 3);
+    TEST_ASSERT_EQUAL_UINT32(76000u, total);                 // 100 + 3*(25000+300)
+    TEST_ASSERT_TRUE(total > WDT_S * 1000u);                 // total may exceed
+    const uint32_t perAttempt = 25000u + wgate::INTER_SSID_SETTLE_MS;
+    TEST_ASSERT_EQUAL_UINT32(25300u, perAttempt);
+    TEST_ASSERT_TRUE(perAttempt < WDT_S * 1000u);            // window always fits
+}
+
+// ---------------------------------------------------------------------------
+// Charge window helper (the same predicate the simulator uses)
+// ---------------------------------------------------------------------------
+void test_assoc_within_window(void) {
+    TEST_ASSERT_TRUE (wgate::assocWithinWindow(801u,   25000u));
+    TEST_ASSERT_TRUE (wgate::assocWithinWindow(3807u,  25000u));
+    TEST_ASSERT_TRUE (wgate::assocWithinWindow(25000u, 25000u));   // exact edge
+    TEST_ASSERT_FALSE(wgate::assocWithinWindow(25001u, 25000u));   // past deadline
+    TEST_ASSERT_FALSE(wgate::assocWithinWindow(0u,     25000u));   // never ran
+    TEST_ASSERT_FALSE(wgate::assocWithinWindow(0u,     0u));
+    TEST_ASSERT_FALSE(wgate::assocWithinWindow(12000u, 5000u));    // the 5s regression
+}
+
+// ---------------------------------------------------------------------------
 // Chunk arithmetic -- the 2026-11-21 backlog, byte-for-byte
 // ---------------------------------------------------------------------------
 static const size_t kBacklog[15] = {
@@ -207,6 +243,23 @@ void test_chunk_count_basic(void) {
     TEST_ASSERT_EQUAL_UINT32(1u,   (uint32_t)wgate::chunkCount(8192, CH));
     TEST_ASSERT_EQUAL_UINT32(2u,   (uint32_t)wgate::chunkCount(8193, CH));
     TEST_ASSERT_EQUAL_UINT32(0u,   (uint32_t)wgate::chunkCount(8192, 0));   // guard
+}
+
+// Exact boundaries: one byte short of, exactly at, and one byte past a chunk.
+void test_chunk_count_boundaries(void) {
+    TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)wgate::chunkCount(8191,  CH));
+    TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)wgate::chunkCount(8192,  CH));   // exact
+    TEST_ASSERT_EQUAL_UINT32(2u, (uint32_t)wgate::chunkCount(8193,  CH));   // spills
+    TEST_ASSERT_EQUAL_UINT32(2u, (uint32_t)wgate::chunkCount(16384, CH));
+    TEST_ASSERT_EQUAL_UINT32(3u, (uint32_t)wgate::chunkCount(16385, CH));
+    TEST_ASSERT_EQUAL_UINT32(1u, (uint32_t)wgate::chunkCount(1,     CH));
+}
+
+void test_chunk_count_large_bodies(void) {
+    TEST_ASSERT_EQUAL_UINT32(128u,  (uint32_t)wgate::chunkCount(1048576, CH));
+    TEST_ASSERT_EQUAL_UINT32(123u,  (uint32_t)wgate::chunkCount(1000000, CH));
+    TEST_ASSERT_EQUAL_UINT32(677u,  (uint32_t)wgate::chunkCount(5542309, CH));  // whole backlog
+    TEST_ASSERT_EQUAL_UINT32(65536u, (uint32_t)wgate::chunkCount(536870912, CH));
 }
 
 void test_chunk_count_field_files(void) {
@@ -224,6 +277,30 @@ void test_backlog_totals(void) {
     // ceil division is the lower bound: real chunk counts are >= this because
     // every POST is truncated to the last newline at or before CH.
     TEST_ASSERT_EQUAL_UINT32(687u, (uint32_t)chunks);
+}
+
+// The line-aligned model (uploadOne() cuts each POST at the last '\n' at or
+// before the limit): that can only add requests, never remove them.
+void test_chunks_line_aligned(void) {
+    // The 1.60 MB day file with ~70 B rows reproduces the "chunk n/196" trace.
+    TEST_ASSERT_EQUAL_UINT32(196u, (uint32_t)wgate::chunksLineAligned(1604185, CH, 70));
+    TEST_ASSERT_TRUE(wgate::chunksLineAligned(1604185, CH, 70) >=
+                     wgate::chunkCount(1604185, CH));
+
+    // Rows that do not divide the chunk: 6 rows of 3000 B, 2 fit per 8192 POST
+    // -> 3 POSTs, one more than the raw ceil of 2.
+    TEST_ASSERT_EQUAL_UINT32(3u, (uint32_t)wgate::chunksLineAligned(16384, CH, 3000));
+    TEST_ASSERT_TRUE(wgate::chunksLineAligned(16384, CH, 3000) >
+                     wgate::chunkCount(16384, CH));
+
+    // A row longer than the chunk: one row per POST (never a partial row).
+    TEST_ASSERT_EQUAL_UINT32(2u, (uint32_t)wgate::chunksLineAligned(16384, CH, 9000));
+    TEST_ASSERT_EQUAL_UINT32(3u, (uint32_t)wgate::chunksLineAligned(20000, CH, 9000));
+
+    // Degenerate inputs must not divide by zero.
+    TEST_ASSERT_EQUAL_UINT32(0u, (uint32_t)wgate::chunksLineAligned(0, CH, 70));
+    TEST_ASSERT_EQUAL_UINT32(0u, (uint32_t)wgate::chunksLineAligned(100, 0, 70));
+    TEST_ASSERT_EQUAL_UINT32(0u, (uint32_t)wgate::chunksLineAligned(100, CH, 0));
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +330,24 @@ void test_post_ms_degenerate_inputs(void) {
     TEST_ASSERT_EQUAL_UINT32(30000u, wgate::worstCasePostMs(0, 400, 30000));
 }
 
+// Rounding behaviour of the ceil division inside the helper.
+void test_post_ms_exact_and_ceil(void) {
+    // Exact division: 8192 B at 8192 B/s = 1000 ms + 30 s response.
+    TEST_ASSERT_EQUAL_UINT32(31000u, wgate::worstCasePostMs(8192, 8192, 30000));
+    // 1 B at 1000 B/s rounds up to 1 ms, not 0.
+    TEST_ASSERT_EQUAL_UINT32(30001u, wgate::worstCasePostMs(1, 1000, 30000));
+    // 8192 B at 3 B/s -> ceil(8192000/3) = 2730667 ms (+30 s).
+    TEST_ASSERT_EQUAL_UINT32(2760667u, wgate::worstCasePostMs(8192, 3, 30000));
+    // A shorter response timeout shortens the window one-for-one.
+    TEST_ASSERT_EQUAL_UINT32(20480u + 5000u, wgate::worstCasePostMs(8192, 400, 5000));
+    // The largest chunk we ship with still fits the 60 s watchdog.
+    TEST_ASSERT_EQUAL_UINT32(50480u, wgate::worstCasePostMs(CH, 400, 30000));
+    TEST_ASSERT_TRUE(wgate::worstCasePostMs(CH, 400, 30000) < WDT_S * 1000u);
+    // A chunk larger than 12 kB would exceed it -> 8192 is the right knob.
+    TEST_ASSERT_EQUAL_UINT32(70960u, wgate::worstCasePostMs(16384, 400, 30000));
+    TEST_ASSERT_TRUE(wgate::worstCasePostMs(16384, 400, 30000) > WDT_S * 1000u);
+}
+
 // ---------------------------------------------------------------------------
 // Retry ladder
 // ---------------------------------------------------------------------------
@@ -273,6 +368,53 @@ void test_backoff_matches_log_gap(void) {
     // i.e. 8x of a 60 s base.
     TEST_ASSERT_EQUAL_UINT32(480u, 60u * wgate::backoffMultiplier(5));
     TEST_ASSERT_EQUAL_UINT32(960u, 60u * wgate::backoffMultiplier(6));
+}
+
+// Ladder properties over a long outage: never decreases, never exceeds the cap,
+// and the whole 1x/2x/4x/8x/16x sequence is reached by failure 6.
+void test_backoff_monotonic_and_capped(void) {
+    uint32_t prev = 0;
+    for (uint32_t n = 0; n <= 40; ++n) {
+        const uint32_t m = wgate::backoffMultiplier(n);
+        TEST_ASSERT_TRUE(m >= prev);          // monotonic
+        TEST_ASSERT_TRUE(m <= 16u);            // capped
+        prev = m;
+    }
+    TEST_ASSERT_EQUAL_UINT32(16u, prev);
+    // The distinct levels, in order.
+    const uint32_t kLevels[6] = { 1, 1, 1, 2, 4, 8 };
+    for (int i = 0; i < 6; ++i) TEST_ASSERT_EQUAL_UINT32(kLevels[i], wgate::backoffMultiplier(i));
+    TEST_ASSERT_EQUAL_UINT32(16u, wgate::backoffMultiplier(6));
+    // Cap of 16x of the 60 s base = 960 s, matching the observed 16-min plateau.
+    TEST_ASSERT_EQUAL_UINT32(960u, 60u * wgate::backoffMultiplier(40));
+}
+
+// ---------------------------------------------------------------------------
+// Cadence choice + self-heal gate (taskLoop bookkeeping)
+// ---------------------------------------------------------------------------
+void test_next_gap_ms_choice(void) {
+    // Any progress (full or partial drain) shortens to the 5 s fast path.
+    TEST_ASSERT_EQUAL_UINT32(5000u, wgate::nextGapMs(60000u, 5000u, 1u, true));
+    TEST_ASSERT_EQUAL_UINT32(5000u, wgate::nextGapMs(60000u, 5000u, 16u, true));
+    // No progress -> base * ladder.
+    TEST_ASSERT_EQUAL_UINT32(60000u, wgate::nextGapMs(60000u, 5000u, 1u, false));
+    TEST_ASSERT_EQUAL_UINT32(960000u, wgate::nextGapMs(60000u, 5000u, 16u, false));
+    TEST_ASSERT_EQUAL_UINT32(480000u, wgate::nextGapMs(60000u, 5000u,
+                                                      wgate::backoffMultiplier(5), false));
+}
+
+// The v0.8.1 lwIP self-heal needs BOTH conditions; either alone must not reboot.
+void test_self_heal_needs_both_conditions(void) {
+    TEST_ASSERT_TRUE (wgate::selfHealNeeded(10u, 37000u, 10u, 50000u));   // the 2026-05-21 case
+    TEST_ASSERT_FALSE(wgate::selfHealNeeded(10u, 218000u, 10u, 50000u));  // healthy heap
+    TEST_ASSERT_FALSE(wgate::selfHealNeeded(9u, 37000u, 10u, 50000u));    // short streak
+    TEST_ASSERT_TRUE (wgate::selfHealNeeded(40u, 1u, 10u, 50000u));       // deep streak, tiny heap
+    TEST_ASSERT_FALSE(wgate::selfHealNeeded(0u, 0u, 10u, 50000u));
+    // Boundary: heap exactly at the floor is not "low".
+    TEST_ASSERT_FALSE(wgate::selfHealNeeded(10u, 50000u, 10u, 50000u));
+    TEST_ASSERT_TRUE (wgate::selfHealNeeded(10u, 49999u, 10u, 50000u));
+    // Boundary: streak exactly at the threshold trips.
+    TEST_ASSERT_TRUE (wgate::selfHealNeeded(10u, 40000u, 10u, 50000u));
 }
 
 // ---------------------------------------------------------------------------
@@ -298,6 +440,44 @@ void test_skip_names(void) {
     TEST_ASSERT_EQUAL_STRING("none",       wgate::skipName(200));   // out of range
 }
 
+// Codes outside the enum must decode, never read past a table.
+void test_status_names_out_of_range(void) {
+    TEST_ASSERT_EQUAL_STRING("UNKNOWN", wgate::statusName(-1));
+    TEST_ASSERT_EQUAL_STRING("UNKNOWN", wgate::statusName(7));
+    TEST_ASSERT_EQUAL_STRING("UNKNOWN", wgate::statusName(256));
+    TEST_ASSERT_EQUAL_STRING("UNKNOWN", wgate::statusName(1000));
+}
+
+// The WIFISTAT `phase=` token comes from this table (main.cpp uses it too).
+void test_phase_names(void) {
+    TEST_ASSERT_EQUAL_STRING("disabled",     wgate::phaseName(0));
+    TEST_ASSERT_EQUAL_STRING("idle",         wgate::phaseName(1));
+    TEST_ASSERT_EQUAL_STRING("backoff",      wgate::phaseName(2));
+    TEST_ASSERT_EQUAL_STRING("connecting",   wgate::phaseName(3));
+    TEST_ASSERT_EQUAL_STRING("posting",      wgate::phaseName(4));
+    TEST_ASSERT_EQUAL_STRING("disconnecting",wgate::phaseName(5));
+    TEST_ASSERT_EQUAL_STRING("unknown",      wgate::phaseName(6));
+    TEST_ASSERT_EQUAL_STRING("unknown",      wgate::phaseName(255));
+}
+
+// Reference phase traces the simulator compares against.
+void test_phase_sequence_tables(void) {
+    const int kOk[5] = { 1, 3, 4, 5, 1 };
+    for (int i = 0; i < 5; ++i) TEST_ASSERT_EQUAL_INT(kOk[i], wgate::phaseSeqOk(i));
+    TEST_ASSERT_EQUAL_INT(-1, wgate::phaseSeqOk(5));
+    TEST_ASSERT_EQUAL_INT(-1, wgate::phaseSeqOk(-1));
+
+    const int kConn[3] = { 1, 3, 1 };
+    for (int i = 0; i < 3; ++i) TEST_ASSERT_EQUAL_INT(kConn[i], wgate::phaseSeqConnect(i));
+    TEST_ASSERT_EQUAL_INT(-1, wgate::phaseSeqConnect(3));
+
+    // Every index of the reference traces must decode to a real phase name.
+    for (int i = 0; i < 5; ++i) {
+        TEST_ASSERT_EQUAL_STRING(wgate::phaseName((uint8_t)wgate::phaseSeqOk(i)),
+                                 wgate::phaseName((uint8_t)kOk[i]));
+    }
+}
+
 // ---------------------------------------------------------------------------
 int main(int, char**) {
     UNITY_BEGIN();
@@ -321,20 +501,33 @@ int main(int, char**) {
     RUN_TEST(test_connect_budget_zero_profiles);
     RUN_TEST(test_model_reproduces_observed_5s_timeouts);
     RUN_TEST(test_25s_budget_covers_measured_associations);
+    RUN_TEST(test_connect_budget_negative_and_zero);
+    RUN_TEST(test_connect_budget_three_profiles_vs_watchdog);
+    RUN_TEST(test_assoc_within_window);
 
     RUN_TEST(test_chunk_count_basic);
+    RUN_TEST(test_chunk_count_boundaries);
+    RUN_TEST(test_chunk_count_large_bodies);
     RUN_TEST(test_chunk_count_field_files);
     RUN_TEST(test_backlog_totals);
+    RUN_TEST(test_chunks_line_aligned);
 
     RUN_TEST(test_worst_case_chunk_fits_wdt);
     RUN_TEST(test_unchunked_body_would_trip_wdt);
     RUN_TEST(test_post_ms_degenerate_inputs);
+    RUN_TEST(test_post_ms_exact_and_ceil);
 
     RUN_TEST(test_backoff_ladder);
     RUN_TEST(test_backoff_matches_log_gap);
+    RUN_TEST(test_backoff_monotonic_and_capped);
+    RUN_TEST(test_next_gap_ms_choice);
+    RUN_TEST(test_self_heal_needs_both_conditions);
 
     RUN_TEST(test_status_names);
+    RUN_TEST(test_status_names_out_of_range);
     RUN_TEST(test_skip_names);
+    RUN_TEST(test_phase_names);
+    RUN_TEST(test_phase_sequence_tables);
 
     return UNITY_END();
 }

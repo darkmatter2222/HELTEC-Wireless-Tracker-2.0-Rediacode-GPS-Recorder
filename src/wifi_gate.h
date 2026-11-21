@@ -101,6 +101,27 @@ inline size_t chunkCount(size_t fileBytes, size_t chunkBytes) {
     return (fileBytes + chunkBytes - 1) / chunkBytes;
 }
 
+// Line-aligned chunk count. uploadOne() truncates every POST at the last '\n'
+// at or before the chunk limit, so with uniform rows of `lineBytes` the real
+// request count is chunkCount() or one more -- never fewer. Model-only helper:
+// the firmware computes the boundary inline; this exists so the invariant and
+// the per-file POST budget are unit-testable.
+inline size_t chunksLineAligned(size_t fileBytes, size_t chunkBytes, size_t lineBytes) {
+    if (chunkBytes == 0 || fileBytes == 0 || lineBytes == 0) return 0;
+    const size_t linesPerChunk = chunkBytes / lineBytes;      // whole rows per POST
+    if (linesPerChunk == 0) return chunkCount(fileBytes, lineBytes);  // 1 row per POST
+    const size_t lines = (fileBytes + lineBytes - 1) / lineBytes;
+    return (lines + linesPerChunk - 1) / linesPerChunk;
+}
+
+// True when an association that completed in `elapsedMs` fits the window the
+// driver was given. The wait loop breaks when millis() passes the deadline, so
+// finishing exactly at the deadline still counts as connected; 0 ms means the
+// attempt never ran (profile disabled / never reached).
+inline bool assocWithinWindow(uint32_t elapsedMs, uint32_t timeoutMs) {
+    return elapsedMs != 0u && elapsedMs <= timeoutMs;
+}
+
 // Worst-case un-petted window for one chunked POST: the link-limited write
 // phase plus the response timeout. Must stay inside cfg::TASK_WDT_TIMEOUT_S.
 //   8192 B @ 400 B/s + 30000 ms -> 20480 + 30000 = 50480 ms
@@ -123,6 +144,27 @@ inline uint32_t backoffMultiplier(uint32_t consecutiveFailures) {
     uint32_t shift = consecutiveFailures - 2u;
     if (shift > 4u) shift = 4u;
     return 1u << shift;
+}
+
+// ---------------------------------------------------------------------------
+// Cadence + self-heal decisions (taskLoop bookkeeping)
+// ---------------------------------------------------------------------------
+// Cadence to sleep after a cycle: any progress (a full drain or even a partial
+// one) shortens to `drainMs` so a backlog empties quickly; otherwise the base
+// interval scaled by the retry ladder.
+inline uint32_t nextGapMs(uint32_t baseMs, uint32_t drainMs, uint32_t multiplier,
+                          bool uploadedAny) {
+    if (uploadedAny) return drainMs;
+    return baseMs * multiplier;
+}
+
+// Soft-reboot decision for the lwIP/heap self-heal (v0.8.1). Both conditions
+// must hold: enough consecutive link failures to be suspicious AND genuinely
+// little heap left. A failure streak with healthy heap is a server-side problem
+// that a reboot cannot fix, so it must not burn a boot cycle.
+inline bool selfHealNeeded(uint32_t consecutiveFailures, uint32_t freeHeap,
+                           uint32_t threshold, uint32_t minHeap) {
+    return consecutiveFailures >= threshold && freeHeap < minHeap;
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +204,40 @@ inline const char* skipName(uint8_t reason) {
         case SkipDisabled:  return "disabled";
         default:            return "none";
     }
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics: task-phase decoding
+// ---------------------------------------------------------------------------
+// Mirrors WifiUploader::Phase (wifi_uploader.h): 0 disabled, 1 idle, 2 backoff,
+// 3 connecting, 4 posting, 5 disconnecting. Lives here as plain values so the
+// serial text is unit-testable; main.cpp decodes through this table so the two
+// can never disagree.
+inline const char* phaseName(uint8_t phase) {
+    switch (phase) {
+        case 0: return "disabled";
+        case 1: return "idle";
+        case 2: return "backoff";
+        case 3: return "connecting";
+        case 4: return "posting";
+        case 5: return "disconnecting";
+        default: return "unknown";
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase sequence of one fully successful cycle, for the simulation suite.
+// ---------------------------------------------------------------------------
+// Indices into phaseName(): the task goes 1 idle -> 3 connecting -> 4 posting
+// -> 5 disconnecting -> 1 idle on a full drain; 1 -> 3 -> 1 when the
+// association fails; and stays at 1 for a battery/no-pending skip.
+inline int phaseSeqOk(int i) {
+    static const int kSeq[5] = { 1, 3, 4, 5, 1 };
+    return (i >= 0 && i < 5) ? kSeq[i] : -1;
+}
+inline int phaseSeqConnect(int i) {
+    static const int kSeq[3] = { 1, 3, 1 };
+    return (i >= 0 && i < 3) ? kSeq[i] : -1;
 }
 
 } // namespace wgate

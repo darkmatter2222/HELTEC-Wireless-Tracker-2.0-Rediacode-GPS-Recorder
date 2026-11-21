@@ -42,8 +42,16 @@ struct Sim {
     uint32_t remoteMs  = 0;
     // Optional link rate for the drain phase; 0 = report the connect portion.
     uint32_t linkRateBps = 0;
+    // Basic-auth availability for the remote profile (secrets::INGEST_USER).
+    bool     credsPresent  = true;
+    // POST failure injection: failOnFile is the 1-based index inside this
+    // cycle; failAtChunk 0 means "on the last chunk". allFilesFail models a
+    // link that dies right after the association (every POST errors).
+    int      failOnFile   = 0;
+    int      failAtChunk  = 0;
+    bool     allFilesFail = false;
 
-    // --- fake LittleFS pending queue (bytes per .up.csv) ---
+    // --- fake LittleFS pending queue (bytes per .up.csv; 0 == stale debris) ---
     size_t   files[20];
     int      fileCount = 0;
 
@@ -64,25 +72,43 @@ struct Sim {
     // --- observable trace of the most recent cycle ---
     const char* trace[8];
     int         traceLen = 0;
+    int         phases[8] = { 0 };     // phase codes, deduplicated (see setPhase)
+    int         phaseLen  = 0;
     uint32_t    cycleMs     = 0;
     size_t      cycleBytes  = 0;
     uint32_t    cycleChunks = 0;
-    uint32_t    maxUnfedMs  = 0;      // widest single blocking window
+    uint32_t    maxUnfedMs  = 0;       // widest single blocking window
+    uint32_t    okFiles     = 0;       // files removed from the queue
+    uint32_t    failFiles   = 0;       // files that keep their queue slot
+    uint32_t    postCount   = 0;       // HTTP requests issued this cycle
+    bool        authApplied = false;
     const char* net         = "none";
 
     void reset() {
         traceLen = 0; cycleMs = 0; cycleBytes = 0; cycleChunks = 0;
-        maxUnfedMs = 0; net = "none";
+        maxUnfedMs = 0; net = "none"; okFiles = 0; failFiles = 0;
+        postCount = 0; authApplied = false; phaseLen = 0;
     }
 
     void emit(const char* t) { if (traceLen < 8) trace[traceLen++] = t; }
 
+    // Records the phase code, collapsing repeats -- exactly what WIFISTAT would
+    // show if it were sampled per transition: Posting is re-stamped for every
+    // file but reads as one contiguous window.
+    void setPhase(int p) {
+        if (phaseLen > 0 && phases[phaseLen - 1] == p) return;
+        if (phaseLen < 8) phases[phaseLen++] = p;
+    }
+
     static bool associated(uint32_t ms, uint32_t timeout) {
-        return ms != 0 && ms <= timeout;
+        return wgate::assocWithinWindow(ms, timeout);
     }
 
     void cycle(float vbat) {
         reset();
+        // taskLoop stamps the phase before sleeping on the ladder, using the
+        // multiplier implied by the failure streak carried INTO this cycle.
+        setPhase(wgate::backoffMultiplier(consec) > 1 ? 2 : 1);
 
         // ---- gate (vbatGateAllows) ----------------------------------------
         const bool ok = wgate::vbatGateOk(vbat, gateOpen, ON_V, OFF_V);
@@ -110,6 +136,7 @@ struct Sim {
         // ---- connectWifi ---------------------------------------------------
         // Mirrors the code exactly: 100 ms pre-begin settle, then per attempt
         // either [assoc latency] or [full timeout window + 300 ms settle].
+        setPhase(3);                                    // Connecting
         uint32_t connectTotal = wgate::CONNECT_SETTLE_MS;
         bool linked = false;
         if (hasHome) {
@@ -139,6 +166,7 @@ struct Sim {
             ++failed;
             emit("connect_fail");
             cycleMs = connectTotal;
+            setPhase(1);                                   // Idle (early return)
             // Cross-check the hand model against the shared helper.
             TEST_ASSERT_EQUAL_UINT32(
                 wgate::worstCaseConnectMs(timeoutMs,
@@ -149,23 +177,49 @@ struct Sim {
         emit("linked");
         if (connectTotal > maxUnfedMs) maxUnfedMs = connectTotal;
         cycleMs = connectTotal;
+        // Basic auth is attached only on the remote profile, and only when both
+        // secrets::INGEST_USER and INGEST_PASS are non-empty.
+        authApplied = (strcmp(net, "remote") == 0) && credsPresent;
 
         // ---- drain: one keep-alive POST per 8 KB chunk ---------------------
+        size_t nextFiles[20]; int nextCount = 0;
         for (int i = 0; i < fileCount; ++i) {
+            // v0.4.5: stale zero-byte .up.csv debris is removed without a POST.
+            if (files[i] == 0) { ++okFiles; ++uploaded; continue; }
+            setPhase(4);                                   // Posting
             const size_t n = wgate::chunkCount(files[i], CH);
-            cycleChunks += (uint32_t)n;
-            cycleBytes  += files[i];
-            // Chunked: the widest un-petted window is one chunk + response wait.
-            const uint32_t w = wgate::worstCasePostMs(CH, 400, 30000);
-            if (w > maxUnfedMs) maxUnfedMs = w;
-            // Optional link model so the full cycle duration can be asserted.
-            if (linkRateBps) {
-                cycleMs += (uint32_t)(((uint64_t)files[i] * 1000u + linkRateBps - 1u)
-                                      / linkRateBps);
+            bool fileOk = !allFilesFail;
+            for (size_t c = 1; c <= (int)n; ++c) {
+                ++postCount;
+                const uint32_t rate = linkRateBps ? linkRateBps : 400u;
+                const uint32_t w = wgate::worstCasePostMs(CH, rate, 30000);
+                if (w > maxUnfedMs) maxUnfedMs = w;
+                // A dead link (allFilesFail) errors on the first chunk write;
+                // an injected fault errors on one specific chunk of one file.
+                const int stopAt = (failAtChunk > 0) ? failAtChunk : (int)n;
+                const bool stop = allFilesFail ||
+                                  (failOnFile == i + 1 && c == stopAt);
+                if (stop) { fileOk = false; break; }
+            }
+            if (fileOk) {
+                ++okFiles; ++uploaded;
+                // cycle_done only accounts for confirmed files, as in runOnce().
+                cycleBytes  += files[i];
+                cycleChunks += (uint32_t)n;
+                if (linkRateBps) {
+                    cycleMs += (uint32_t)(((uint64_t)files[i] * 1000u + linkRateBps - 1u)
+                                          / linkRateBps);
+                }
+            } else {
+                ++failFiles; ++failed;
+                if (nextCount < 20) nextFiles[nextCount++] = files[i];   // stays queued
             }
         }
-        uploaded   += (uint32_t)fileCount;
-        fileCount   = 0;                 // removePendingUpload() after each 2xx
+        setPhase(5);                                      // Disconnecting
+        setPhase(1);                                      // Idle
+        // Failed files keep their queue slot for the next cycle.
+        for (int i = 0; i < nextCount; ++i) files[i] = nextFiles[i];
+        fileCount = nextCount;
         emit("cycle_done");
     }
 
@@ -173,9 +227,8 @@ struct Sim {
     uint32_t nextGapMs(uint32_t okBefore, uint32_t failBefore) {
         if (failed > failBefore && uploaded == okBefore) ++consec;
         else if (uploaded > okBefore) consec = 0;
-        const uint32_t mult = wgate::backoffMultiplier(consec);
-        if (uploaded > okBefore) return DRAIN_MS;
-        return BASE_MS * mult;
+        return wgate::nextGapMs(BASE_MS, DRAIN_MS, wgate::backoffMultiplier(consec),
+                                uploaded > okBefore);
     }
 
     // Same model, but with the pre-v2.3 single-request body (no chunking).
@@ -415,6 +468,322 @@ void test_sim_unsampled_adc_does_not_block(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Scenario 6: partial drain -- one file errors mid-transfer, the rest go out
+// ---------------------------------------------------------------------------
+void test_sim_partial_drain_keeps_failed_file_queued(void) {
+    Sim s;
+    s.fileCount = 3;
+    s.files[0] = 200; s.files[1] = 16384; s.files[2] = 700;
+    s.homeMs = 801;
+    // The 2-byte-per-row middle file dies on the first of its two chunks.
+    s.failOnFile = 2; s.failAtChunk = 1;
+    s.cycle(3.90f);
+
+    TEST_ASSERT_EQUAL_STRING("cycle_start", s.trace[0]);
+    TEST_ASSERT_EQUAL_STRING("linked",      s.trace[1]);
+    TEST_ASSERT_EQUAL_STRING("cycle_done",  s.trace[2]);
+    TEST_ASSERT_EQUAL_UINT32(2, s.okFiles);          // files 1 and 3 confirmed
+    TEST_ASSERT_EQUAL_UINT32(1, s.failFiles);        // file 2 stays queued
+    // Only confirmed files land in the cycle accounting.
+    TEST_ASSERT_EQUAL_UINT32(900u, (uint32_t)s.cycleBytes);      // 200 + 700
+    TEST_ASSERT_EQUAL_UINT32(2u,   s.cycleChunks);               // 1 + 1
+    // Requests issued: file1 1, file2 1 (aborted), file3 1.
+    TEST_ASSERT_EQUAL_UINT32(3u, s.postCount);
+    TEST_ASSERT_EQUAL_INT(1, s.fileCount);
+    TEST_ASSERT_EQUAL_UINT32(16384u, (uint32_t)s.files[0]);
+    // Partial progress still counts as progress: 5 s kick, ladder not ramped.
+    TEST_ASSERT_EQUAL_UINT32(DRAIN_MS, s.nextGapMs(0, 0));
+    TEST_ASSERT_EQUAL_UINT32(0, s.consec);
+
+    // Chain: the next cycle finishes the job -- 16384 B is exactly two chunks.
+    const uint32_t okB = s.uploaded, failB = s.failed;
+    s.cycle(3.90f);
+    TEST_ASSERT_EQUAL_UINT32(1, s.okFiles);
+    TEST_ASSERT_EQUAL_UINT32(2u, s.cycleChunks);
+    TEST_ASSERT_EQUAL_UINT32(2u, s.postCount);
+    TEST_ASSERT_EQUAL_INT(0, s.fileCount);
+    TEST_ASSERT_EQUAL_UINT32(DRAIN_MS, s.nextGapMs(okB, failB));
+    TEST_ASSERT_EQUAL_UINT32(0, s.consec);
+}
+
+// Every POST errors after a good association (the errno=11 / lwIP pattern):
+// both files stay queued and the ladder ramps from the base cadence.
+void test_sim_all_posts_fail_then_link_recovers(void) {
+    Sim s;
+    s.fileCount = 2; s.files[0] = 500; s.files[1] = 600;
+    s.homeMs = 801;
+    s.allFilesFail = true;
+    s.cycle(3.90f);
+    TEST_ASSERT_EQUAL_STRING("cycle_done", s.trace[2]);
+    TEST_ASSERT_EQUAL_UINT32(0, s.okFiles);
+    TEST_ASSERT_EQUAL_UINT32(2, s.failFiles);
+    TEST_ASSERT_EQUAL_UINT32(2u, s.postCount);        // one aborted POST per file
+    TEST_ASSERT_EQUAL_UINT32(0u, (uint32_t)s.cycleBytes);
+    TEST_ASSERT_EQUAL_UINT32(0u, s.cycleChunks);
+    TEST_ASSERT_EQUAL_INT(2, s.fileCount);            // nothing removed
+    TEST_ASSERT_EQUAL_UINT32(0, s.uploaded);
+    TEST_ASSERT_EQUAL_UINT32(2, s.failed);
+    // Zero progress with link failures -> 1x of the base cadence.
+    TEST_ASSERT_EQUAL_UINT32(BASE_MS, s.nextGapMs(0, 0));
+    TEST_ASSERT_EQUAL_UINT32(1, s.consec);
+
+    // Chain: the link recovers (a reboot clears the pbuf pools in the device).
+    s.allFilesFail = false;
+    const uint32_t okB = s.uploaded, failB = s.failed;
+    s.cycle(3.90f);
+    TEST_ASSERT_EQUAL_UINT32(2, s.okFiles);
+    TEST_ASSERT_EQUAL_UINT32(1100u, (uint32_t)s.cycleBytes);
+    TEST_ASSERT_EQUAL_INT(0, s.fileCount);
+    TEST_ASSERT_EQUAL_UINT32(DRAIN_MS, s.nextGapMs(okB, failB));
+    TEST_ASSERT_EQUAL_UINT32(0, s.consec);             // ladder reset by progress
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 7: stale zero-byte .up.csv debris (v0.4.5 clean-up path)
+// ---------------------------------------------------------------------------
+void test_sim_stale_zero_byte_files_need_no_post(void) {
+    Sim s;
+    s.fileCount = 3;
+    s.files[0] = 0; s.files[1] = 200; s.files[2] = 0;    // debris around one real file
+    s.homeMs = 801;
+    s.cycle(3.90f);
+    TEST_ASSERT_EQUAL_UINT32(3, s.okFiles);              // all three removed
+    TEST_ASSERT_EQUAL_UINT32(0, s.failFiles);
+    TEST_ASSERT_EQUAL_UINT32(1u, s.postCount);           // only the real file POSTs
+    TEST_ASSERT_EQUAL_UINT32(200u, (uint32_t)s.cycleBytes);
+    TEST_ASSERT_EQUAL_UINT32(1u, s.cycleChunks);
+    TEST_ASSERT_EQUAL_INT(0, s.fileCount);
+    // The Posting window still appears because the real file did POST.
+    TEST_ASSERT_EQUAL_INT(5, s.phaseLen);
+}
+
+void test_sim_all_stale_files_skip_the_posting_phase(void) {
+    // Only debris: the loop never reaches a POST, so `phase=` never reads
+    // "posting" -- the exact trace WIFISTAT shows for that cycle.
+    Sim s;
+    s.fileCount = 2; s.files[0] = 0; s.files[1] = 0;
+    s.homeMs = 801;
+    s.cycle(3.90f);
+    TEST_ASSERT_EQUAL_UINT32(2, s.okFiles);
+    TEST_ASSERT_EQUAL_UINT32(0u, s.postCount);
+    TEST_ASSERT_EQUAL_UINT32(0u, s.cycleChunks);
+    TEST_ASSERT_EQUAL_UINT32(0u, (uint32_t)s.cycleBytes);
+    const int kExpected[4] = { 1, 3, 5, 1 };            // idle,conn,cleanup,idle
+    TEST_ASSERT_EQUAL_INT(4, s.phaseLen);
+    for (int i = 0; i < 4; ++i) TEST_ASSERT_EQUAL_INT(kExpected[i], s.phases[i]);
+    // Debris still counts as progress -> the 5 s fast path, no backoff ramp.
+    TEST_ASSERT_EQUAL_UINT32(DRAIN_MS, s.nextGapMs(0, 0));
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 8: full charge / unplug / recharge gate lifecycle
+// ---------------------------------------------------------------------------
+void test_sim_charge_unplug_recharge_lifecycle(void) {
+    Sim s;
+    s.homeMs = 612;
+    const float seq[11] = {
+        3.40f,   // 1: closed, no previous sample
+        3.46f,   // 2: rising, one sample
+        3.52f,   // 3: rising, latch -> charging
+        3.58f,   // 4: rising, still just below the release level
+        3.62f,   // 5: gate OPENS
+        3.62f,   // 6: charger removed -> flat -> charging cleared
+        3.60f,   // 7: falling, still above the floor -> holds open
+        3.55f,   // 8: two extra cycles of margin from the hysteresis
+        3.44f,   // 9: at/below the floor -> CLOSES
+        3.50f,   // 10: closed, rising but below the release level
+        3.61f,   // 11: re-opens
+    };
+    for (int i = 0; i < 11; ++i) {
+        s.fileCount = 1; s.files[0] = 198;             // recording keeps rotating
+        s.cycle(seq[i]);
+        switch (i) {
+            case 0: case 1:   // before two consecutive rises
+                TEST_ASSERT_EQUAL_UINT8(0, s.charging); break;
+            case 2: case 3: case 4:                    // charging
+                TEST_ASSERT_EQUAL_UINT8(1, s.charging); break;
+            case 5: case 6: case 7:                    // unplugged / discharging
+                TEST_ASSERT_EQUAL_UINT8(0, s.charging); break;
+        }
+    }
+    // Skips: cycles 1-4, then 9 and 10 -> 6 gated cycles; 5 uploads total.
+    TEST_ASSERT_EQUAL_UINT32(6, s.skips);
+    TEST_ASSERT_EQUAL_UINT32(5, s.uploaded);
+    TEST_ASSERT_EQUAL_UINT32(0, s.failed);
+    TEST_ASSERT_EQUAL_UINT32(0, s.consec);              // gating never ramps the ladder
+    // The last observed cycle was a full drain (5 s fast path).
+    TEST_ASSERT_EQUAL_UINT32(DRAIN_MS, s.nextGapMs(0, 0));
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 9: no_pending -> data arrives -> no_pending again
+// ---------------------------------------------------------------------------
+void test_sim_no_pending_then_data_arrives_chain(void) {
+    Sim s;
+    s.homeMs = 801;
+    s.fileCount = 0;
+    s.cycle(3.90f);
+    TEST_ASSERT_EQUAL_STRING("skip:no_pending", s.trace[0]);
+    TEST_ASSERT_EQUAL_INT(1, s.traceLen);
+    TEST_ASSERT_EQUAL_UINT8(wgate::SkipNoPending, s.lastSkip);
+    TEST_ASSERT_EQUAL_UINT32(0, s.attempts);            // radio never opened
+    TEST_ASSERT_EQUAL_UINT32(0, s.skips);               // battery counter untouched
+    TEST_ASSERT_EQUAL_INT(1, s.phaseLen);               // stayed idle
+    TEST_ASSERT_EQUAL_INT(1, s.phases[0]);
+    TEST_ASSERT_EQUAL_UINT32(BASE_MS, s.nextGapMs(0, 0));
+
+    // Chain: samples rotate into a pending file, next cycle drains it.
+    s.fileCount = 2; s.files[0] = 198; s.files[1] = 23700;
+    s.cycle(3.90f);
+    TEST_ASSERT_EQUAL_STRING("cycle_start", s.trace[0]);
+    TEST_ASSERT_EQUAL_UINT32(2, s.okFiles);
+    TEST_ASSERT_EQUAL_UINT8(wgate::SkipNone, s.lastSkip);
+    TEST_ASSERT_EQUAL_UINT32(1, s.attempts);            // one attempt, home worked
+    TEST_ASSERT_EQUAL_UINT32(4u, s.cycleChunks);        // ceil(198/8192)+ceil(23700/8192)
+    TEST_ASSERT_EQUAL_UINT32(DRAIN_MS, s.nextGapMs(0, 0));
+
+    // Chain: queue empty again -> back to the no_pending skip.
+    s.fileCount = 0;
+    s.cycle(3.90f);
+    TEST_ASSERT_EQUAL_STRING("skip:no_pending", s.trace[0]);
+    TEST_ASSERT_EQUAL_UINT8(wgate::SkipNoPending, s.lastSkip);
+    TEST_ASSERT_EQUAL_UINT32(0, s.skips);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 10: home times out, hotspot answers, Basic Auth is attached
+// ---------------------------------------------------------------------------
+void test_sim_home_timeout_then_remote_with_auth(void) {
+    Sim s;
+    s.homeMs = 0; s.remoteMs = 12000;                   // home absent, LTE up
+    s.fileCount = 2; s.files[0] = 198; s.files[1] = 23700;
+    s.cycle(3.90f);
+    TEST_ASSERT_EQUAL_STRING("remote", s.net);
+    TEST_ASSERT_EQUAL_UINT32(2, s.attempts);            // home burnt its whole window
+    TEST_ASSERT_EQUAL_UINT32(37400u, s.cycleMs);        // 100 + 25300 + 12000
+    TEST_ASSERT_EQUAL_UINT32(3, s.lastStatus);          // final status is CONNECTED
+    TEST_ASSERT_TRUE(s.authApplied);                    // remote profile uses Basic Auth
+    TEST_ASSERT_EQUAL_UINT32(2, s.okFiles);
+
+    // Without credentials the same path posts anonymously.
+    Sim n;
+    n.homeMs = 0; n.remoteMs = 12000; n.credsPresent = false;
+    n.fileCount = 1; n.files[0] = 198;
+    n.cycle(3.90f);
+    TEST_ASSERT_EQUAL_STRING("remote", n.net);
+    TEST_ASSERT_FALSE(n.authApplied);
+    TEST_ASSERT_EQUAL_UINT32(1, n.okFiles);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 11: association landing exactly on the deadline edge
+// ---------------------------------------------------------------------------
+void test_sim_assoc_exactly_at_deadline_edge(void) {
+    Sim s;
+    s.homeMs = 25000;                                   // lands on the deadline
+    s.fileCount = 1; s.files[0] = 198;
+    s.cycle(3.90f);
+    TEST_ASSERT_EQUAL_STRING("home", s.net);
+    TEST_ASSERT_EQUAL_UINT32(1, s.attempts);            // remote never tried
+    TEST_ASSERT_EQUAL_UINT32(25100u, s.cycleMs);        // 100 + 25000
+    // The widest un-petted window in the whole cycle is still one chunk, which
+    // is wider than even a full-length association window.
+    TEST_ASSERT_EQUAL_UINT32(wgate::worstCasePostMs(CH, 400u, 30000u), s.maxUnfedMs);
+    TEST_ASSERT_EQUAL_UINT32(50480u, s.maxUnfedMs);
+
+    // One ms later the driver would not have been polled in time: the attempt
+    // burns the whole window and the fallback carries the cycle.
+    Sim e;
+    e.homeMs = 25001; e.remoteMs = 800;
+    e.fileCount = 1; e.files[0] = 198;
+    e.cycle(3.90f);
+    TEST_ASSERT_EQUAL_STRING("remote", e.net);
+    TEST_ASSERT_EQUAL_UINT32(2, e.attempts);
+    TEST_ASSERT_EQUAL_UINT32(26200u, e.cycleMs);        // 100 + 25300 + 800
+    TEST_ASSERT_EQUAL_UINT32(1, e.okFiles);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 12: phase traces match the shared reference tables
+// ---------------------------------------------------------------------------
+void test_sim_phase_trace_matches_reference_tables(void) {
+    // Fully successful cycle.
+    Sim s;
+    s.fileCount = 2; s.files[0] = 198; s.files[1] = 23700; s.homeMs = 801;
+    s.cycle(3.90f);
+    TEST_ASSERT_EQUAL_INT(5, s.phaseLen);
+    for (int i = 0; i < 5; ++i) {
+        TEST_ASSERT_EQUAL_INT(wgate::phaseSeqOk(i), s.phases[i]);
+        TEST_ASSERT_EQUAL_STRING("ok", strcmp(wgate::phaseName((uint8_t)s.phases[i]),
+                                              "unknown") == 0 ? "bad" : "ok");
+    }
+
+    // Association failure: connecting is entered, then straight back to idle.
+    Sim c;
+    c.fileCount = 1; c.files[0] = 198; c.homeMs = 0; c.remoteMs = 0;
+    c.cycle(3.90f);
+    TEST_ASSERT_EQUAL_INT(3, c.phaseLen);
+    for (int i = 0; i < 3; ++i) TEST_ASSERT_EQUAL_INT(wgate::phaseSeqConnect(i), c.phases[i]);
+
+    // Gated skip: the task never leaves its wait phase.
+    Sim g;
+    g.fileCount = 1; g.files[0] = 198;
+    g.cycle(3.10f);
+    TEST_ASSERT_EQUAL_INT(1, g.phaseLen);
+    TEST_ASSERT_EQUAL_STRING("idle", wgate::phaseName((uint8_t)g.phases[0]));
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 13: long outage -- ladder, backoff phase, then recovery
+// ---------------------------------------------------------------------------
+void test_sim_long_outage_ladder_then_recovery(void) {
+    Sim s;
+    s.fileCount = 2; s.files[0] = 198; s.files[1] = 23700;
+    s.homeMs = 0; s.remoteMs = 0;                       // both APs absent
+
+    const uint32_t kGaps[10] = { 60000, 60000, 120000, 240000, 480000,
+                                 960000, 960000, 960000, 960000, 960000 };
+    for (int i = 0; i < 10; ++i) {
+        const uint32_t okB = s.uploaded, failB = s.failed;
+        s.cycle(3.90f);
+        TEST_ASSERT_EQUAL_STRING("connect_fail", s.trace[1]);
+        TEST_ASSERT_EQUAL_UINT32(kGaps[i], s.nextGapMs(okB, failB));
+        TEST_ASSERT_EQUAL_UINT32((uint32_t)(i + 1), s.consec);
+        // The wait phase only reads "backoff" once the multiplier exceeds 1x.
+        // It is stamped with the streak known when the task went to sleep, so
+        // it lags the post-cycle counter by exactly one cycle.
+        const int expectPhase = (s.consec > 3) ? 2 : 1;
+        TEST_ASSERT_EQUAL_INT(expectPhase, s.phases[0]);
+        // Each burnt cycle pays the full two-profile budget.
+        TEST_ASSERT_EQUAL_UINT32(50700u, s.cycleMs);
+    }
+    // The v0.8.1 self-heal fires only with 10 fails AND low heap.
+    TEST_ASSERT_TRUE(wgate::selfHealNeeded(s.consec, 37000u, 10u, 50000u));
+    TEST_ASSERT_FALSE(wgate::selfHealNeeded(s.consec, 60000u, 10u, 50000u));
+    TEST_ASSERT_FALSE(wgate::selfHealNeeded(9u, 37000u, 10u, 50000u));
+
+    // Chain: the AP comes back -> one cycle drains, ladder and phase reset.
+    s.homeMs = 612;
+    const uint32_t okB = s.uploaded, failB = s.failed;
+    s.cycle(3.90f);
+    TEST_ASSERT_EQUAL_STRING("cycle_done", s.trace[2]);
+    TEST_ASSERT_EQUAL_UINT32(2, s.okFiles);
+    TEST_ASSERT_EQUAL_UINT32(4u, s.cycleChunks);            // 1 + 3 POSTs
+    TEST_ASSERT_EQUAL_INT(5, s.phaseLen);                   // full five-phase drain
+    // This cycle still woke from the long backoff: the phase is stamped when the
+    // task goes to sleep, so it lags the recovery by one cycle.
+    TEST_ASSERT_EQUAL_INT(2, s.phases[0]);
+    // taskLoop folds the result into the ladder after runOnce() returns.
+    TEST_ASSERT_EQUAL_UINT32(DRAIN_MS, s.nextGapMs(okB, failB));
+    TEST_ASSERT_EQUAL_UINT32(0, s.consec);
+
+    // Next wake reads plain idle again, with nothing queued (skip, no radio).
+    s.cycle(3.90f);
+    TEST_ASSERT_EQUAL_INT(1, s.phases[0]);
+    TEST_ASSERT_EQUAL_STRING("skip:no_pending", s.trace[0]);
+}
+
+// ---------------------------------------------------------------------------
 int main(int, char**) {
     UNITY_BEGIN();
 
@@ -431,6 +800,16 @@ int main(int, char**) {
     RUN_TEST(test_sim_unchunked_body_exceeds_watchdog);
     RUN_TEST(test_sim_charge_flag_tracks_charger);
     RUN_TEST(test_sim_unsampled_adc_does_not_block);
+    RUN_TEST(test_sim_partial_drain_keeps_failed_file_queued);
+    RUN_TEST(test_sim_all_posts_fail_then_link_recovers);
+    RUN_TEST(test_sim_stale_zero_byte_files_need_no_post);
+    RUN_TEST(test_sim_all_stale_files_skip_the_posting_phase);
+    RUN_TEST(test_sim_charge_unplug_recharge_lifecycle);
+    RUN_TEST(test_sim_no_pending_then_data_arrives_chain);
+    RUN_TEST(test_sim_home_timeout_then_remote_with_auth);
+    RUN_TEST(test_sim_assoc_exactly_at_deadline_edge);
+    RUN_TEST(test_sim_phase_trace_matches_reference_tables);
+    RUN_TEST(test_sim_long_outage_ladder_then_recovery);
 
     return UNITY_END();
 }

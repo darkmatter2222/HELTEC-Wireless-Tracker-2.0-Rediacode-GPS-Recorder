@@ -431,16 +431,9 @@ static void handleSerialCommand(const String& line) {
             default: break;
         }
         // v2.3: phase decoded instead of numeric, plus the two numbers that
-        // explain a stall at a glance (gate state + last skip reason).
-        const char* phaseStr = "none";
-        switch (gWifi.phase()) {
-            case WifiUploader::Phase::Disabled:      phaseStr = "disabled";     break;
-            case WifiUploader::Phase::Idle:          phaseStr = "idle";         break;
-            case WifiUploader::Phase::Backoff:       phaseStr = "backoff";      break;
-            case WifiUploader::Phase::Connecting:    phaseStr = "connecting";   break;
-            case WifiUploader::Phase::Posting:       phaseStr = "posting";      break;
-            case WifiUploader::Phase::Disconnecting: phaseStr = "disconnecting";break;
-        }
+        // explain a stall at a glance (gate state + last skip reason). The
+        // decode table lives in wgate:: so the native suite covers it.
+        const char* phaseStr = wgate::phaseName((uint8_t)gWifi.phase());
         Serial.printf("[WIFI] enabled=%d busy=%d phase=%s net=%s uploaded=%u failed=%u "
                       "consec=%u lastAttempt=%ums lastSuccess=%ums lastHttp=%d heap_free=%u\n",
                       (int)gWifi.enabled(), (int)gWifi.busy(), phaseStr,
