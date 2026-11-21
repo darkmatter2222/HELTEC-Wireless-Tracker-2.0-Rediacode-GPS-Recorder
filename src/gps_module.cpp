@@ -1,5 +1,6 @@
 #include "gps_module.h"
 #include "config.h"
+#include "gps_epoch.h"
 #include <math.h>
 
 namespace {
@@ -107,14 +108,11 @@ void GpsModule::passthru(Stream& out, uint32_t secs) {
 
 uint64_t GpsModule::utcEpochMs() {
     if (!hasUtc()) return 0;
-    const int64_t days = daysFromCivil(gps_.date.year(),
-                                       gps_.date.month(),
-                                       gps_.date.day());
-    int64_t secs = days * 86400LL
-                 + (int64_t)gps_.time.hour() * 3600LL
-                 + (int64_t)gps_.time.minute() * 60LL
-                 + (int64_t)gps_.time.second();
-    return (uint64_t)secs * 1000ULL + (uint64_t)gps_.time.centisecond() * 10ULL;
+    return gepoch::composeUtcMs(daysFromCivil(gps_.date.year(),
+                                             gps_.date.month(),
+                                             gps_.date.day()),
+                                gps_.time.hour(), gps_.time.minute(),
+                                gps_.time.second(), gps_.time.centisecond());
 }
 
 uint64_t GpsModule::bestEpochMs() {
@@ -122,29 +120,33 @@ uint64_t GpsModule::bestEpochMs() {
     // long sessions accurate against millis() drift. We cap re-anchors to
     // once per 30s so we don't churn the anchor on every NMEA sentence.
     const uint32_t now = millis();
-    if (hasUtc() && gps_.time.age() < 5000 &&
-        (lastUtcSyncMs_ == 0 || (now - lastUtcSyncMs_) >= 30000)) {
+    if (gepoch::shouldReanchor(hasUtc(), gps_.time.age(), lastUtcSyncMs_, now)) {
         const uint64_t fresh = utcEpochMs();
         if (fresh != 0) {
             const bool firstAnchor = (utcAnchorMs_ == 0);
-            // Account for the small age of the parsed sentence.
+            // The instant this sentence describes, on the monotonic clock.
+            const uint32_t sentMs = gepoch::millisAnchorFor(now, gps_.time.age());
+            // v2.3: the disagreement is computed from the OLD anchor pair,
+            // before the fields are overwritten -- the pre-2.3 order compared
+            // the fresh value with itself and always printed exactly -age.
+            const int64_t drift = gepoch::driftMs(fresh, utcAnchorMs_,
+                                                 millisAnchor_, sentMs);
             utcAnchorMs_   = fresh;
-            millisAnchor_  = now - gps_.time.age();
+            millisAnchor_  = sentMs;
             lastUtcSyncMs_ = now;
             if (firstAnchor) {
                 Serial.printf("[GPS] UTC anchor set: %llu ms (millis=%u age=%u)\n",
                               (unsigned long long)utcAnchorMs_, now, gps_.time.age());
             } else {
                 Serial.printf("[GPS] UTC anchor refreshed: %llu ms (drift %lld ms)\n",
-                              (unsigned long long)utcAnchorMs_,
-                              (long long)(fresh - (utcAnchorMs_ + (uint64_t)(now - millisAnchor_))));
+                              (unsigned long long)utcAnchorMs_, (long long)drift);
             }
         }
     }
     if (utcAnchorMs_ == 0) return 0;
     // Project forward using the monotonic millis() clock so timestamps keep
     // advancing during GPS outages (indoors, tunnels, etc.).
-    return utcAnchorMs_ + (uint64_t)(now - millisAnchor_);
+    return gepoch::project(utcAnchorMs_, millisAnchor_, now);
 }
 
 // Forward azimuth (great-circle bearing) from oldest to newest position in

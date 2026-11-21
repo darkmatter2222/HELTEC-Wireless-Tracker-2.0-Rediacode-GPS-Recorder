@@ -1,5 +1,6 @@
 #include "ui.h"
 #include "config.h"
+#include "button_logic.h"
 #include "gps_module.h"
 #include "session_store.h"
 #include "wifi_uploader.h"
@@ -105,12 +106,12 @@ void Ui::onShortPress() {
     if (screen_ == SCREEN_PICKER) {
         if (pickList_.empty()) return;
         // cursor 0..N-1 = device index, N = "Cancel"
-        pickerCursor_ = (pickerCursor_ + 1) % ((int)pickList_.size() + 1);
+        pickerCursor_ = blogic::nextPickerCursor(pickerCursor_, (int)pickList_.size());
         forceFullRedraw_ = true;     // redraw rows so cursor is visible
         return;
     }
     // Cycle STATS -> GPS -> STORAGE -> STATS
-    screen_ = (Screen)((screen_ + 1) % SCREEN_NORMAL_COUNT);
+    screen_ = (Screen)blogic::nextScreen((int)screen_, SCREEN_NORMAL_COUNT);
     forceFullRedraw_ = true;
 }
 
@@ -121,7 +122,7 @@ void Ui::onLongPress() {
             break;
         case SCREEN_GPS:
             // Long-press on GPS advances screen (same as short-press).
-            screen_ = (Screen)((screen_ + 1) % SCREEN_NORMAL_COUNT);
+            screen_ = (Screen)blogic::nextScreen((int)screen_, SCREEN_NORMAL_COUNT);
             forceFullRedraw_ = true;
             break;
         case SCREEN_STORAGE:
@@ -134,7 +135,7 @@ void Ui::onLongPress() {
             pendingAction_ = ACTION_RESET_DOSE;
             break;
         case SCREEN_PICKER:
-            if (pickerCursor_ >= (int)pickList_.size()) {
+            if (blogic::pickerCancelSlot(pickerCursor_, (int)pickList_.size())) {
                 pendingAction_ = ACTION_CANCEL_PICKER;
             } else {
                 // pickerCursor_ indexes the displayed (sorted) order, so map
@@ -599,19 +600,17 @@ void Ui::renderDose() {
     field(11, 94, 14, 62, 8, "since reset",  COL_DIM,   COL_BG, 1);
 
     // Big accumulated dose value (auto-scales µSv → mSv at 1 000 µSv) -------
+    // The scaling threshold and the decimals ladder are blogic:: helpers so the
+    // native suite can pin the 5-char field behaviour without a panel.
     char val[10];
     char unit[5];
     const float dose = tripDoseMicroSv_;
-    if (dose < 1000.0f) {
-        if      (dose < 10.0f)  snprintf(val, sizeof(val), "%5.3f", dose);
-        else if (dose < 100.0f) snprintf(val, sizeof(val), "%5.2f", dose);
-        else                    snprintf(val, sizeof(val), "%5.1f", dose);
+    if (!blogic::useMillisievert(dose)) {
+        snprintf(val, sizeof(val), "%5.*f", blogic::mantissaDecimals(dose), (double)dose);
         snprintf(unit, sizeof(unit), "uSv");
     } else {
         const float mSv = dose / 1000.0f;
-        if      (mSv < 10.0f)  snprintf(val, sizeof(val), "%5.3f", mSv);
-        else if (mSv < 100.0f) snprintf(val, sizeof(val), "%5.2f", mSv);
-        else                   snprintf(val, sizeof(val), "%5.1f", mSv);
+        snprintf(val, sizeof(val), "%5.*f", blogic::mantissaDecimals(mSv), (double)mSv);
         snprintf(unit, sizeof(unit), "mSv");
     }
     field(12, 4,  24, 90, 24, val,  COL_GREEN, COL_BG, 3);

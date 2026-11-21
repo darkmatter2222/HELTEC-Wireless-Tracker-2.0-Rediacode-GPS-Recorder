@@ -1032,9 +1032,12 @@ def test_log_clear_and_dump(ser: serial.Serial, suite: Suite) -> None:
 
     # A fresh event must appear again after the clear -- but only if the poked
     # cycle actually reached the radio. A `skip=no_pending` cycle writes nothing
-    # to the persistent log by design (see runOnce()), so that is a SKIP.
-    send_cmd_collect(ser, "SYNC")
-    trail = collect_window(ser, 8.0)
+    # to the persistent log by design (see runOnce()), so that is a SKIP. The
+    # `skip=` serial line has to be looked for in the SYNC response *and* the
+    # following window: it usually lands inside the reader's own idle window and
+    # is therefore consumed by send_cmd_collect(), not by the trailing read.
+    _sync, _ = send_cmd_collect(ser, "SYNC")
+    trail = list(_sync) + collect_window(ser, 8.0)
     idle_cycle = any("skip=no_pending" in l for l in trail)
     lines4, _ = send_cmd_collect(ser, "LOG", timeout=CMD_TIMEOUT_S + 1.0)
     grew = [int(m.group(1)) for l in lines4

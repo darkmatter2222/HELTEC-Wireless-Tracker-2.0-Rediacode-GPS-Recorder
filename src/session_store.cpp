@@ -1,5 +1,7 @@
 #include "session_store.h"
 #include "config.h"
+#include "session_paths.h"
+#include "gps_epoch.h"
 
 #include <LittleFS.h>
 #include "event_log.h"
@@ -58,10 +60,12 @@ String pathFor(const String& id) {
     return String(cfg::SESSIONS_DIR) + "/" + id + ".csv";
 }
 
+// The filename grammar lives in session_paths.h (namespace spath) so the host
+// suite compiles the same pair of directions the device uses. These wrappers
+// only adapt to Arduino Strings.
 String pendingFilename(const String& dayId, uint32_t bootMs) {
     char buf[40];
-    snprintf(buf, sizeof(buf), "%s.%lu.up.csv", dayId.c_str(),
-             (unsigned long)bootMs);
+    spath::pendingName(buf, sizeof(buf), dayId.c_str(), bootMs);
     return String(buf);
 }
 
@@ -77,23 +81,21 @@ String fileBaseName(const String& path) {
 
 bool isPendingFilename(const String& name) {
     // matches "<day>.<digits>.up.csv"
-    return name.endsWith(".up.csv");
+    return spath::isPendingName(name.c_str());
 }
 
 bool isDayFilename(const String& name) {
     // matches "<day>.csv" only (no .up.). Note ".up.csv" also ends with ".csv"
     // so we explicitly exclude pending-upload files here.
-    if (!name.endsWith(".csv")) return false;
-    if (isPendingFilename(name)) return false;
-    return true;
+    return spath::isDayName(name.c_str());
 }
 
 String dayIdFromFilename(const String& name) {
     // "<day>.csv"                 -> <day>
     // "<day>.<bootMs>.up.csv"     -> <day>
-    int firstDot = name.indexOf('.');
-    if (firstDot <= 0) return String();
-    return name.substring(0, firstDot);
+    char buf[24];
+    if (!spath::dayIdFromName(buf, sizeof(buf), name.c_str())) return String();
+    return String(buf);
 }
 
 // LittleFS volume sanity gate. total == 0 means the mount produced a
@@ -395,7 +397,7 @@ struct Lock {
 // Public: day-id derivation (local Eastern time)
 // =============================================================================
 String SessionStore::dayIdFromEpochMs(uint64_t epochMs) {
-    constexpr uint64_t MIN_VALID_TS_MS = 1577836800000ULL;
+    constexpr uint64_t MIN_VALID_TS_MS = gepoch::MIN_VALID_TS_MS;
     if (epochMs < MIN_VALID_TS_MS) return String();
     time_t t = (time_t)(epochMs / 1000ULL);
     struct tm tmv;
@@ -542,7 +544,7 @@ uint32_t SessionStore::rotateStaleDayFiles_() {
                 String name(nameBuf);
                 if (isDayFilename(name)) {
                     String dayId = dayIdFromFilename(name);
-                    if (todayId.length() == 0 || dayId != todayId) {
+                    if (spath::pendingCandidate(dayId.c_str(), todayId.c_str())) {
                         toRotate.push_back(name);
                     }
                 }
@@ -558,7 +560,7 @@ uint32_t SessionStore::rotateStaleDayFiles_() {
                 String name = fileBaseName(String(f.name()));
                 if (isDayFilename(name)) {
                     String dayId = dayIdFromFilename(name);
-                    if (todayId.length() == 0 || dayId != todayId) {
+                    if (spath::pendingCandidate(dayId.c_str(), todayId.c_str())) {
                         toRotate.push_back(name);
                     }
                 }
@@ -641,7 +643,7 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
         }
         return;
     }
-    constexpr uint64_t MIN_VALID_TS_MS = 1577836800000ULL;
+    constexpr uint64_t MIN_VALID_TS_MS = gepoch::MIN_VALID_TS_MS;
     if (timestampMsFull < MIN_VALID_TS_MS) return;
 
     String day = dayIdFromEpochMs(timestampMsFull);
@@ -651,8 +653,14 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
     event_log::markPhase("ST_APPEND");
 
     // ---- Auto-rotate on day rollover / first sample ---------------------
-    if (!recording_ || activeId_ != day) {
-        if (recording_ && activeId_.length() && activeId_ != day) {
+    // Both decisions are spath:: helpers (session_paths.h) so the native suite
+    // pins the "no UTC yet" and "boundary crossed" branches.
+    const bool needOpen   = !recording_ ||
+                            spath::shouldOpenDay(activeId_.c_str(), day.c_str());
+    const bool needRotate = recording_ &&
+                            spath::shouldRotateDay(activeId_.c_str(), day.c_str());
+    if (needOpen) {
+        if (needRotate) {
             // Day boundary crossed mid-trip. Rotate previous day's file
             // immediately so the uploader can post it without waiting.
             event_log::markPhase("ST_ROTATE_DAY");
@@ -728,7 +736,7 @@ void SessionStore::appendEvent(uint64_t timestampMsFull,
                                const String& deviceId) {
     if (!hasUsableBackend()) return;
     if (!eventTag || !eventTag[0]) return;
-    constexpr uint64_t MIN_VALID_TS_MS = 1577836800000ULL;
+    constexpr uint64_t MIN_VALID_TS_MS = gepoch::MIN_VALID_TS_MS;
     if (timestampMsFull < MIN_VALID_TS_MS) return;
 
     String day = dayIdFromEpochMs(timestampMsFull);

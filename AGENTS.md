@@ -74,9 +74,13 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 │   ├── secrets.h                 # gitignored — WiFi/URL credentials
 │   ├── secrets.h.example         # template for secrets.h
 │   ├── button.{h,cpp}            # debounced GPIO 0 + long-press engine
+│   ├── button_logic.h            # header-only press/screen/dose logic (v2.3)
 │   ├── gps_module.{h,cpp}        # UC6580 GNSS: auto-baud, bestEpochMs()
+│   ├── gps_epoch.h               # header-only UTC anchor + projection logic (v2.3)
+│   ├── event_log.{h,cpp}         # persistent /system.log ring + reset reasons
 │   ├── radiacode.{h,cpp}         # NimBLE central + RadiaCode protocol
-│   ├── session_store.{h,cpp}     # SD/SdFat CSV writer + LittleFS fallback
+│   ├── session_store.{h,cpp}     # SD/SdFat CSV writer + LittleFS backend
+│   ├── session_paths.h           # header-only filename grammar + rotation logic (v2.3)
 │   ├── ui.{h,cpp}                # ST7735 TFT screens + button state machine
 │   ├── wifi_gate.h               # header-only uploader decision logic (v2.3)
 │   └── wifi_uploader.{h,cpp}     # FreeRTOS uploader task (core 0)
@@ -319,13 +323,20 @@ namespace secrets {
 - Samples skipped until `bestEpochMs() >= MIN_VALID_TS_MS` (2020-01-01)
   to prevent `millis()`-since-boot from poisoning session timestamps
 - Serial log: `[GPS] UTC anchor set: ...` / `[GPS] UTC anchor refreshed: ... (drift Xms)`
+- All of that arithmetic is `gepoch::` in `src/gps_epoch.h` (header-only, also
+  compiled by `test_gps_epoch_native`): `composeUtcMs`, `shouldReanchor`
+  (fresh age < 5 s, paced 30 s), `millisAnchorFor`, `project`, `driftMs`, and the
+  single `MIN_VALID_TS_MS` constant (v2.3)
 
 ### Session Storage — `session_store.{h,cpp}`
 
 - Primary: SdFat on FSPI (GPIO 4-7)
 - Fallback: LittleFS (5.9 MB partition) — currently disabled
   (`cfg::SD_REQUIRED = true`), failure is a hard error on screen
-- CSV schema: `timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event`
+- CSV schema: `timestampMs,uSvPerHour,cps,latitude,longitude,deviceId,speedKph,bearingDeg,altitudeM,hdop,event,accuracyM`
+- The filename grammar (`<day>.csv` active vs `<day>.<bootMs>.up.csv` pending) and
+  the open/rotate decisions are `spath::` in `src/session_paths.h`, shared with
+  `test_session_paths_native`; the `.cpp` files only wrap the results in Strings (v2.3)
 - Sessions are append-only; `removeSession()` refuses to delete active session
 - Serial log on start/stop: `[REC] START: id=...` / `[REC] STOP: id=... samples=N`
 
@@ -333,6 +344,12 @@ namespace secrets {
 
 - ST7735 landscape rotation=1; 160×80; colors: GREEN `#00E676`, RED, DIM_GREY
 - Screens cycled by short-press: STATS → GPS → STORAGE → DOSE → STATS; PICKER entered via long-press on STATS
+- The button engine and the screen/picker cursor modulus live in
+  `src/button_logic.h` (namespace `blogic`, header-only, shared with
+  `test_button_native`): `poll()` stamps `pressStartMs` on the first *debounced*
+  low read, fires LONG once while still held, and reports SHORT only when no long
+  fired; the dose field's µSv→mSv switch and decimals ladder are
+  `useMillisievert()` / `mantissaDecimals()` so the 5-char box never overflows (v2.3)
 - **Header status bar** (v0.3.5): RC state badge (GREEN=OK, AMBER=scanning/init, RED=disconnected);
   GPS badge (GREEN=3D fix, RED=no fix); battery with color threshold; recording dot always visible
   (dim outline = idle, filled red = recording)
@@ -861,13 +878,13 @@ points that would crash the live Leaflet map.
 
 ### Native unit tests (runs on host PC — no hardware required)
 
-Ten test suites live under `test/`:
+Thirteen test suites live under `test/`:
 
 | Suite                    | Tests | What it validates |
 |--------------------------|-------|-------------------|
 | `test_line_count_native`         | 10    | Buffered newline-count algorithm (the O(1) fix from v0.3.4) |
 | `test_battery_native`            | 11    | LiPo voltage-to-percent interpolation table |
-| `test_csv_schema_native`         | 15    | MIN_VALID_TS_MS gate, 12-column schema, field extraction |
+| `test_csv_schema_native`         | 23    | MIN_VALID_TS_MS gate, 12-column schema, field extraction |
 | `test_dose_persistence_native`   |  9    | `shouldSaveDose` NVS write-gate decision logic |
 | `test_gps_transition_native`     |  9    | GPS fix transition detector (first-obs, steady-state, flap) |
 | `test_link_health_native`        |  7    | BLE link-stall watchdog, including millis() wraparound |
@@ -875,10 +892,17 @@ Ten test suites live under `test/`:
 | `test_lfs_geometry_native`       |  6    | LittleFS volume-geometry gate: `total != 0 && used <= total` (v2.1) |
 | `test_wifi_gate_native`          | 40    | `wgate::` helpers: VBAT hysteresis latch, charge trend, connect budget model + guards, line-aligned chunk arithmetic, WDT window arithmetic, retry ladder + cap, cadence/self-heal choices, `WL_*` / phase / skip decoding (v2.3) |
 | `test_wifi_cycle_sim_native`     | 23    | Full-cycle device simulation with injected scenarios and chained events: gated ramp then drain, both-APs-absent budget, 5 s vs 25 s timeout A/B, home-preferred fallback, poke fast path, per-window WDT coverage, partial drain mid-chunk, dead-link then recovery, zero-byte debris, charge/unplug/recharge lifecycle, `no_pending` chains, deadline-edge association, phase-trace tables, long-outage ladder (v2.3) |
+| `test_button_native`             | 11    | `blogic::` helpers: debounce + press-length engine (short/long, bounce, `millis()` wraparound, chained holds), screen/picker cursor modulus, dose value/unit scaling ladder (v2.3) |
+| `test_gps_epoch_native`          | 16    | `gepoch::` helpers: `composeUtcMs` against hand-computed epoch values, re-anchor gate + 30 s pacing chain, `millisAnchorFor` age correction, `project` monotonicity through an outage + wraparound, `driftMs` sign, the 2020 gate, and the full anchor → project → re-anchor chain (v2.3) |
+| `test_session_paths_native`      | 13    | `spath::` helpers: `pendingName` format/guards/truncation, `isPendingName` vs `isDayName` disjointness, day-id recovery from both filename forms, `pendingCandidate` with/without UTC, the `shouldOpenDay`/`shouldRotateDay` truth table + invariant, and a rotation chain over a fake directory (v2.3) |
 
-`test_wifi_gate_native` and `test_wifi_cycle_sim_native` `#include`
-`../../src/wifi_gate.h` directly instead of re-declaring the logic, so they
-cannot drift from the firmware (v2.3).
+Every one of those suites that covers a decision includes the firmware header
+directly instead of re-declaring the logic, so it cannot drift from the device
+code: `src/wifi_gate.h` (`wgate`), `src/button_logic.h` (`blogic`),
+`src/gps_epoch.h` (`gepoch`) and `src/session_paths.h` (`spath`). The firmware
+compiles the same headers — `button.cpp`/`ui.cpp`, `gps_module.cpp` and
+`session_store.cpp`/`main.cpp` delegate to them instead of carrying inline
+arithmetic.
 
 **Prerequisites on Windows**: PlatformIO's native env calls `gcc`/`g++`/`ar` which
 are not in PATH by default. If VS Build Tools 2022 is installed, create one-time
@@ -895,11 +919,11 @@ Set-Content "$wrapDir\ar.bat"   "@echo off`r`n`"$llvm\llvm-ar.exe`" %*" -Encodin
 $env:PATH = "$wrapDir;$env:PATH"
 ```
 
-Then run all ten host-side suites:
+Then run all thirteen host-side suites:
 
 ```powershell
 pio test -e native
-# Expected: 152 test cases: 152 succeeded
+# Expected: 192 test cases: 192 succeeded
 ```
 
 **Gotcha**: the `$env:PATH` edit and `pio test` must be in the **same** shell
@@ -931,8 +955,13 @@ a full connect+drain window), and `event_log_new_fields`. They SKIP rather than
 fail when the battery gate is closed or the queue is empty, since no cycle can
 complete by design.
 
-The v2.3 coverage pass adds 31 more records, taking the suite to **50** (49 pass
-+ 1 legitimate skip on a drained queue):
+The v2.3 coverage pass adds 31 more records, taking the suite to **50**:
+**49 passed + 1 skipped** on a loaded device (files queued, GPS fixing), and
+**44 passed + 6 skipped** on an idle one — the six that SKIP by design when no
+cycle can complete are `sample_count_consistency`, `sync_forces_cycle`,
+`chunked_drain_integrity`, `event_log_new_fields`, `log_writes_after_clear` and
+`multi_chunk_drain`. None of them FAIL on an idle device: a bare queue is a
+legitimate state, not a defect.
 
 | Group    | New records |
 |----------|-------------|
@@ -950,7 +979,7 @@ The v2.3 coverage pass adds 31 more records, taking the suite to **50** (49 pass
 the v0.3.6 regression and fails; cycling without a Ready landing means the peer
 stopped advertising and SKIPs.
 
-Four test-harness details learned from the v2.3 runs:
+Six test-harness details learned from the v2.3 runs:
 
 - `[HB]` lines must be parsed **by key**, not by one rigid positional regex — the
   firmware appends fields over time (`life=`, `dose=`, and `acc=` sits between
@@ -968,6 +997,15 @@ Four test-harness details learned from the v2.3 runs:
 - `REBOOT` must be read from the **same** handle: the boot banner lands ~1.5 s
   after the ack, and closing/reopening the native CDC port loses it. The reopen
   is only a fallback for the uptime check.
+- An *asynchronous* line that follows a poke is consumed by the poking reader's
+  own idle window, so a later `collect_window()` never sees it: the
+  `[WIFI] skip=no_pending` line printed by the poked cycle had to be searched in
+  the `SYNC` response **plus** the trailing window (`log_writes_after_clear`
+  FAILed on the trailing window alone).
+- A background run that is interrupted can leave its `python` process holding the
+  COM port, and the next invocation then dies with
+  `PermissionError(13, 'Access is denied.')` — check `Get-Process python` and stop
+  the stale PID before assuming the device or driver is at fault.
 
 ---
 
@@ -2329,6 +2367,26 @@ self-tests must pass. All passed on the current build:
   on-device evidence: `rcState` walks `5 -> 3 -> 4` after `D` + `x`, the per-file
   `chunks=1` reconciles byte-for-byte with `file_bytes`, and the boot banner
   re-appears after `REBOOT` with the uptime restarting from ~3 s.
+- **Header-extraction pass (same firmware)**: the remaining hand-computed
+  decisions outside the uploader were extracted into header-only files that both
+  the firmware and the host compile, each with its own suite —
+  `src/button_logic.h` (`blogic`: debounce/press-length engine, screen and picker
+  modulus, dose unit + decimals ladder) → `test_button_native` 11 cases;
+  `src/gps_epoch.h` (`gepoch`: `composeUtcMs`, re-anchor gate, `millisAnchorFor`,
+  `project`, `driftMs`, `MIN_VALID_TS_MS`) → `test_gps_epoch_native` 16 cases;
+  `src/session_paths.h` (`spath`: pending-name grammar, day/pending classification
+  disjointness, day-id recovery, `pendingCandidate`, the open/rotate pair) →
+  `test_session_paths_native` 13 cases. `button.cpp`, `ui.cpp`, `gps_module.cpp`,
+  `session_store.cpp` and `main.cpp` now call these instead of repeating the
+  arithmetic. The extraction is semantically identical to the old inline forms
+  (the suites pin every boundary), with one genuine fix on the GPS side: the
+  `drift` term is now computed from the OLD anchor pair, whereas the pre-2.3 code
+  evaluated it *after* overwriting `utcAnchorMs_`/`millisAnchor_` and therefore
+  always printed `-age`. `MIN_VALID_TS_MS` also became a single constant
+  (`gepoch::MIN_VALID_TS_MS`) shared by the three firmware writers. Totals: native
+  **192/192** across 13 suites, device **50 records / 44 passed / 0 failed /
+  6 skipped** (the skips are the legitimate idle states: empty queue after a
+  drain, no GPS fix indoors, so no new samples and no cycle).
 - **Rules for future code**:
   1. Keep `secrets.h` and `secrets.h.example` numerically in sync — the drift was
      only detectable arithmetically. Print the compiled budget at boot

@@ -13,6 +13,7 @@
 #include "config.h"
 #include "button.h"
 #include "event_log.h"
+#include "gps_epoch.h"
 #include "gps_module.h"
 #include "radiacode.h"
 #include "session_store.h"
@@ -672,8 +673,7 @@ void loop() {
             // boundary rather than drawing a straight line across it.
             if (event_log::wasLastResetCrash() && curHasGps) {
                 const uint64_t ts = gGps.bestEpochMs();
-                constexpr uint64_t MIN_VALID_TS_MS = 1577836800000ULL;
-                if (ts >= MIN_VALID_TS_MS && gStore.isRecording()) {
+                if (gepoch::tsWithinGate(ts, gepoch::MIN_VALID_TS_MS) && gStore.isRecording()) {
                     String id = gRadia.peerAddress();
                     id.replace(":", "");
                     gStore.appendEvent(ts, "GPS_LOST",     id);
