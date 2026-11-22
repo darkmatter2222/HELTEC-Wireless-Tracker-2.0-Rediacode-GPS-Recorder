@@ -276,6 +276,7 @@ heltec-tracker/
 │   ├── capture_boot.py           reset device + capture boot log
 │   ├── overnight_watch.py        log-tailing watchdog with reconnect
 │   ├── test_device.py            on-device integration suite (50 records)
+│   ├── elf_decode.py             firmware ELF inspector: header/sections/sym/addr2line
 │   ├── sink_server.py            fixed-rate TCP sink for WDT/chunk repros
 │   ├── test_api_ingest.py        API smoke test: POST /ingest/csv round trip
 │   └── test_api_recompute.py     API smoke test: /admin/recompute-sessions

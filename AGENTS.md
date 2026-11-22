@@ -109,6 +109,7 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 │   ├── render_screens.py         # regenerate TFT screen PNG mockups (Pillow)
 │   ├── import_tracks.py          # bulk-import RadiaCode app track exports (--merge)
 │   ├── test_device.py            # on-device integration suite (50 records, COM3)
+│   ├── elf_decode.py             # firmware ELF: header/sections/sym/addr2line (v2.3)
 │   ├── sink_server.py            # fixed-rate TCP sink for WDT/chunk repros
 │   ├── test_api_ingest.py        # API smoke test: POST /ingest/csv round trip
 │   └── test_api_recompute.py     # API smoke test: /admin/recompute-sessions
@@ -2404,14 +2405,22 @@ self-tests must pass. All passed on the current build:
   `STATFS` shows `used=16384 total=6160384 pct=0 sessions=0`.
 - **Diagnostic recipe** for any future boot-loop panic:
   ```bash
-  A2L=~/.platformio/packages/toolchain-xtensa-esp-elf/bin/xtensa-esp32s3-elf-addr2line.exe
-  $A2L -e .pio/build/heltec_tracker_v2/firmware.elf -f -C <backtrace addresses...>
-  # then disassemble the faulting PC:
+  # One command per step, no hard-coded paths (stdlib only):
+  python scripts/elf_decode.py sha256            # match the ROM's "ELF file SHA256:" line
+  python scripts/elf_decode.py header            # 32-bit LE, machine 94 = EM_XTENSA
+  python scripts/elf_decode.py sections .flash   # where the text segments live
+  python scripts/elf_decode.py sym lfs_alloc     # 0x42062c0c size=195 (name or address)
+  python scripts/elf_decode.py lines 0x42062c0c  # addr2line -f -C, same output as the tool
+  # raw disassembly of the faulting PC, if needed:
   OD=~/.platformio/packages/toolchain-xtensa-esp-elf/bin/xtensa-esp32s3-elf-objdump.exe
   $OD -d --start-address=<PC-0x20> --stop-address=<PC+0x10> .pio/build/heltec_tracker_v2/firmware.elf
   ```
-  Confirm the ELF is the one on the device by comparing `sha256sum firmware.elf`
-  with the `ELF file SHA256:` line in the panic output.
+  `elf_decode.py` supersedes the 17 one-off scratch readers the v2.1/v2.2 debug
+  left at the repo root (they hard-coded the V1.2 build path and are gone). Its
+  `lines` output was checked byte-for-byte against
+  `xtensa-esp32s3-elf-addr2line -e .pio/build/heltec_tracker_v2/firmware.elf -f -C`.
+  Confirm the ELF is the one on the device by comparing that `sha256` line with
+  the `ELF file SHA256:` line in the panic output.
 - **Rule**: never trust a successful `LittleFS.begin()` on its own — check
   `totalBytes() != 0` before the first write. When downgrading firmware across a
   CSV-schema bump, erase the littlefs region so the older build recreates its own
