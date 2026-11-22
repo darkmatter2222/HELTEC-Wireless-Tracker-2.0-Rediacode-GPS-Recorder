@@ -4,7 +4,7 @@
 
 # Heltec Wireless Tracker 2.0 — RadiaCode GPS Field Logger & Personal Radiation Data Platform
 
-[![Firmware](https://img.shields.io/badge/firmware-v0.9.5-brightgreen?logo=cplusplus&logoColor=white)](src/config.h)
+[![Firmware](https://img.shields.io/badge/firmware-v2.3-brightgreen?logo=cplusplus&logoColor=white)](src/config.h)
 [![Platform](https://img.shields.io/badge/ESP32--S3-blue?logo=espressif&logoColor=white)](https://www.espressif.com/en/products/socs/esp32-s3)
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-build-orange?logo=platformio&logoColor=white)](https://platformio.org/)
 [![RadiaCode](https://img.shields.io/badge/RadiaCode-RC--102%20%7C%20RC--110-purple?logo=bluetooth&logoColor=white)](https://radiacode.com)
@@ -64,10 +64,10 @@ and a full-featured web application — all in one repo. If any of these apply t
 
 ## Screens
 
-| STATS | GPS | STORAGE | PICKER |
-|:-----:|:---:|:-------:|:------:|
-| ![stats](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_stats.png) | ![gps](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_gps.png) | ![storage](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_storage.png) | ![picker](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_picker.png) |
-| Live dose rate (nSv/h) + sample counter | Fix quality, coordinates, bearing | Recording state, pending uploads, sync status | BLE device selection |
+| STATS | GPS | STORAGE | DOSE | PICKER |
+|:-----:|:---:|:-------:|:----:|:------:|
+| ![stats](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_stats.png) | ![gps](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_gps.png) | ![storage](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_storage.png) | ![dose](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_dose.png) | ![picker](https://raw.githubusercontent.com/darkmatter2222/HELTEC-Wireless-Tracker-2.0-Rediacode-GPS-Recorder/main/docs/screens/screen_picker.png) |
+| Live dose rate (nSv/h) + sample counter | Fix quality, coordinates, bearing | Recording state, pending uploads, sync status | Cumulative trip dose, long-press to reset | BLE device selection |
 
 > Rendered at 3× scale (480×240 px) from `scripts/render_screens.py`. Actual display is 160×80.
 
@@ -94,14 +94,19 @@ and a self-hosted personal data platform — confirmed working with both the **R
 
 ### The Platform — Your Personal Radiation Data Repository
 
-Once readings land in MongoDB, the **Radiological Map Viewer** gives you four fully independent modes:
+Once readings land in MongoDB, the **Radiological Map Viewer** gives you five fully independent modes:
 
 | Mode | What it's for |
 |------|---------------|
-| **Explore** | Live interactive map — Track, Dots, Hex-bin density, Bearing arrows, 3D terrain elevation, 6 color channels, timeline scrubber + playback |
+| **Evaluate** | Live interactive map — Track, Dots, Hex-bin density, Bearing arrows, 3D terrain elevation, 6 color channels, timeline scrubber + playback |
+| **Explorer** | Coverage-gap analysis — draw a mission polygon, bin the area into a grid, see which cells are covered vs. missing, and launch live tracking for that zone |
 | **Data Management** | Rename, merge, soft-delete, restore, hard-purge sessions; automated + manual backups; activity charts; upload audit history |
 | **Render** | Rasterise any selection of tracks into a publication-quality PNG — up to 16K UHD or 16K square; 5 render modes; 12 palettes; tile basemap; title overlay |
 | **Export** | Download your data in any format: **RadiaCode .rctrk** (native app format), **RadiaCode .txt**, **RadiaCode CSV**, or full **Internal CSV** — with time-range presets and auto-ZIP for large requests |
+
+> **Explorer mode** is backed by the `tracker_missions` + `tracker_analyses` collections and the
+> `/missions*` + `/explorer/*` endpoints. Its **Live Tracking** overlay polls
+> `GET /explorer/live-samples` and paints new samples inside the mission polygon as they arrive.
 
 This is **your personal radiation data repository** — not a shared community database. It is the
 trustworthy, backed-up, fully private archive of every reading your device has ever taken. From here,
@@ -156,7 +161,7 @@ entirely private. The data never leaves your server without your action.
 │                             port 8031                                      │
 │                                                                           │
 │  ┌─────────────────┐  ┌───────────────────┐  ┌──────────┐  ┌──────────┐ │
-│  │ Explore mode    │  │ Data Management   │  │  Render  │  │  Export  │ │
+│  │ Evaluate mode   │  │ Data Management   │  │  Render  │  │  Export  │ │
 │  │                 │  │                   │  │  mode    │  │  panel   │ │
 │  │ • Track lines   │  │ • Rename sessions │  │          │  │          │ │
 │  │ • Dot markers   │  │ • Soft del/restore│  │ Up to    │  │ .rctrk   │ │
@@ -171,6 +176,10 @@ entirely private. The data never leaves your server without your action.
 │  └─────────────────┘  └───────────────────┘  └──────────┘  └──────────┘ │
 └───────────────────────────────────────────────────────────────────────────┘
 ```
+
+> A **fifth** top-level mode, **Explorer**, sits between Evaluate and Data Management:
+> coverage-gap grid over a mission polygon (`/missions*`, `/explorer/analyze-coverage`),
+> with the **Live Tracking** overlay polling `GET /explorer/live-samples` while you drive.
 
 ---
 
@@ -231,11 +240,15 @@ heltec-tracker/
 │   ├── config.h                  all pin assignments + feature flags
 │   ├── secrets.h.example         template → copy to secrets.h (gitignored)
 │   ├── button.{h,cpp}            debounced GPIO 0, long-press engine
+│   ├── button_logic.h            header-only press/screen/dose logic (blogic::)
 │   ├── event_log.{h,cpp}         boot-reason logging to LittleFS /system.log
 │   ├── gps_module.{h,cpp}        UC6580 GNSS, bestEpochMs() timestamping
+│   ├── gps_epoch.h               header-only UTC anchor + projection (gepoch::)
 │   ├── radiacode.{h,cpp}         NimBLE central + RadiaCode BLE protocol
 │   ├── session_store.{h,cpp}     LittleFS day-bucketed CSV writer
+│   ├── session_paths.h           header-only filename grammar + rotation (spath::)
 │   ├── ui.{h,cpp}                ST7735 TFT screens + button state machine
+│   ├── wifi_gate.h               header-only uploader decision logic (wgate::)
 │   └── wifi_uploader.{h,cpp}     FreeRTOS uploader task (core 0)
 ├── api/vega-tracker-ingest/      Ingest API (FastAPI + MongoDB, Docker)
 │   ├── tracker_ingest_api.py     main FastAPI app
@@ -244,10 +257,12 @@ heltec-tracker/
 │   ├── Dockerfile
 │   └── .env.example              template for credentials
 ├── web/vega-tracker-viewer/      Web viewer (React + Leaflet + Three.js, Docker/nginx)
-│   ├── src/App.jsx               main app — Explore mode, tile layers, session list
+│   ├── src/App.jsx               main app — Evaluate + Explorer modes, tile layers
 │   ├── src/ManagePanel.jsx       Data Management mode
 │   ├── src/RenderPanel.jsx       Render mode (high-res PNG export)
 │   ├── src/ExportPanel.jsx       Export panel (time-range data export)
+│   ├── src/ExplorerPanel.jsx     Explorer mode (coverage gaps + missions)
+│   ├── src/LiveTrackingPanel.jsx Live Tracking overlay (10 s poll of new samples)
 │   ├── src/ThreeDView.jsx        3D terrain view (Three.js + AWS Terrarium)
 │   ├── src/DatabasePanel.jsx     Backup/restore + DB stats
 │   ├── deploy.ps1                deploy to remote server via SSH
@@ -255,27 +270,46 @@ heltec-tracker/
 ├── scripts/                      Python dev-tools
 │   ├── drive.py                  serial console / auto-connect
 │   ├── download_sessions.py      DUMPALL → local CSV files
-│   ├── import_tracks.py          bulk-import RadiaCode app track exports
+│   ├── import_tracks.py          bulk-import RadiaCode app track exports (--merge)
 │   ├── plot_session_map.py       offline Folium map from CSV
 │   ├── render_screens.py         generate TFT screen PNG mockups (Pillow)
-│   └── capture_boot.py           reset device + capture boot log
-├── test/                         Native (host-PC) unit tests via PlatformIO
-│   ├── test_battery_native/      LiPo voltage-to-percent interpolation
-│   ├── test_csv_schema_native/   12-column schema + MIN_VALID_TS_MS gate
-│   ├── test_dose_persistence_native/  NVS write-gate decision logic
-│   ├── test_gps_transition_native/    GPS fix transition detector
-│   ├── test_line_count_native/   O(1) buffered newline counter
-│   ├── test_link_health_native/  BLE link-stall watchdog + millis wraparound
-│   └── test_wifi_network_select_native/  Dual-network profile logic
+│   ├── capture_boot.py           reset device + capture boot log
+│   ├── overnight_watch.py        log-tailing watchdog with reconnect
+│   ├── test_device.py            on-device integration suite (50 records)
+│   ├── sink_server.py            fixed-rate TCP sink for WDT/chunk repros
+│   ├── test_api_ingest.py        API smoke test: POST /ingest/csv round trip
+│   └── test_api_recompute.py     API smoke test: /admin/recompute-sessions
+├── test/                         Native (host-PC) Unity suites — 192 cases / 13 suites
+│   ├── test_button_native/       blogic:: press + screen/dose logic (11)
+│   ├── test_battery_native/      LiPo voltage-to-percent interpolation (11)
+│   ├── test_csv_schema_native/   12-column schema + MIN_VALID_TS_MS gate (23)
+│   ├── test_dose_persistence_native/  NVS write-gate decision logic (9)
+│   ├── test_gps_epoch_native/    gepoch:: anchor + projection (16)
+│   ├── test_gps_transition_native/    GPS fix transition detector (9)
+│   ├── test_lfs_geometry_native/ LittleFS volume-geometry gate (6)
+│   ├── test_line_count_native/   O(1) buffered newline counter (10)
+│   ├── test_link_health_native/  BLE link-stall watchdog + millis wraparound (7)
+│   ├── test_session_paths_native/ spath:: filename grammar + rotation (13)
+│   ├── test_wifi_gate_native/    wgate:: uploader decisions (40)
+│   ├── test_wifi_cycle_sim_native/ full-cycle simulator, injected scenarios (23)
+│   └── test_wifi_network_select_native/ dual-profile + Basic Auth logic (14)
+├── hardware/                     Partition tables + 3D-print STLs + CAD image
+│   ├── partitions_tracker.csv    Flash partition table for V1.2 environment
+│   ├── partitions_tracker_v2.csv Flash partition table for V2 environment
+│   ├── stl/                      tracker_v2_case · _lid · _magsafe_adapter
+│   └── img/tracker_v2_case_cad.png
 ├── docs/screens/                 TFT screen mockups (generated by render_screens.py)
 ├── infra/duckdns/                DuckDNS dynamic DNS (Docker Compose, server-side)
-├── partitions_tracker.csv        Flash partition table for V1.2 environment
-├── partitions_tracker_v2.csv     Flash partition table for V2 environment
 ├── platformio.ini                PlatformIO build config
 ├── RADIACODE_PROTOCOL.md         Full BLE/GATT protocol reference for RadiaCode
 ├── AGENTS.md                     Full technical reference (AI agents + humans)
 └── README.md                     this file
 ```
+
+> The four `*_logic`-style headers (`button_logic.h`, `gps_epoch.h`, `session_paths.h`,
+> `wifi_gate.h`) are **header-only and compiled twice**: by the firmware *and* by the
+> host-side Unity suites. A test can therefore never drift from the code that runs on
+> the device — see [Testing](#testing).
 
 ---
 
@@ -432,14 +466,17 @@ Day rollover happens transparently at midnight (local time). The active file is 
 
 | Press | Screen | Action |
 |-------|--------|--------|
-| Short | any | Cycle to next screen (STATS → GPS → STORAGE → repeat) |
-| Long | STATS | Open BLE device picker |
+| Short | any normal screen | Cycle to next screen (STATS → GPS → STORAGE → DOSE → STATS) |
+| Long | STATS | Open BLE device picker (starts a scan) |
 | Long | GPS | Advance to next screen (same as short) |
-| Long | STORAGE | **Force immediate Wi-Fi sync** (bypasses 60s cadence and any backoff) |
+| Long | STORAGE | **Force immediate Wi-Fi sync** (bypasses 60 s cadence and any backoff) |
+| Long | DOSE | **Reset the cumulative trip-dose accumulator** to zero (writes 0 to NVS) |
+| Short | PICKER | Move the highlight cursor (last row is "Cancel") |
 | Long | PICKER | Connect to highlighted device |
 
-> Recording starts and stops automatically — there is no manual start/stop button.  
+> Recording starts and stops automatically — there is no manual start/stop button.
 > Long-pressing STORAGE when you want your data uploaded *right now* — no waiting.
+> On the four normal screens, `Hold:` hints are printed on the panel itself (y=72/68).
 
 ---
 
@@ -491,16 +528,24 @@ preventing false straight lines across gaps in coverage.
 
 ## API Reference
 
+Branded **Radiological Map Ingest API** (`api/vega-tracker-ingest/`, container
+`vega-tracker-ingest`). Current API version: **0.9.2** — see `API_VERSION` in
+[tracker_ingest_api.py](api/vega-tracker-ingest/tracker_ingest_api.py) and the live
+`GET /info` response. Direct LAN access is `http://YOUR_SERVER_IP:8030`; through the
+public proxy it is `https://susmannet.duckdns.org/api` (HTTP Basic Auth).
+
 ### Core
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/health` | Liveness + MongoDB ping |
-| GET | `/info` | Version, collection counts, sample rate (credentials redacted) |
-| GET | `/sessions` | List sessions (`?include_deleted=true` for soft-deleted) |
-| GET | `/sessions/{id}` | Session detail (up to 5000 samples) |
-| GET | `/sessions/{id}/uploads` | Per-session upload audit log (rows/bytes/firmware per cycle) |
-| POST | `/ingest/csv` | Upload one session CSV (firmware calls this every 60 s) |
+| GET | `/info` | Version, collection counts, sample rate, limits (credentials redacted) |
+| GET | `/sessions` | List sessions (`?limit=` default 500, `?include_deleted=true` for soft-deleted). Returns `{sessions: [...], total: N}` since 0.9.2 |
+| GET | `/sessions/{id}` | Session detail (`?limit=` 5000, `?skip=`) |
+| GET | `/sessions/area` | Samples inside a bbox grouped by session — `?min_lat&max_lat&min_lng&max_lng`, uses the `2dsphere` index |
+| GET | `/sessions/{id}/uploads` | Per-session upload audit log (rows/bytes/firmware per cycle), `?limit=` 100 |
+| POST | `/ingest/csv` | Upload one session CSV — insert-or-skip (firmware calls this every 60 s) |
+| POST | `/ingest/csv-merge` | Same, but UPSERT-MERGE on `{sessionId, timestampMs}`: new columns are `$set` onto existing docs; identity fields never overwritten |
 
 ### Data Management
 
@@ -517,20 +562,40 @@ preventing false straight lines across gaps in coverage.
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/sessions/{id}/export` | Export single session: `?format=radiacode_trk\|radiacode_txt\|radiacode\|internal` |
-| POST | `/sessions/export-bulk` | Export time-range across all sessions; auto-ZIP if multi-file |
+| POST | `/sessions/export-bulk` | Export listed sessions; auto-ZIP if multi-file |
+| GET | `/export/time-range/preview` | Row-count + size estimate for a time range, no data fetched (`?startMs&endMs&gpsOnly`) |
+| POST | `/export/time-range` | Export all samples in `{startMs, endMs, format, maxBytesPerFile, label, gpsOnly}` — auto-splits to a ZIP above 9 MB/file |
+
+### Explorer (coverage gap analysis)
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/missions` | List exploration missions, newest first |
+| POST | `/missions` | Create a mission from a committed zone polygon (201) |
+| PATCH | `/missions/{mission_id}` | Update name / status / notes / polygon |
+| DELETE | `/missions/{mission_id}` | Permanently delete a mission |
+| GET | `/missions/{mission_id}/coverage-grid` | Coarse grid of covered cells inside the mission bbox (centroid, mean dose rate, sample count) |
+| POST | `/explorer/analyze-coverage` | Compute gap analysis over quality-filtered samples (`grid_deg`, `max_speed_kph`, `max_hdop`, `max_accuracy_m`) |
+| GET | `/explorer/analyses/latest` | Most recently stored analysis result (recall on page load) |
+| GET | `/explorer/zone-coverage` | Covered vs. uncovered grid cells inside a zone bbox |
+| GET | `/explorer/live-samples` | Newest samples first, `?since_ms&limit` — polled every ~10 s by the Live Tracking overlay |
 
 ### Administration
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/admin/daily-stats` | Daily sample + upload counts for activity charts |
+| GET | `/admin/daily-stats` | Daily sample + upload counts for activity charts (`?days=` 90) |
 | GET | `/admin/db-stats` | MongoDB collection sizes and storage stats |
 | POST | `/admin/backup` | Trigger mongodump snapshot (`?source=manual\|cron`) |
 | GET | `/admin/backups` | List available backups with source/status/size |
 | DELETE | `/admin/backup/{name}` | Delete a named backup snapshot |
 | POST | `/admin/restore/{name}` | Full mongorestore from named backup |
-| POST | `/admin/recompute-sessions` | Recompute session metadata from samples |
+| POST | `/admin/recompute-sessions` | Purge pre-2020 rows + recompute all session metadata |
 | POST | `/admin/backfill-accuracy` | Derive `accuracyM` from `hdop` (or vice versa) for legacy rows |
+| POST | `/admin/migrate-to-daily-sessions` | One-shot v0.5.0 re-key of every `sessionId` to its local-eastern `YYYY-MM-DD` (`?confirm=MIGRATE_CONFIRMED`) |
+
+MongoDB collections: `tracker_samples`, `tracker_sessions`, `tracker_uploads`,
+`tracker_backups`, `tracker_missions`, `tracker_analyses`.
 
 ---
 
@@ -550,6 +615,94 @@ download your readings in formats accepted by radiation mapping communities:
 
 The Export panel supports **time-range presets** (today, this week, last month, any custom range
 or specific month going back 3 years) and automatically packages multi-file exports as a ZIP.
+
+---
+
+## Testing
+
+### The go-forward gate (mandatory)
+
+Every change to this repo runs the full gate **in the same session that made the
+change** — never deferred to a later session. A turn is only finished when steps
+1–4 are green and the totals below still match.
+
+| # | Command | Expected |
+|---|---------|----------|
+| 1 | `pio test -e native` | `192 test cases: 192 succeeded` across 13 suites |
+| 2 | `pio run -e heltec_tracker_v2` *(only if any `src/` file changed)* | `SUCCESS` — RAM ≈ 16.8 %, Flash ≈ 59.7 % |
+| 3 | `pio run -e heltec_tracker_v2 -t upload --upload-port COM3` | `Hard resetting via RTS pin...` |
+| 4 | `python scripts\test_device.py --port COM3` | **0 failed** out of 50 records |
+| 5 | `python scripts\test_api_ingest.py` + `python scripts\test_api_recompute.py` *(if `api/` changed)* | both exit 0 |
+| 6 | `python scripts\render_screens.py` *(if a screen layout changed)* | `Done — 6 PNG files in docs/screens/` |
+
+Two extra API smoke tests hit the live server (no Docker rebuild needed):
+
+```bash
+python scripts/test_api_ingest.py       # POST /ingest/csv round trip + deviceId derivation
+python scripts/test_api_recompute.py    # POST /admin/recompute-sessions ordering
+```
+
+**Windows prerequisite** — the native env calls `gcc`/`g++`/`ar`, which are not on
+`PATH` by default. With VS Build Tools 2022 installed, create three one-line `.bat`
+wrappers for `clang`, `clang++` and `llvm-ar` in a temp dir and prepend it to `PATH`
+**in the same shell invocation** as the test run (each tool call is a new process):
+
+```powershell
+$env:PATH = "C:\Users\ryans\AppData\Local\Temp\opencode\pio_gcc_wrap;" + $env:PATH; pio test -e native
+```
+
+Rules: a suite that ERRORED (build failure) counts as a failure, not a skip; never
+lower an expected total to make a run pass; skips are only for states the hardware
+cannot be in right now (no GPS fix indoors, drained queue). **Missing coverage is part
+of the work** — any new or changed decision goes into the matching header-only namespace
+in `src/` and gets its assertion in the same turn, with the tables above updated in that
+same commit.
+
+### Native suites (host PC, no hardware)
+
+| Suite | Cases | Covers |
+|-------|-------|--------|
+| `test_line_count_native` | 10 | O(1) buffered newline-count algorithm |
+| `test_battery_native` | 11 | LiPo voltage-to-percent interpolation table |
+| `test_csv_schema_native` | 23 | `MIN_VALID_TS_MS` gate, 12-column schema, field extraction |
+| `test_dose_persistence_native` | 9 | `shouldSaveDose` NVS write-gate decision |
+| `test_gps_transition_native` | 9 | GPS fix transition detector (first-obs, steady, flap) |
+| `test_link_health_native` | 7 | BLE link-stall watchdog, incl. `millis()` wraparound |
+| `test_wifi_network_select_native` | 14 | Dual-profile enable/disable, HTTPS detection, Basic Auth check |
+| `test_lfs_geometry_native` | 6 | LittleFS volume-geometry gate (`total != 0 && used <= total`) |
+| `test_wifi_gate_native` | 40 | `wgate::`: VBAT hysteresis latch, charge trend, connect budget, chunk + WDT arithmetic, retry ladder, phase/`WL_*`/skip decoding |
+| `test_wifi_cycle_sim_native` | 23 | Full-cycle simulation with injected scenarios and chained events |
+| `test_button_native` | 11 | `blogic::` debounce/press-length engine, screen + picker modulus, dose unit ladder |
+| `test_gps_epoch_native` | 16 | `gepoch::` anchor → project → re-anchor chain, drift sign, wraparound |
+| `test_session_paths_native` | 13 | `spath::` filename grammar, day/pending disjointness, rotation truth table |
+| **Total** | **192** | |
+
+The four header-only logic files (`src/wifi_gate.h`, `src/button_logic.h`,
+`src/gps_epoch.h`, `src/session_paths.h`) are `#include`d **directly** by their
+suites and compiled by the firmware too — so a test can never drift from the code
+that runs on the device. New decision logic follows the same pattern: pure
+functions in a short namespace, firmware calls them, the suite asserts every
+boundary (`<` vs `<=`), the degenerate inputs, `millis()` wraparound, and one
+chained multi-cycle scenario, with hand-computed expected values.
+
+### Device suite (hardware on COM3)
+
+`scripts/test_device.py` is an on-device integration suite of **50 records**: heartbeat
+field set + cadence, every REPL command's timing, sample-count consistency, Wi-Fi
+gate/`WIFISTAT` diagnostics, chunked-drain byte reconciliation, BLE reconnect chain,
+WIPE guards, event-log writes, and a 30-second serial loop-latency probe.
+
+| Device state | Result |
+|--------------|--------|
+| Loaded (files queued, GPS fixing) | 49 passed, 1 skipped |
+| Idle, peer advertising | 44 passed, **0 failed**, 6 skipped |
+| Idle, peer asleep (not advertising) | 43 passed, **0 failed**, 7 skipped |
+
+The six that skip on an idle device (`sample_count_consistency`, `sync_forces_cycle`,
+`chunked_drain_integrity`, `event_log_new_fields`, `log_writes_after_clear`,
+`multi_chunk_drain`) skip because no cycle can complete by design — a bare queue is a
+legitimate state, not a defect. A seventh (`ble_auto_reconnect_ready`) joins them when
+the RadiaCode is asleep and not advertising.
 
 ---
 

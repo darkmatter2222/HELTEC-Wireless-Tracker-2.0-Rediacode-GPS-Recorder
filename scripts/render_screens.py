@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-render_screens.py — generate PNG mockups of the four TFT screens at 3× scale
+render_screens.py — generate PNG mockups of the TFT screens at 3× scale
 (480 × 240 px, representing the 160 × 80 display).
 
 Requires Pillow:
@@ -9,7 +9,10 @@ Requires Pillow:
 Usage:
     python scripts/render_screens.py
 
-Output: docs/screens/screen_{stats,gps,storage,picker}.png
+Output: docs/screens/screen_{stats,gps,storage,storage_uploading,dose,picker}.png
+Each render mirrors the corresponding Ui::render*() field() calls in src/ui.cpp,
+so the PNGs stay a faithful picture of the panel. Re-run this script whenever a
+screen layout changes.
 """
 
 import os
@@ -136,6 +139,7 @@ def render_stats():
     draw_header(draw, "OK  ", COL_GREEN, has_fix=True, bat_pct=87, recording=True)
 
     field(draw, 4,  14, 60, 8, "DOSE nSv/h", COL_DIM,   COL_BG)
+    field(draw, 100, 14, 58, 8, "Smp 1250", COL_GREEN, COL_BG)   # v0.9.4 counter
     field(draw, 4,  22, 110, 22, " 1250",     COL_GREEN, COL_BG, sz=3)
     field(draw, 116, 26, 42, 8,  "+/- 8%",   COL_DIM,   COL_BG)
 
@@ -198,11 +202,14 @@ def render_storage():
     fill_w = max(1, int((bw - 2) * pct))
     fillrect(draw, bx + 1, by + 1, fill_w, bh - 2, COL_GREEN)
 
-    # Pending files (green = 0 pending)
-    field(draw, 4, 58, 156, 8, "Pending: 0", COL_GREEN, COL_BG)
+    # Pending files (green = 0 pending, amber = queued)   y=56
+    field(draw, 4, 56, 156, 8, "Pending: 0", COL_GREEN, COL_BG)
 
-    # Wi-Fi countdown
-    field(draw, 4, 70, 156, 8, "Next sync: 55s", COL_DIM, COL_BG)
+    # Wi-Fi phase / countdown line                         y=64
+    field(draw, 4, 64, 156, 8, "Next sync: 55s", COL_DIM, COL_BG)
+
+    # Long-press hint                                      y=72
+    field(draw, 4, 72, 156, 8, "Hold: sync now", COL_DIM, COL_BG)
     return img
 
 
@@ -226,8 +233,31 @@ def render_storage_uploading():
     fill_w = max(1, int((bw - 2) * pct))
     fillrect(draw, bx + 1, by + 1, fill_w, bh - 2, COL_GREEN)
 
-    field(draw, 4, 58, 156, 8, "Pending: 2", COL_AMBER, COL_BG)
-    field(draw, 4, 70, 156, 8, "Wi-Fi: uploading...", COL_GREEN, COL_BG)
+    field(draw, 4, 56, 156, 8, "Pending: 2", COL_AMBER, COL_BG)
+    field(draw, 4, 64, 156, 8, "Wi-Fi: uploading...", COL_GREEN, COL_BG)
+    field(draw, 4, 72, 156, 8, "Hold: sync now", COL_DIM, COL_BG)
+    return img
+
+# ---------------------------------------------------------------------------
+# DOSE screen — cumulative trip dose accumulator (v0.5.0)
+# ---------------------------------------------------------------------------
+def render_dose():
+    img  = Image.new("RGB", (W, H), COL_BG)
+    draw = ImageDraw.Draw(img)
+    draw_header(draw, "OK  ", COL_GREEN, has_fix=True, bat_pct=87, recording=True)
+
+    field(draw, 4,  14, 78, 8, "TOTAL DOSE",  COL_DIM,   COL_BG)
+    field(draw, 94, 14, 62, 8, "since reset", COL_DIM,   COL_BG)
+
+    # 5-char value at size 3 + the unit label beside it
+    field(draw, 4,  24, 90, 24, "  0.318", COL_GREEN, COL_BG, sz=3)
+    field(draw, 96, 32, 30,  8, "uSv",     COL_DIM,   COL_BG)
+
+    # Separator line (native y=50)
+    fillrect(draw, 4, 50, 152, 1, COL_DIM)
+
+    field(draw, 4, 56, 156, 8, "Rate:  0.318 uSv/h", COL_FG, COL_BG)
+    field(draw, 4, 68, 156, 8, "Hold: reset dose",   COL_DIM, COL_BG)
     return img
 
 # ---------------------------------------------------------------------------
@@ -274,6 +304,7 @@ def main():
         "gps":               render_gps(),
         "storage":           render_storage(),
         "storage_uploading": render_storage_uploading(),
+        "dose":              render_dose(),
         "picker":            render_picker(),
     }
 

@@ -44,8 +44,10 @@ result = json.loads(urllib.request.urlopen(req).read())
 print(f"\nRecompute: {result}")
 
 # Verify
+# API v0.9.2 returns {"sessions": [...], "total": N}; pre-0.9.2 returned a bare list.
 with urllib.request.urlopen(f"{API}/sessions") as r:
-    sessions = json.loads(r.read())
+    payload = json.loads(r.read())
+sessions = payload["sessions"] if isinstance(payload, dict) else payload
 got = {s["sessionId"]: s for s in sessions if s["sessionId"] in (S1, S2)}
 
 # After explicit $sort timestampMs asc, $last must be the highest-timestamp row.

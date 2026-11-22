@@ -30,7 +30,8 @@ Copilot has no native pre/post-turn hooks.
 
 ### After every turn that modifies files
 
-Run this immediately after all edits are done in the turn:
+**First run the test gate** ([Testing → Workflow](#testing)) — native suites, and
+build + flash + device suite when `src/` changed — then commit:
 
 ```powershell
 git add -A
@@ -41,6 +42,21 @@ git push --set-upstream origin HEAD
 Commit types: `feat`, `fix`, `refactor`, `docs`, `chore`.
 
 **Never skip this commit and push.** If nothing changed, skip silently.
+
+**Never commit with a failing or ERRORED suite.** The gate is:
+
+1. `pio test -e native` → `192 test cases: 192 succeeded`
+2. `pio run -e heltec_tracker_v2` → SUCCESS (if any `src/` file changed)
+3. `pio run -e heltec_tracker_v2 -t upload --upload-port COM3`
+4. `python scripts\test_device.py --port COM3` → 0 failed (50 records)
+5. `python scripts\test_api_ingest.py` + `python scripts\test_api_recompute.py`
+   → exit 0 (if any `api/` file changed)
+6. `python scripts\render_screens.py` → 6 PNGs (if a `Ui::render*()` layout changed)
+
+New decision logic is not "done" until it is asserted: extract it into the
+matching `src/*.h` header-only namespace and add cases to that suite (or create
+the suite) in the same turn — see [Testing → Adding a test](#adding-a-test).
+When a total changes, `AGENTS.md` and `README.md` are updated in that commit.
 
 ### Session wrap-up (when user says "done", "wrap up", "merge")
 
@@ -84,12 +100,32 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 │   ├── ui.{h,cpp}                # ST7735 TFT screens + button state machine
 │   ├── wifi_gate.h               # header-only uploader decision logic (v2.3)
 │   └── wifi_uploader.{h,cpp}     # FreeRTOS uploader task (core 0)
-├── scripts/                      # Python dev-tools (serial, data, mapping)
+├── scripts/                      # Python dev-tools (serial, data, mapping, tests)
 │   ├── drive.py                  # serial console wrapper: cmd/listen/auto-connect
 │   ├── download_sessions.py      # DUMPALL -> CSV files + optional wipe
 │   ├── plot_session_map.py       # interactive Folium map from CSV
 │   ├── overnight_watch.py        # log-tailing watchdog with reconnect
-│   └── capture_boot.py           # trigger ESP32 reset via DTR/RTS and capture boot log
+│   ├── capture_boot.py           # trigger ESP32 reset via DTR/RTS, capture boot log
+│   ├── render_screens.py         # regenerate TFT screen PNG mockups (Pillow)
+│   ├── import_tracks.py          # bulk-import RadiaCode app track exports (--merge)
+│   ├── test_device.py            # on-device integration suite (50 records, COM3)
+│   ├── sink_server.py            # fixed-rate TCP sink for WDT/chunk repros
+│   ├── test_api_ingest.py        # API smoke test: POST /ingest/csv round trip
+│   └── test_api_recompute.py     # API smoke test: /admin/recompute-sessions
+├── test/                         # Native (host-PC) Unity suites, one dir per suite
+│   ├── test_button_native/            # blogic:: press + screen/dose logic
+│   ├── test_battery_native/           # LiPo voltage-to-percent table
+│   ├── test_csv_schema_native/        # 12-column schema + timestamp gate
+│   ├── test_dose_persistence_native/  # NVS write-gate decision
+│   ├── test_gps_epoch_native/         # gepoch:: anchor + projection
+│   ├── test_gps_transition_native/    # GPS fix transition detector
+│   ├── test_lfs_geometry_native/      # LittleFS volume-geometry gate
+│   ├── test_line_count_native/        # O(1) buffered newline counter
+│   ├── test_link_health_native/       # BLE link-stall watchdog
+│   ├── test_session_paths_native/     # spath:: filename grammar + rotation
+│   ├── test_wifi_gate_native/         # wgate:: uploader decisions
+│   ├── test_wifi_cycle_sim_native/    # full-cycle simulator, injected scenarios
+│   └── test_wifi_network_select_native/  # dual-profile + Basic Auth checks
 ├── infra/
 │   └── duckdns/                  # DuckDNS dynamic DNS — Docker Compose (server-side)
 │       ├── .env                  # real token — gitignored, lives only on server
@@ -146,7 +182,8 @@ mongodb://ryan:Welcome123%21@host.docker.internal:27017/?authSource=admin
 - User: `ryan`
 - Password: `Welcome123!` (URL-encoded as `Welcome123%21`)
 - Database: `radiacode`
-- Collections: `tracker_samples`, `tracker_sessions`
+- Collections: `tracker_samples`, `tracker_sessions`, `tracker_uploads`,
+  `tracker_backups`, `tracker_missions`, `tracker_analyses`
 
 Credentials are stored in:
 - `api/vega-tracker-ingest/.env` (for the ingest API Docker container)
@@ -244,7 +281,7 @@ pio run -e heltec_tracker_v2 -t upload
 pio run -e heltec_tracker_v2 -t upload --upload-port COM4
 
 # Capture boot sequence (native USB-CDC needs this helper)
-python capture_boot.py
+python scripts\capture_boot.py
 
 # Live serial tail
 python scripts\drive.py listen 30
@@ -447,6 +484,8 @@ Connection: 115200 baud, USB-CDC. Type `?` for the live list on device.
 | `WIPE <count>`    | delete all sessions; count must match `LS` output (safety guard) |
 | `STATFS`          | filesystem usage (bytes used/total, session count) |
 | `SDSTAT`          | SD / LittleFS backend status |
+| `LOG`             | dump the persistent `/system.log` ring (both files + byte-total footer) |
+| `LOGCLEAR`        | erase the persistent event log (session CSVs are untouched) |
 | `GPASSTHRU [s]`   | pipe raw GPS NMEA to serial (default 10s) |
 | `GREBAUD`         | re-probe GPS baud rates |
 | `SYNC`            | force immediate Wi-Fi upload cycle |
@@ -724,21 +763,45 @@ ssh darkmatter2222@192.168.86.48 "curl -s http://localhost:8030/info"
 
 ### API Endpoints
 
+Current API version: **0.9.2** (`API_VERSION` in `tracker_ingest_api.py`, also
+reported by `GET /info`). 33 routes:
+
 | Method | Path                       | Description |
 |--------|----------------------------|-------------|
 | GET    | /health                    | liveness + mongo ping |
-| GET    | /info                      | version, collection counts, sample rate |
-| GET    | /sessions                  | list sessions; `?include_deleted=true` to include soft-deleted |
-| GET    | /session/{id}              | session detail (up to 5000 samples) |
-| POST   | /ingest/csv                | upload one session CSV |
+| GET    | /info                      | version, collection counts, sample rate, limits (uri redacted) |
+| GET    | /sessions                  | `{sessions:[...], total:N}`; `?limit=500&include_deleted=true` |
+| GET    | /sessions/{id}             | session detail; `?limit=5000&skip=N` |
+| GET    | /sessions/area             | samples in a bbox grouped by session; `?min_lat&max_lat&min_lng&max_lng` (2dsphere) |
+| POST   | /ingest/csv                | upload one session CSV (insert-or-skip on `{sessionId,timestampMs}`) |
+| POST   | /ingest/csv-merge          | UPSERT-MERGE path: new columns `$set` onto existing docs, identity fields kept |
+| GET    | /sessions/{id}/uploads     | upload log records for a session (newest-first); `?limit=N` (default 100) |
+| PATCH  | /sessions/{id}             | rename (sets `displayName`) |
 | DELETE | /sessions/{id}             | **soft-delete** — sets `deletedAt`/`deletedBy`, not hard-deleted |
 | PATCH  | /sessions/{id}/restore     | restore a soft-deleted session |
-| POST   | /admin/purge/{id}          | permanent hard-delete; requires session already soft-deleted + `?confirm=PURGE_CONFIRMED` |
+| POST   | /admin/purge/{id}          | permanent hard-delete; requires prior soft-delete + `?confirm=PURGE_CONFIRMED` |
+| POST   | /admin/merge-sessions      | merge source sessions into a target session |
+| GET    | /sessions/{id}/export      | single-session export; `?format=radiacode_trk|radiacode_txt|radiacode|internal` |
+| POST   | /sessions/export-bulk      | bulk export of listed sessions; ZIP when multi-file |
+| GET    | /export/time-range/preview | row-count + byte-size estimate; `?startMs&endMs&gpsOnly` |
+| POST   | /export/time-range         | `{startMs,endMs,format,maxBytesPerFile,label,gpsOnly}` → file or ZIP (9 MB/file cap) |
+| GET    | /missions                  | list Explorer missions, newest first |
+| POST   | /missions                  | create mission from a committed zone polygon (201) |
+| PATCH  | /missions/{mission_id}     | update name/status/notes/polygon |
+| DELETE | /missions/{mission_id}     | permanently delete a mission |
+| GET    | /missions/{mission_id}/coverage-grid | coarse covered-cell grid inside the mission bbox |
+| POST   | /explorer/analyze-coverage | coverage-gap analysis; `grid_deg`, `max_speed_kph`, `max_hdop`, `max_accuracy_m` |
+| GET    | /explorer/analyses/latest  | most recently stored analysis (recall on page load) |
+| GET    | /explorer/zone-coverage    | covered/uncovered grid cells in a zone bbox |
+| GET    | /explorer/live-samples     | newest-first samples; poll every ~10 s with `?since_ms=` |
 | POST   | /admin/recompute-sessions  | purge pre-2020 rows, recompute all session metadata |
+| POST   | /admin/backfill-accuracy   | derive accuracyM from hdop (or reverse) for legacy rows |
 | POST   | /admin/migrate-to-daily-sessions | one-shot v0.5.0 migration: rekey samples to local-eastern `YYYY-MM-DD` (requires `?confirm=MIGRATE_CONFIRMED`) |
-| GET    | /sessions/{id}/uploads     | list upload log records for a session (newest-first); `?limit=N` (default 100) |
+| GET    | /admin/db-stats            | collStats for samples/sessions + index sizes |
+| GET    | /admin/daily-stats         | daily sample + upload counts; `?days=90` |
 | POST   | /admin/backup              | trigger full-db mongodump; `?source=cron\|manual` |
 | GET    | /admin/backups             | list backups with source/status/elapsed |
+| DELETE | /admin/backup/{name}       | delete one snapshot |
 | POST   | /admin/restore/{name}      | restore from a named backup (full mongorestore) |
 
 ### Ingest CSV Headers
@@ -800,11 +863,13 @@ patching `public/config.js` so the compiled JS references the right API URL.
 Viewer URL (LAN direct): `http://192.168.86.48:8031/`
 Viewer URL (public): `https://susmannet.duckdns.org/tracker/`
 
-### Viewer Layout — Four Top-Level Modes
+### Viewer Layout — Five Top-Level Modes (+ Live Tracking overlay)
 
-The viewer has a persistent top navigation bar with **Explore**, **Data Management**, **Render**, and **Export** mode buttons.
+The viewer has a persistent top navigation bar with **Evaluate**, **Explorer**,
+**Data Management**, **Render**, and **Export** mode buttons.
 
-**Explore mode** (default) — left sidebar + full map:
+**Evaluate mode** (default; the button was labelled "Explore" before the Explorer
+mode landed) — left sidebar + full map:
 - Sidebar tabs: Sessions | Display | Stats
 - Map modes: Track (colored polyline), Dots (circle markers), Hex (hex-bin canvas), Arrows (bearing arrows + dot underlay)
 - Map zoom: `maxZoom=22`; per-tile `maxNativeZoom` (OSM=19, CartoDB=20, OpenTopoMap=17, Esri Satellite=18) for graceful over-zoom; initial zoom=6
@@ -816,7 +881,24 @@ The viewer has a persistent top navigation bar with **Explore**, **Data Manageme
   - Arrows: arrow-every-N ctrl-card; dot opacity ctrl-card; track underlay toggle-pill + track opacity ctrl-card
 - Session timeline scrubber + playback
 - Tile layers: OSM Streets, CartoDB Dark (default), OpenTopoMap, Satellite (Esri)
-- **3D terrain toggle** (Display tab, in Explore mode): overlays a Three.js WebGL canvas above the Leaflet map. GPS tracks rendered as 3D polylines (X=East metres, Y=altitude×exaggeration, Z=South metres). Ground plane tiled with slippy-map tiles from the active tile layer using `crossOrigin='anonymous'`. AWS Terrarium elevation tiles decode per-pixel `R×256+G+B/256−32768` to float32 elevation, meshed at 32×32 quad faces per tile. Controls: left-drag=orbit, right-drag=pan, scroll=zoom via `OrbitControls`. Tile zoom chosen as the coarsest level where the bbox spans ≤8 tiles per axis. Tracks are colored by the active color channel (same color mapping functions as 2D map). Can be combined with any map mode (the Leaflet map stays mounted underneath, hidden while 3D is active so tile cache is preserved). `ThreeDView.jsx` uses `three@^0.165`, `three/addons/controls/OrbitControls.js` from the same package.
+- **3D terrain toggle** (Display tab, in Evaluate mode): overlays a Three.js WebGL canvas above the Leaflet map. GPS tracks rendered as 3D polylines (X=East metres, Y=altitude×exaggeration, Z=South metres). Ground plane tiled with slippy-map tiles from the active tile layer using `crossOrigin='anonymous'`. AWS Terrarium elevation tiles decode per-pixel `R×256+G+B/256−32768` to float32 elevation, meshed at 32×32 quad faces per tile. Controls: left-drag=orbit, right-drag=pan, scroll=zoom via `OrbitControls`. Tile zoom chosen as the coarsest level where the bbox spans ≤8 tiles per axis. Tracks are colored by the active color channel (same color mapping functions as 2D map). Can be combined with any map mode (the Leaflet map stays mounted underneath, hidden while 3D is active so tile cache is preserved). `ThreeDView.jsx` uses `three@^0.165`, `three/addons/controls/OrbitControls.js` from the same package.
+
+**Explorer mode** — coverage-gap analysis (`ExplorerPanel.jsx`, left sidebar + own map):
+- **Analysis tab**: runs `POST /explorer/analyze-coverage` with editable quality gates
+  (`grid_deg`, `max_speed_kph`, `max_hdop`, `max_accuracy_m`); a sample only counts as
+  coverage if it passes all three (missing values pass). The most recent stored result is
+  reloaded on mount from `GET /explorer/analyses/latest`, so a page refresh is instant.
+- Map draws **covered** vs **uncovered** grid cells for the selected zone
+  (`GET /explorer/zone-coverage`) — the gaps are the places still to ride.
+- Clicking a cell selects the zone; a selected zone can be **committed to a mission**
+  (name + notes) → `POST /missions`.
+- **Missions tab**: lists `GET /missions` with a status filter, inline rename/notes edit
+  (`PATCH /missions/{id}`), delete, and a **Go live** button per mission.
+- **Live Tracking overlay** (`LiveTrackingPanel.jsx`, rendered above every mode while a
+  mission is live): polls `GET /explorer/live-samples` every `POLL_INTERVAL_MS` = 10 s with
+  `sinceMs` = last seen `timestampMs` (starts at a 5-minute history window), plus the
+  mission's `coverage-grid` for the historical underlay. Ending the overlay only clears
+  local state — the mission row stays in `tracker_missions`.
 
 **Data Management mode** — full-width two-column layout, no map:
 - **Left panel — Session Management** (`ManagePanel`): Rename, Delete/Restore, Merge, Export sub-tabs; active + soft-deleted sessions; triple-confirm Purge
@@ -875,6 +957,70 @@ points that would crash the live Leaflet map.
 ---
 
 ## Testing
+
+### Workflow — MANDATORY after every change (any session, any subsystem)
+
+Run all of this in the session that touched code; do not defer it to a later
+session. A turn is finished only when every applicable step in the table below is
+green and the docs carry the current totals.
+
+| # | Command | Expected |
+|---|---------|----------|
+| 1 | `pio test -e native` (with the `gcc`/`g++`/`ar` wrapper dir on `PATH`) | `192 test cases: 192 succeeded` across 13 suites |
+| 2 | `pio run -e heltec_tracker_v2` (only if any `src/` file changed) | `SUCCESS`, RAM ≈ 16.8 %, Flash ≈ 59.7 % |
+| 3 | `pio run -e heltec_tracker_v2 -t upload --upload-port COM3` | `Hard resetting via RTS pin...` |
+| 4 | `python scripts\test_device.py --port COM3` | **0 failed** out of 50 records (skips are legitimate idle states, failures are not) |
+| 5 | `python scripts\test_api_ingest.py` then `python scripts\test_api_recompute.py` (only if `api/` changed) | both exit 0 — "All assertions PASSED" |
+| 6 | `python scripts\render_screens.py` (only if a `Ui::render*()` layout changed) | "Done — 6 PNG files in docs/screens/" |
+
+Then:
+
+7. If any *decision* you added or changed has no assertion, add one in the same
+   turn — see "Adding a test" below — and re-run step 1.
+8. Update the suite table + expected totals in this file **and** the testing
+   section of `README.md` in the same commit that changed them, then
+   `git add -A; git commit; git push --set-upstream origin HEAD`.
+
+Rules:
+- A suite that ERRORED (build failure) is a failure, not a skip.
+- Never lower an expected total to make a run pass; find out why a case vanished.
+- Never mark a real defect `skipped` to get to zero failures; skips are only for
+  states the hardware cannot be in right now (no GPS fix indoors, drained queue).
+- Steps 1–4 must be in the *same* shell session for step 1 (see the `PATH` gotcha
+  below).
+
+### Adding a test
+
+PlatformIO discovers `test/test_<name>/*.cpp`; each suite needs its own
+`main()` with `UNITY_BEGIN()` / `UNITY_END()` and one `RUN_TEST()` per case
+(there is no auto-registration in this Unity build).
+
+The pattern this repo uses for decision logic is **header-only, compiled twice**:
+
+1. Put the pure logic in `src/<topic>.h` inside a short namespace
+   (existing: `wgate` = `wifi_gate.h`, `blogic` = `button_logic.h`,
+   `gepoch` = `gps_epoch.h`, `spath` = `session_paths.h`).
+   `inline` functions, no Arduino types, no heap, no `Serial`.
+2. Have the firmware call those helpers instead of repeating the arithmetic, so
+   the binary and the test share one implementation.
+3. `#include "../../src/<topic>.h"` **directly** in the test file — do not
+   re-declare the function, or the test can drift from the device.
+4. Cover, at minimum: every boundary of every comparison (`<` vs `<=`), the
+   degenerate/guard inputs (`0`, empty string, `nullptr`), unsigned `millis()`
+   wraparound for anything time-based, and one *chained* scenario that walks the
+   state machine through several cycles in order.
+5. Prefer hand-computed literals for expected values; note the derivation in a
+   comment so a future reader can check the arithmetic.
+6. Assert against observed field evidence where it exists (e.g. the
+   `chunk 3/196` trace, `connected ... in 3807ms`) so the suite also pins the
+   real-world numbers.
+
+For on-device behaviour, extend `scripts/test_device.py` instead: add a
+`test_<area>(ser, suite)` function that calls `suite.record(name, ok, elapsed,
+msg[, skipped=True])`, register it in `main()`'s ordered list, and use the shared
+helpers (`collect_window()` for multi-line replies, `send_for()` for acks inside a
+stream tail, `read_hb_key()`/`parse_kv()`/`parse_all_int()` for `[HB]` fields).
+Every new record name belongs in the device-suite table below.
 
 ### Native unit tests (runs on host PC — no hardware required)
 
@@ -979,7 +1125,8 @@ legitimate state, not a defect.
 the v0.3.6 regression and fails; cycling without a Ready landing means the peer
 stopped advertising and SKIPs.
 
-Six test-harness details learned from the v2.3 runs:
+Nine test-harness details learned from the v2.3 runs and the
+2026-11-21 determinism pass:
 
 - `[HB]` lines must be parsed **by key**, not by one rigid positional regex — the
   firmware appends fields over time (`life=`, `dose=`, and `acc=` sits between
@@ -1006,6 +1153,25 @@ Six test-harness details learned from the v2.3 runs:
   COM port, and the next invocation then dies with
   `PermissionError(13, 'Access is denied.')` — check `Get-Process python` and stop
   the stale PID before assuming the device or driver is at fault.
+- **Prefix-keyed retry reader** (`send_cmd_prefix()`): a status block such as
+  `[WIFI]` / `[GPS]` is only asserted over the lines that start with that tag, and
+  the command is re-sent (≤3×) until one appears. During a BLE reconnect the
+  asynchronous `E NimBLEClient: ...` / `connectToFound(): attempt N failed` trace
+  fills the idle window, so a single-shot read captured *only* that noise and the
+  keyword check "failed" on a healthy device. `wifistat_*` and `gps_status_*` use it.
+- One-shot `[CMD]` acks (`D`, `x`, `t`, `t <pattern>`) need
+  `send_for(..., attempts=3)` for the same reason: the first pass can return only
+  the interleaved BLE trace. Three attempts converged on every run.
+- `serial_loop_latency` classifies each sample by the `rcState` of the `[HB]` line
+  that interleaved into its own window: over budget while `rcState=3` is the
+  documented 1–5 s `connectToFound()` block (expected), over budget while `1` or `4`
+  is a real regression. Pass = ≥7/10 samples inside `CMD_TIMEOUT_S` **and** zero late
+  samples outside the connect window. Before this, one mid-reconnect sample made the
+  record flap between PASS and FAIL on identical firmware.
+
+`ble_auto_reconnect_ready` SKIPs when the peer is asleep, which moves the idle
+totals between **44 passed + 6 skipped** (peer advertising) and **43 passed +
+7 skipped** (peer asleep) — the same 50 records either way.
 
 ---
 
@@ -1687,8 +1853,10 @@ confirmed by the v0.7.1 analysis; same pattern here.
   GPS long-press now behaves identically to short-press — cycles to the next screen.
   **Note (v0.9.1)**: STORAGE long-press was later changed to trigger an immediate Wi-Fi sync
   instead of advancing the screen (see `ACTION_FORCE_SYNC`).
-- **Screen render PNG mockups**: `scripts/render_screens.py` generates 5 PNG files at 3× scale
-  (480×240) into `docs/screens/`.  Run with `python scripts/render_screens.py`.  Requires Pillow.
+- **Screen render PNG mockups**: `scripts/render_screens.py` generates 6 PNG files at 3× scale
+  (480×240) into `docs/screens/` (`stats`, `gps`, `storage`, `storage_uploading`, `dose`,
+  `picker`).  Run with `python scripts/render_screens.py`.  Requires Pillow.  Re-run it in the
+  same turn that changes any `Ui::render*()` layout.
 
 ### Verification Pass (v0.4.8) — Self-Test Results
 
@@ -1884,13 +2052,14 @@ self-tests must pass. All passed on the current build:
   body is y=12..79. Text at the default 5x8 font occupies 8 rows, so the
   last usable text baseline is y=72 (drawing 72..79). Anything at y=78 is
   clipped to the top two rows of the glyph and looks broken.
-- **STORAGE screen layout** (post v0.4.5):
+- **STORAGE screen layout** (current, post v0.4.9 + v2.3):
   - y=14: REC / AUTO state / sample count
   - y=26: Day xxx
   - y=38: Disk N% used
   - y=50: 6 px progress bar (y=50..55)
-  - y=58: Files on disk: N
-  - y=70: Wi-Fi countdown / status
+  - y=56: Pending: N
+  - y=64: Wi-Fi phase / countdown (battery-gated reads `Wi-Fi: batt low X.XXV`)
+  - y=72: `Hold: sync now` hint
 - **Rule of thumb**: never place a `field()` call with default font at
   y > 72. When in doubt, draw it and look at the device — the
   `data/sessions_dump/*/boot_*.html` screenshots are great verification.
@@ -2399,4 +2568,36 @@ self-tests must pass. All passed on the current build:
   4. Arduino WiFi setters that check `STA_STARTED_BIT` are no-ops until the
      driver's event task has run. Poll `WiFi.status() != WL_NO_SHIELD` first, or
      check the return value.
+
+### Server Build Ran Ahead Of The Repo: API 0.9.2 + Explorer Mode (docs sync 2026-11-21)
+
+- **Symptom**: the repo's `api/vega-tracker-ingest/tracker_ingest_api.py` declared
+  `API_VERSION = "0.9.1"` with 25 routes, while `GET :8030/info` on the server
+  reported `"version":"0.9.2"`, and `/openapi.json` listed 33 routes. The viewer
+  likewise had two panel components on the server that were absent from the repo.
+- **How it was detected**: compare like-for-like instead of trusting either side.
+  `GET /openapi.json` (route list) vs `Select-String '^@app\.'` on the repo file;
+  `md5sum` on the server tree vs `Get-FileHash` on the local tree, file by file.
+  `docker-compose.yml`, `Dockerfile`, `requirements.txt`, `package.json` and six
+  viewer panels matched exactly — so the drift was a *content* difference in eight
+  files, not a different deployment line.
+- **What the newer build adds**: `GET /sessions/area` (2dsphere bbox query),
+  `POST /ingest/csv-merge`, `GET|POST /export/time-range*`, the `/missions*` CRUD set
+  and the five `/explorer/*` coverage endpoints; in the viewer an **Explorer** mode
+  (`ExplorerPanel.jsx`) plus the **Live Tracking** overlay (`LiveTrackingPanel.jsx`),
+  and `nginx.conf` gained explicit `proxy_*_timeout` values because coverage analysis
+  can run ~60 s.
+- **Consequence for `deploy.ps1`**: it scp's the *local* tree over the server tree on
+  every run, so a stale checkout silently reverts live features (same failure shape as
+  the `.env` credentials lesson above). The eight drifted files were pulled from the
+  server into the repo so the checkout matches the running containers.
+- **Rule for future edits**:
+  1. After any server-side change, copy it back into the repo in the same session and
+     verify with `md5sum` (server) vs `Get-FileHash` (local) per file.
+  2. `GET /sessions` has returned `{sessions:[...], total:N}` since 0.9.2 (a bare list
+     before). Any script that walks it must normalise:
+     `sessions = payload["sessions"] if isinstance(payload, dict) else payload`
+     — both `scripts/test_api_ingest.py` and `scripts/test_api_recompute.py` do.
+  3. When a doc lists routes or the mode bar, re-derive it from `openapi.json` and
+     `App.jsx`'s `nav-mode-btn` list rather than from the previous doc text.
 

@@ -35,8 +35,11 @@ with urllib.request.urlopen(req) as r:
     print(f"POST body: {r.read().decode()}")
 
 # Check the resulting session metadata
+# API v0.9.2 returns {"sessions": [...], "total": N}; pre-0.9.2 returned a bare
+# list. Accept either shape so one script works against both builds.
 with urllib.request.urlopen(f"{API}/sessions") as r:
-    sessions = json.loads(r.read())
+    payload = json.loads(r.read())
+sessions = payload["sessions"] if isinstance(payload, dict) else payload
 match = next((s for s in sessions if s["sessionId"] == SESSION), None)
 assert match is not None, f"Session {SESSION} not found"
 print(f"\nResulting session metadata:")

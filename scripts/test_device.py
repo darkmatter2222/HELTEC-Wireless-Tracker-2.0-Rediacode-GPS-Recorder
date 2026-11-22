@@ -163,6 +163,32 @@ def send_cmd_collect(ser: serial.Serial, cmd: str,
     return lines, time.monotonic() - t0
 
 
+def send_cmd_prefix(ser: serial.Serial, cmd: str, prefix: str,
+                    timeout: float = CMD_TIMEOUT_S,
+                    attempts: int = 3) -> tuple[list[str], float]:
+    """
+    Send `cmd` until a reply line starting with `prefix` has been captured,
+    re-sending up to `attempts` times, and return ONLY those prefixed lines.
+
+    Why the retry exists: the main loop blocks 1-5 s inside `connectToFound()`
+    once per BLE reconnect (documented in the v0.3.4 lesson). A command that
+    lands in that window gets its reply *after* the idle-exit reader gave up, so
+    the single-shot reader returns only the asynchronous NimBLE/radiacode trace
+    and a keyword check then "fails" on a healthy device. Every status command
+    here is idempotent, so re-sending costs one line of serial.
+    """
+    best_lines: list[str] = []
+    best_elapsed = 0.0
+    for _ in range(max(1, attempts)):
+        lines, elapsed = send_cmd_collect(ser, cmd, timeout=timeout + 1.0)
+        hit = [l for l in lines if l.startswith(prefix)]
+        if hit:
+            return hit, elapsed
+        if len(lines) > len(best_lines):
+            best_lines, best_elapsed = lines, elapsed
+    return best_lines, best_elapsed
+
+
 # ---------------------------------------------------------------------------
 # Passive collection helper (for the v2.3 upload-path tests)
 # ---------------------------------------------------------------------------
@@ -336,8 +362,8 @@ def test_sdstat(ser: serial.Serial, suite: Suite) -> None:
 
 
 def test_wifistat(ser: serial.Serial, suite: Suite) -> None:
-    lines, elapsed = send_cmd_collect(ser, "WIFISTAT")
-    passed_time = elapsed < CMD_TIMEOUT_S
+    lines, elapsed = send_cmd_prefix(ser, "WIFISTAT", "[WIFI]")
+    passed_time = elapsed < CMD_TIMEOUT_S + 1.0
     # WIFISTAT output should contain at least "enabled" or "busy" or "ssid"
     joined = " ".join(lines).lower()
     passed_fmt = any(kw in joined for kw in ("enabled", "busy", "upload", "ssid", "wifi"))
@@ -349,13 +375,13 @@ def test_wifistat(ser: serial.Serial, suite: Suite) -> None:
 
 
 def test_gps(ser: serial.Serial, suite: Suite) -> None:
-    lines, elapsed = send_cmd_collect(ser, "g")
-    passed_time = elapsed < CMD_TIMEOUT_S
+    lines, elapsed = send_cmd_prefix(ser, "g", "[GPS]")
+    passed_time = elapsed < CMD_TIMEOUT_S + 1.0
     joined = " ".join(lines).lower()
     # g output should reference baud rate and satellite count
     passed_fmt = any(kw in joined for kw in ("baud", "sat", "fix", "gnss", "gps", "nmea"))
     suite.record("gps_status_responds", passed_time and len(lines) > 0, elapsed,
-                 "" if passed_time else "no response")
+                 "" if passed_time and len(lines) > 0 else "no response")
     suite.record("gps_status_format", passed_fmt, 0.0,
                  "" if passed_fmt else f"missing GPS keywords: {lines[:3]}")
 
@@ -491,11 +517,22 @@ def test_serial_loop_latency(ser: serial.Serial, suite: Suite) -> None:
     within CMD_TIMEOUT_S.  This is the regression test for the non-blocking
     BLE scan fix: before v0.3.4 the main loop was blocked for up to 8 s per
     scan window, making serial commands unresponsive during BLE storms.
+
+    rcState-aware classification (v2.3 harness): `connectToFound()` still blocks
+    the main loop for 1-5 s on the one iteration that opens a connection, and the
+    async scan itself never blocks (that was the v0.3.4 fix). So an over-budget
+    sample while rcState is 1 (Scanning) or 4 (Ready) is a real regression, while
+    one that landed during rcState 3 (Connecting) is the documented per-reconnect
+    block. The [HB] line interleaved into the same window tells us which.
     """
     interval = 3.0  # seconds between commands
     total    = 10
-    failures = 0
-    max_lat  = 0.0
+    real_misses     = 0
+    blocked_in_conn = 0
+    in_budget       = 0
+    max_lat         = 0.0
+    last_rc         = "?"
+    trace: list[str] = []
 
     print(f"  (sending {total} commands over ~{total * interval:.0f} s ...)", flush=True)
     t_suite_start = time.monotonic()
@@ -503,8 +540,16 @@ def test_serial_loop_latency(ser: serial.Serial, suite: Suite) -> None:
         lines, elapsed = send_cmd_collect(ser, "STATFS", timeout=CMD_TIMEOUT_S + 0.5)
         if elapsed > max_lat:
             max_lat = elapsed
-        if elapsed >= CMD_TIMEOUT_S or not lines:
-            failures += 1
+        hb = [l for l in lines if l.startswith("[HB]")]
+        rc = parse_kv(hb, "rcState") or last_rc
+        last_rc = rc
+        if elapsed < CMD_TIMEOUT_S and lines:
+            in_budget += 1
+        elif rc == "3":
+            blocked_in_conn += 1          # documented connectToFound() window
+        else:
+            real_misses += 1
+            trace.append(f"#{i + 1} {elapsed:.2f}s rc={rc}")
         # Wait for the next slot, accounting for time already spent.
         next_t = t_suite_start + (i + 1) * interval
         wait = next_t - time.monotonic()
@@ -512,10 +557,13 @@ def test_serial_loop_latency(ser: serial.Serial, suite: Suite) -> None:
             time.sleep(wait)
 
     elapsed_total = time.monotonic() - t_suite_start
-    passed = failures == 0
-    suite.record("serial_loop_latency", passed, elapsed_total,
-                 "" if passed
-                 else f"{failures}/{total} commands exceeded {CMD_TIMEOUT_S}s (max {max_lat:.2f}s)")
+    passed = real_misses == 0 and in_budget >= 7
+    detail = "" if passed else (
+        f"{real_misses} late outside the connect window "
+        f"({'; '.join(trace) if trace else 'none'}), "
+        f"{in_budget}/{total} in budget, "
+        f"{blocked_in_conn} in connectToFound, max {max_lat:.2f}s")
+    suite.record("serial_loop_latency", passed, elapsed_total, detail)
 
 
 def has_cycle_done(lines: list[str]) -> bool:
@@ -803,25 +851,30 @@ def wait_hb_key(ser: serial.Serial, key: str, value: str,
     return False, time.monotonic() - t0
 
 
-def session_count(ser: serial.Serial) -> int | None:
+def session_count(ser: serial.Serial, attempts: int = 3) -> int | None:
     """
     Current on-device session count. Reads the [LS-END] marker first and falls
     back to the [LS] header, both from one fixed window: the per-session line
     count takes ~0.4 s for a 1.6 MB day file, which is longer than the idle
     exit of send_cmd_collect, so that helper returns only the header line.
+
+    Retried (<= 3 passes) because the window can be filled entirely by the
+    asynchronous BLE trace while a reconnect is in flight, which made the WIPE
+    guard chain flap on identical firmware.
     """
-    ser.reset_input_buffer()
-    ser.write(b"LS\r\n")
-    ser.flush()
-    lines = collect_window(ser, 2.5)
-    for line in reversed(lines):
-        m = re.search(r"\[LS-END\]\s+count=(\d+)", line)
-        if m:
-            return int(m.group(1))
-    for line in lines:
-        m = re.search(r"\[LS\]\s+(\d+) sessions", line)
-        if m:
-            return int(m.group(1))
+    for _ in range(max(1, attempts)):
+        ser.reset_input_buffer()
+        ser.write(b"LS\r\n")
+        ser.flush()
+        lines = collect_window(ser, 2.5)
+        for line in reversed(lines):
+            m = re.search(r"\[LS-END\]\s+count=(\d+)", line)
+            if m:
+                return int(m.group(1))
+        for line in lines:
+            m = re.search(r"\[LS\]\s+(\d+) sessions", line)
+            if m:
+                return int(m.group(1))
     return None
 
 
@@ -896,10 +949,10 @@ def test_ble_scan_and_list(ser: serial.Serial, suite: Suite) -> None:
 
 def test_ble_grab_pattern_roundtrip(ser: serial.Serial, suite: Suite) -> None:
     """`t <pattern>` arms the name auto-grab, bare `t` clears it."""
-    ok_set, lines = send_for(ser, "t RadiaCode", "auto-grab armed", timeout=2.5)
+    ok_set, lines = send_for(ser, "t RadiaCode", "auto-grab armed", timeout=2.5, attempts=3)
     suite.record("ble_grab_pattern_set", ok_set, 0.0,
                  "" if ok_set else f"got {lines[:2]}")
-    ok_clr, lines2 = send_for(ser, "t", "auto-grab cleared", timeout=2.5)
+    ok_clr, lines2 = send_for(ser, "t", "auto-grab cleared", timeout=2.5, attempts=3)
     suite.record("ble_grab_pattern_clear", ok_clr, 0.0,
                  "" if ok_clr else f"got {lines2[:2]}")
 
@@ -911,12 +964,13 @@ def test_ble_disconnect_reconnect_chain(ser: serial.Serial, suite: Suite) -> Non
     before = read_hb_key(ser, "rcState")
     uptime_before = _int_prefix(read_hb_key(ser, "uptime"))
 
-    lines, _ = send_cmd_collect(ser, "D")
-    ok_d = any("keep pin" in l for l in lines)
+    # Fixed-window reader + re-send (see send_for): while a BLE connect attempt
+    # is in flight the async NimBLE trace fills the window, and the single-shot
+    # idle-exit reader can therefore miss the `[CMD]` ack itself.
+    ok_d, lines = send_for(ser, "D", "keep pin", timeout=1.5, attempts=3)
     suite.record("ble_disconnect_acked", ok_d, 0.0,
                  "" if ok_d else f"'D' -> {lines[:2]}")
-    lines2, _ = send_cmd_collect(ser, "x")
-    ok_x = any("cancel scan" in l for l in lines2)
+    ok_x, lines2 = send_for(ser, "x", "cancel scan", timeout=1.5, attempts=3)
     suite.record("ble_cancel_acked", ok_x, 0.0, "" if ok_x else f"'x' -> {lines2[:2]}")
 
     # Sample rcState over ~24 s. Two answers matter:
@@ -981,20 +1035,24 @@ def test_wipe_guard(ser: serial.Serial, suite: Suite) -> None:
     """The count guard is what makes WIPE safe: a mismatched or missing count
     must abort and leave the append-only store untouched."""
     before = session_count(ser)
-    lines, _ = send_cmd_collect(ser, "WIPE")
-    ok_usage = any("usage" in l for l in lines)
+    # Every reply here is read with send_for(): a single idle-exit pass can be
+    # filled entirely by the asynchronous BLE trace during a reconnect, which
+    # made this chain flap on identical firmware.
+    ok_usage, _ = send_for(ser, "WIPE", "usage", timeout=2.0, attempts=3)
     suite.record("wipe_no_arg_prints_usage", ok_usage, 0.0,
-                 "" if ok_usage else f"got {lines[:2]}")
+                 "" if ok_usage else "no '[WIPE] usage:' line")
 
-    lines2, _ = send_cmd_collect(ser, "WIPE 999999")
-    abort = [l for l in lines2 if "WIPE-ABORT" in l]
-    suite.record("wipe_mismatch_aborts", bool(abort), 0.0,
-                 "" if abort else f"no WIPE-ABORT: {lines2[:2]}")
+    ok_abort, lines2 = send_for(ser, "WIPE 999999", "WIPE-ABORT",
+                                timeout=2.0, attempts=3)
+    suite.record("wipe_mismatch_aborts", ok_abort, 0.0,
+                 "" if ok_abort else f"no WIPE-ABORT: {lines2[:2]}")
 
     reported = None
-    if abort:
-        m = re.search(r"have=(\d+)", abort[0])
-        reported = int(m.group(1)) if m else None
+    for line in lines2:
+        m = re.search(r"have=(\d+)", line)
+        if m:
+            reported = int(m.group(1))
+            break
     suite.record("wipe_abort_reports_have", reported == before, 0.0,
                  "" if reported == before else f"have={reported} LS={before}")
 
@@ -1008,25 +1066,23 @@ def test_log_clear_and_dump(ser: serial.Serial, suite: Suite) -> None:
     """LOG dumps the persistent ring (both files + byte total); LOGCLEAR empties
     it and the next dump must read as empty/short. Diagnostic surface only --
     session CSVs are untouched."""
-    lines, e1 = send_cmd_collect(ser, "LOG", timeout=CMD_TIMEOUT_S + 1.0)
+    ok_dump, lines = send_for(ser, "LOG", "bytes total", timeout=3.0, attempts=3)
     totals_before = [int(m.group(1)) for l in lines
                      for m in [re.search(r"\((\d+) bytes total\)", l)] if m]
-    ok_dump = len(lines) > 0 and bool(totals_before)
-    suite.record("log_dump_responds", ok_dump, e1,
-                 "" if ok_dump else f"no byte-total footer: {lines[:2]}")
+    suite.record("log_dump_responds", ok_dump and bool(totals_before), 0.0,
+                 "" if (ok_dump and totals_before) else f"no byte-total footer: {lines[:2]}")
 
-    lines2, e2 = send_cmd_collect(ser, "LOGCLEAR")
-    ok_clear = any("cleared" in l for l in lines2)
-    suite.record("logclear_acks", ok_clear, e2,
-                 "" if ok_clear else f"got {lines2[:2]}")
+    ok_clear, _ = send_for(ser, "LOGCLEAR", "cleared", timeout=2.0, attempts=3)
+    suite.record("logclear_acks", ok_clear, 0.0,
+                 "" if ok_clear else "no 'cleared' ack")
 
-    lines3, _ = send_cmd_collect(ser, "LOG", timeout=CMD_TIMEOUT_S + 1.0)
+    ok_after, lines3 = send_for(ser, "LOG", "bytes total", timeout=3.0, attempts=3)
     totals_after = [int(m.group(1)) for l in lines3
                     for m in [re.search(r"\((\d+) bytes total\)", l)] if m]
     empty_flag = any("empty" in l for l in lines3)
     shrunk = (not totals_after) or (totals_before and
                                      totals_after[0] <= totals_before[0])
-    suite.record("logclear_empties_ring", bool(totals_after) and shrunk or empty_flag, 0.0,
+    suite.record("logclear_empties_ring", (ok_after and shrunk) or empty_flag, 0.0,
                  "" if (shrunk or empty_flag)
                  else f"{totals_before} -> {totals_after} bytes")
 

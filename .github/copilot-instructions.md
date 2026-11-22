@@ -26,7 +26,31 @@ Every session must have its own dedicated git branch.
 
 ### After every turn in which you made file changes
 
-After completing all edits or file operations in a turn, always run:
+**First run the test gate** (see [AGENTS.md → Testing](../AGENTS.md#testing)),
+**then** commit. A turn is not finished while a suite is red or ERRORED.
+
+| # | Command | Expected |
+|---|---------|----------|
+| 1 | `pio test -e native` | `192 test cases: 192 succeeded` across 13 suites |
+| 2 | `pio run -e heltec_tracker_v2` *(only if any `src/` file changed)* | `SUCCESS` (RAM ≈ 16.8 %, Flash ≈ 59.7 %) |
+| 3 | `pio run -e heltec_tracker_v2 -t upload --upload-port COM3` | `Hard resetting via RTS pin...` |
+| 4 | `python scripts\test_device.py --port COM3` | **0 failed** out of 50 records |
+| 5 | `python scripts\test_api_ingest.py` + `python scripts\test_api_recompute.py` *(if `api/` changed)* | both exit 0 |
+| 6 | `python scripts\render_screens.py` *(if a TFT layout changed)* | `Done — 6 PNG files in docs/screens/` |
+
+Rules:
+- A suite that ERRORED (build failure) counts as a failure, not a skip.
+- Never lower an expected total to make a run pass; find out why a case vanished.
+- Skips are only for states the hardware cannot be in right now (no GPS fix
+  indoors, queue already drained) — never for a real defect.
+- **Missing coverage is part of the work.** Any new or changed decision must be
+  extracted into the matching header-only namespace in `src/` and asserted by a
+  case in that suite (create the suite if none exists) in the *same* turn —
+  recipe: [AGENTS.md → Adding a test](../AGENTS.md#adding-a-test).
+- When a total changes, update the suite table here, in `AGENTS.md`, and in the
+  `Testing` section of `README.md` in the same commit.
+
+Then run:
 
 ```powershell
 git add -A
