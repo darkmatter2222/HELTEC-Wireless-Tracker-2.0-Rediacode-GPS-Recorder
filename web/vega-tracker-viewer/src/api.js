@@ -8,6 +8,52 @@ export const API_BASE =
   import.meta.env.VITE_API_URL ||
   '/api';
 
+// ---- IndexedDB session-row cache -------------------------------------------
+// Cache key = sessionId + ":" + lastTsMs.  Auto-invalidates whenever the
+// session receives new uploads (lastTsMs advances).  Falls back silently if
+// IndexedDB is unavailable (private-browsing, quota exceeded, etc.).
+
+const IDB_DB    = 'vega-tracker-cache';
+const IDB_STORE = 'session-rows';
+const IDB_VER   = 1;
+
+let _idbPromise = null;
+function _openIdb() {
+  if (!_idbPromise) {
+    _idbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(IDB_DB, IDB_VER);
+      req.onupgradeneeded = e => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains(IDB_STORE))
+          db.createObjectStore(IDB_STORE, { keyPath: 'k' });
+      };
+      req.onsuccess = e => resolve(e.target.result);
+      req.onerror   = e => reject(e.target.error);
+    });
+  }
+  return _idbPromise;
+}
+async function _idbGet(key) {
+  try {
+    const db = await _openIdb();
+    return new Promise(resolve => {
+      const req = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).get(key);
+      req.onsuccess = e => resolve(e.target.result?.v ?? null);
+      req.onerror   = ()  => resolve(null);
+    });
+  } catch { return null; }
+}
+async function _idbPut(key, value) {
+  try {
+    const db = await _openIdb();
+    return new Promise(resolve => {
+      const req = db.transaction(IDB_STORE, 'readwrite').objectStore(IDB_STORE).put({ k: key, v: value });
+      req.onsuccess = () => resolve();
+      req.onerror   = () => resolve();
+    });
+  } catch { /* ignore cache-write failures */ }
+}
+
 // ---- read ------------------------------------------------------------------
 
 export async function fetchSessions({ includeDeleted = false } = {}) {
@@ -15,26 +61,73 @@ export async function fetchSessions({ includeDeleted = false } = {}) {
   if (includeDeleted) params.set('include_deleted', 'true');
   const r = await fetch(`${API_BASE}/sessions?${params}`);
   if (!r.ok) throw new Error(`sessions ${r.status}`);
-  return r.json();
+  const data = await r.json();
+  return data.sessions ?? [];  // API returns {sessions, total}; consumers expect an array
 }
 
-// Pull all rows for a session; the API pages at 5000/page so we walk it.
-export async function fetchSessionRows(sessionId, { pageSize = 5000 } = {}) {
-  let skip = 0;
-  const out = [];
-  for (;;) {
-    const r = await fetch(
-      `${API_BASE}/sessions/${encodeURIComponent(sessionId)}?limit=${pageSize}&skip=${skip}`
-    );
-    if (!r.ok) throw new Error(`session ${sessionId} ${r.status}`);
-    const j = await r.json();
-    if (!j.rows || j.rows.length === 0) break;
-    for (const row of j.rows) out.push(row);
-    if (j.rows.length < pageSize) break;
-    skip += j.rows.length;
-    if (skip > 200000) break; // safety cap
+// Pull all rows for a session.  Improvements over the original sequential loop:
+//   • IndexedDB cache: returns instantly on repeat loads (key = sessionId:lastTsMs).
+//   • Parallel fetch: when totalHint is provided all pages are fetched simultaneously
+//     via Promise.all, cutting a 14-round-trip sequential load to 1 round trip.
+//   • Falls back to sequential pagination when neither hint is available.
+export async function fetchSessionRows(sessionId, { pageSize = 5000, totalHint = null, lastTsHint = null } = {}) {
+  // Check cache first.  Key includes lastTsMs so stale entries are bypassed
+  // automatically when new data arrives (lastTsMs advances after each upload).
+  const cacheKey = lastTsHint ? `${sessionId}:${lastTsHint}` : null;
+  if (cacheKey) {
+    const cached = await _idbGet(cacheKey);
+    if (cached) return cached;
   }
-  return out;
+
+  let rows;
+
+  if (totalHint && totalHint > pageSize) {
+    // Parallel: fire all page requests at once, reassemble in order.
+    const numPages = Math.ceil(totalHint / pageSize);
+    const pages = await Promise.all(
+      Array.from({ length: numPages }, (_, i) =>
+        fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}?limit=${pageSize}&skip=${i * pageSize}`)
+          .then(r => r.ok ? r.json() : Promise.reject(new Error(`session ${sessionId} ${r.status}`)))
+          .then(j => j.rows || [])
+      )
+    );
+    rows = pages.flat();
+  } else {
+    // Sequential fallback (unknown count or single page).
+    let skip = 0;
+    rows = [];
+    for (;;) {
+      const r = await fetch(
+        `${API_BASE}/sessions/${encodeURIComponent(sessionId)}?limit=${pageSize}&skip=${skip}`
+      );
+      if (!r.ok) throw new Error(`session ${sessionId} ${r.status}`);
+      const j = await r.json();
+      if (!j.rows || j.rows.length === 0) break;
+      for (const row of j.rows) rows.push(row);
+      if (j.rows.length < pageSize) break;
+      skip += j.rows.length;
+      if (skip > 200000) break; // safety cap
+    }
+  }
+
+  // Persist to IndexedDB for subsequent page loads (fire-and-forget).
+  if (cacheKey) _idbPut(cacheKey, rows);
+
+  return rows;
+}
+
+/** Query MongoDB's 2dsphere index for all GPS samples inside a bounding box.
+ *  Returns { sessions: [{sessionId, meta, rows}], totalSamples } instantly —
+ *  the server does the spatial query, no per-session loading needed.
+ *  @param {{ minLat, maxLat, minLng, maxLng }} bbox */
+export async function fetchAreaSessions({ minLat, maxLat, minLng, maxLng }) {
+  const params = new URLSearchParams({
+    min_lat: minLat, max_lat: maxLat,
+    min_lng: minLng, max_lng: maxLng,
+  });
+  const r = await fetch(`${API_BASE}/sessions/area?${params}`);
+  if (!r.ok) throw new Error(`area-search ${r.status}`);
+  return r.json();
 }
 
 /** Return the upload history for a session, newest first.
@@ -195,6 +288,116 @@ export async function deleteBackup(name) {
     const msg = await r.text().catch(() => r.status);
     throw new Error(`delete backup failed: ${msg}`);
   }
+  return r.json();
+}
+
+// ---- Explorer: missions ----------------------------------------------------
+
+export async function fetchMissions(status = null) {
+  const params = status ? `?status=${encodeURIComponent(status)}` : '';
+  const r = await fetch(`${API_BASE}/missions${params}`);
+  if (!r.ok) throw new Error(`missions ${r.status}`);
+  return r.json();
+}
+
+export async function createMission({ name, polygon, centroid, areaKm2 = 0, score = 0, notes = '' }) {
+  const r = await fetch(`${API_BASE}/missions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, polygon, centroid, areaKm2, score, notes }),
+  });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`create mission failed: ${msg}`);
+  }
+  return r.json();
+}
+
+export async function updateMission(missionId, updates) {
+  const r = await fetch(`${API_BASE}/missions/${encodeURIComponent(missionId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(updates),
+  });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`update mission failed: ${msg}`);
+  }
+  return r.json();
+}
+
+export async function deleteMission(missionId) {
+  const r = await fetch(`${API_BASE}/missions/${encodeURIComponent(missionId)}`, {
+    method: 'DELETE',
+  });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`delete mission failed: ${msg}`);
+  }
+  return r.json();
+}
+
+// Historical coverage grid for the live-tracking overlay.
+// Returns { cells: [{lat, lng, avgDose, count}], coveragePct, sampleCount }
+export async function fetchMissionCoverageGrid(missionId) {
+  const r = await fetch(
+    `${API_BASE}/missions/${encodeURIComponent(missionId)}/coverage-grid`
+  );
+  if (!r.ok) throw new Error(`mission coverage-grid ${r.status}`);
+  return r.json();
+}
+
+// ---- Explorer: coverage analysis -------------------------------------------
+
+export async function analyzeCoverage({
+  maxSpeedKph = 50, maxHdop = 3.0, maxAccuracyM = 15,
+  gridDeg = 0.002, topN = 15, paddingFactor = 0.15,
+  maxZoneSqMi = 25, minZoneSqMi = 0.3, distPeakKm = 5,
+} = {}) {
+  const params = new URLSearchParams({
+    max_speed_kph:  maxSpeedKph,
+    max_hdop:       maxHdop,
+    max_accuracy_m: maxAccuracyM,
+    grid_deg:       gridDeg,
+    top_n:          topN,
+    padding_factor: paddingFactor,
+    max_zone_sq_mi: maxZoneSqMi,
+    min_zone_sq_mi: minZoneSqMi,
+    dist_peak_km:   distPeakKm,
+  });
+  const r = await fetch(`${API_BASE}/explorer/analyze-coverage?${params}`, { method: 'POST' });
+  if (!r.ok) {
+    const msg = await r.text().catch(() => r.status);
+    throw new Error(`coverage analysis failed: ${msg}`);
+  }
+  return r.json();
+}
+
+export async function fetchLatestAnalysis() {
+  const r = await fetch(`${API_BASE}/explorer/analyses/latest`);
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`fetch latest analysis: ${r.status}`);
+  return r.json();
+}
+
+export async function fetchZoneCoverage({ minLat, maxLat, minLng, maxLng, gridDeg = 0.0005,
+  maxSpeedKph = 50, maxHdop = 3.0, maxAccuracyM = 15 } = {}) {
+  const params = new URLSearchParams({
+    min_lat: minLat, max_lat: maxLat, min_lng: minLng, max_lng: maxLng,
+    grid_deg: gridDeg, max_speed_kph: maxSpeedKph,
+    max_hdop: maxHdop, max_accuracy_m: maxAccuracyM,
+  });
+  const r = await fetch(`${API_BASE}/explorer/zone-coverage?${params}`);
+  if (!r.ok) throw new Error(`zone-coverage ${r.status}`);
+  return r.json();
+}
+
+// ---- Explorer: live samples (real-time dose feed) --------------------------
+
+export async function fetchLiveSamples({ sinceMs = 0, limit = 20 } = {}) {
+  const params = new URLSearchParams({ since_ms: sinceMs, limit });
+  const r = await fetch(`${API_BASE}/explorer/live-samples?${params}`);
+  if (!r.ok) throw new Error(`live-samples ${r.status}`);
   return r.json();
 }
 

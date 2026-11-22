@@ -48,10 +48,12 @@ import csv
 import glob
 import io
 import logging
+import math as _math
 import os
 import shutil
 import subprocess
 import time
+import uuid
 import zipfile
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -98,9 +100,14 @@ SAMPLES_COLL      = os.getenv("MONGO_SAMPLES_COLLECTION", "tracker_samples")
 SESSIONS_COLL     = os.getenv("MONGO_SESSIONS_COLLECTION", "tracker_sessions")
 BACKUPS_COLL      = "tracker_backups"    # telemetry: one doc per backup attempt
 UPLOADS_COLL      = "tracker_uploads"    # one doc per POST /ingest/csv call
-API_VERSION       = "0.9.1"
+MISSIONS_COLL     = "tracker_missions"   # Explorer: planned exploration zones
+ANALYSES_COLL    = "tracker_analyses"   # Explorer: stored analysis results (rolling 10)
+API_VERSION       = "0.9.2"
 MAX_BODY_BYTES    = int(os.getenv("MAX_BODY_BYTES", str(8 * 1024 * 1024)))   # 8 MB
 INGEST_BATCH_SIZE = int(os.getenv("INGEST_BATCH_SIZE", "1000"))
+# Cap on rows fetched by POST /export/time-range so a wide range cannot
+# exhaust container memory (fetch + content build + zip all happen in RAM).
+EXPORT_MAX_ROWS   = int(os.getenv("EXPORT_MAX_ROWS", "50000"))
 BACKUP_DIR        = os.getenv("BACKUP_DIR", "/backups")  # host-mounted volume
 BACKUP_KEEP_COUNT = 5  # rolling window — the cron script prunes to this many snapshots
 
@@ -153,14 +160,23 @@ async def lifespan(app: FastAPI):
     uploads = db[UPLOADS_COLL]
     uploads.create_index([("sessionId", 1), ("receivedAt", -1)], name="upload_session_ts")
 
+    missions_coll = db[MISSIONS_COLL]
+    missions_coll.create_index(
+        [("missionId", 1)], name="mission_id_unique", unique=True
+    )
+    missions_coll.create_index(
+        [("status", 1), ("createdAt", -1)], name="mission_status_ts"
+    )
+
     app.state.mongo    = client
     app.state.db       = db
     app.state.samples  = samples
     app.state.sessions = sessions
     app.state.backups  = backups
     app.state.uploads  = uploads
-    log.info("mongo ready; collections=%s,%s,%s,%s",
-             SAMPLES_COLL, SESSIONS_COLL, BACKUPS_COLL, UPLOADS_COLL)
+    app.state.missions = missions_coll
+    log.info("mongo ready; collections=%s,%s,%s,%s,%s",
+             SAMPLES_COLL, SESSIONS_COLL, BACKUPS_COLL, UPLOADS_COLL, MISSIONS_COLL)
     try:
         yield
     finally:
@@ -234,191 +250,152 @@ def _parse_csv(body: str, session_id: str, header_device_id: str | None,
     """
     out: list[dict[str, Any]] = []
     rejected = 0
-    rdr = csv.reader(io.StringIO(body))
-    for row in rdr:
-        if not row:
-            continue
-        # Skip header row.
-        if row[0].strip().lower() == "timestampms":
-            continue
-        # Pad to minimum 6 cols defensively.
-        while len(row) < 6:
-            row.append("")
-        ts   = _safe_int(row[0])
-        usv  = _safe_float(row[1])
-        cps  = _safe_float(row[2])
-        lat  = _safe_float(row[3])
-        lng  = _safe_float(row[4])
-        dev  = row[5].strip() or (header_device_id or None)
+    try:
+        rdr = csv.reader(io.StringIO(body))
+        for row in rdr:
+            if not row:
+                continue
+            # Skip header row.
+            if row[0].strip().lower() == "timestampms":
+                continue
+            # Pad to minimum 6 cols defensively.
+            while len(row) < 6:
+                row.append("")
+            ts   = _safe_int(row[0])
+            usv  = _safe_float(row[1])
+            cps  = _safe_float(row[2])
+            lat  = _safe_float(row[3])
+            lng  = _safe_float(row[4])
+            dev  = row[5].strip() or (header_device_id or None)
 
-        # Extended fields added in firmware 0.3.0 (columns 6-9).
-        # Pre-0.3.0 uploads have 6 columns; these default to None.
-        speed_kph   = _safe_float(row[6]) if len(row) > 6 else None
-        bearing_deg = _safe_float(row[7]) if len(row) > 7 else None
-        altitude_m  = _safe_float(row[8]) if len(row) > 8 else None
-        hdop_val    = _safe_float(row[9]) if len(row) > 9 else None
-        # Column 10 (event) added in firmware 0.7.0 -- GPS_LOST / GPS_REGAINED
-        # transition markers. Normal samples leave this empty; event rows have
-        # no lat/lng/dose values, only a timestamp + deviceId + tag. Stored on
-        # the sample doc so the viewer can split polylines at gaps.
-        event_tag   = row[10].strip() if len(row) > 10 and row[10].strip() else None
-        # Column 11 (accuracyM) added in firmware 0.8.0 -- estimated horizontal
-        # accuracy in metres. The firmware computes this from HDOP via the
-        # `accuracyM = hdop * 5.0` UERE rule of thumb; the RadiaCode app track
-        # importer carries the measured value directly. Stored alongside hdop
-        # so consumers can pick whichever they prefer.
-        accuracy_m  = _safe_float(row[11]) if len(row) > 11 else None
+            # Extended fields added in firmware 0.3.0 (columns 6-9).
+            # Pre-0.3.0 uploads have 6 columns; these default to None.
+            speed_kph   = _safe_float(row[6]) if len(row) > 6 else None
+            bearing_deg = _safe_float(row[7]) if len(row) > 7 else None
+            altitude_m  = _safe_float(row[8]) if len(row) > 8 else None
+            hdop_val    = _safe_float(row[9]) if len(row) > 9 else None
+            # Column 10 (event) added in firmware 0.7.0 -- GPS_LOST / GPS_REGAINED
+            # transition markers. Normal samples leave this empty; event rows have
+            # no lat/lng/dose values, only a timestamp + deviceId + tag. Stored on
+            # the sample doc so the viewer can split polylines at gaps.
+            event_tag   = row[10].strip() if len(row) > 10 and row[10].strip() else None
+            # Column 11 (accuracyM) added in firmware 0.8.0 -- estimated horizontal
+            # accuracy in metres. The firmware computes this from HDOP via the
+            # `accuracyM = hdop * 5.0` UERE rule of thumb; the RadiaCode app track
+            # importer carries the measured value directly. Stored alongside hdop
+            # so consumers can pick whichever they prefer.
+            accuracy_m  = _safe_float(row[11]) if len(row) > 11 else None
 
-        if ts is None:
-            rejected += 1
-            continue
-        # Server-side sanity gate: reject pre-2020 timestamps.  The firmware
-        # now filters these out before writing to SD card, but old session
-        # files created before that fix get uploaded verbatim and must be
-        # caught here to prevent session metadata corruption.
-        if ts < MIN_VALID_TS_MS:
-            rejected += 1
-            log.debug("ingest sessionId=%s rejecting row ts=%d (pre-2020)",
-                      session_id, ts)
-            continue
-        doc: dict[str, Any] = {
-            "sessionId":  session_id,
-            "deviceId":   dev,
-            "trackerId":  tracker_id,
-            "firmware":   firmware,
-            "timestampMs": ts,
-            "uSvPerHour": usv,
-            "cps":        cps,
-            "latitude":   lat,
-            "longitude":  lng,
-        }
-        # Store extended telemetry only when the firmware actually sent them
-        # (non-None). This keeps documents from pre-0.3.0 uploads lean.
-        if speed_kph   is not None: doc["speedKph"]   = speed_kph
-        if bearing_deg is not None: doc["bearingDeg"] = bearing_deg
-        if altitude_m  is not None: doc["altitudeM"]  = altitude_m
-        if hdop_val    is not None: doc["hdop"]        = hdop_val
-        if event_tag   is not None: doc["event"]       = event_tag
-        if accuracy_m  is not None: doc["accuracyM"]   = accuracy_m
-        if lat is not None and lng is not None and not (lat == 0.0 and lng == 0.0):
-            doc["loc"] = {"type": "Point", "coordinates": [lng, lat]}
-        out.append(doc)
-    if rejected:
-        log.warning("ingest sessionId=%s rejected %d pre-2020 row(s) (old firmware artifact)",
-                    session_id, rejected)
+            if ts is None:
+                rejected += 1
+                continue
+            # Server-side sanity gate: reject pre-2020 timestamps.  The firmware
+            # now filters these out before writing to SD card, but old session
+            # files created before that fix get uploaded verbatim and must be
+            # caught here to prevent session metadata corruption.
+            if ts < MIN_VALID_TS_MS:
+                rejected += 1
+                log.debug("ingest sessionId=%s rejecting row ts=%d (pre-2020)",
+                          session_id, ts)
+                continue
+            doc: dict[str, Any] = {
+                "sessionId":  session_id,
+                "deviceId":   dev,
+                "trackerId":  tracker_id,
+                "firmware":   firmware,
+                "timestampMs": ts,
+                "uSvPerHour": usv,
+                "cps":        cps,
+                "latitude":   lat,
+                "longitude":  lng,
+            }
+            # Store extended telemetry only when the firmware actually sent them
+            # (non-None). This keeps documents from pre-0.3.0 uploads lean.
+            if speed_kph   is not None: doc["speedKph"]   = speed_kph
+            if bearing_deg is not None: doc["bearingDeg"] = bearing_deg
+            if altitude_m  is not None: doc["altitudeM"]  = altitude_m
+            if hdop_val    is not None: doc["hdop"]        = hdop_val
+            if event_tag   is not None: doc["event"]       = event_tag
+            if accuracy_m  is not None: doc["accuracyM"]   = accuracy_m
+            if lat is not None and lng is not None and not (lat == 0.0 and lng == 0.0):
+                doc["loc"] = {"type": "Point", "coordinates": [lng, lat]}
+            out.append(doc)
+    except csv.Error as e:
+        log.warning("ingest sessionId=%s CSV parse error: %s", session_id, e)
+        raise HTTPException(status_code=400, detail=f"Invalid CSV data: {e}")
     return out, rejected
 
 
-def _bulk_insert(coll, docs: list[dict[str, Any]]) -> tuple[int, int]:
-    """Insert in batches with ordered=False so duplicates don't abort.
-    Returns (inserted, duplicate_skipped)."""
-    inserted = 0
-    duplicates = 0
-    for i in range(0, len(docs), INGEST_BATCH_SIZE):
-        batch = docs[i:i + INGEST_BATCH_SIZE]
-        try:
-            res = coll.insert_many(batch, ordered=False)
-            inserted += len(res.inserted_ids)
-        except BulkWriteError as bwe:
-            wr_err = bwe.details.get("writeErrors", [])
-            for e in wr_err:
-                if e.get("code") == 11000:  # duplicate key
-                    duplicates += 1
-                else:
-                    log.warning("bulk-write error code=%s: %s", e.get("code"), e.get("errmsg"))
-            inserted += bwe.details.get("nInserted", len(batch) - len(wr_err))
-    return inserted, duplicates
-
-
-def _bulk_upsert_merge(coll, docs: list[dict[str, Any]]) -> tuple[int, int, int]:
-    """Upsert by {sessionId, timestampMs}, merging any new fields into existing
-    docs via $set / $setOnInsert. Used by /ingest/csv-merge so that re-imports
-    of historical data (e.g. the RadiaCode track files) can add new columns
-    like `accuracyM` to rows that were ingested before the schema knew about
-    them. Returns (inserted, modified, matched_unchanged)."""
-    from pymongo import UpdateOne
-    inserted  = 0
-    modified  = 0
-    unchanged = 0
-    # Fields that should only be written once (immutable identity / source-of-truth):
-    immutable_keys = {"sessionId", "timestampMs", "deviceId", "trackerId",
-                       "firmware", "loc"}
-    for i in range(0, len(docs), INGEST_BATCH_SIZE):
-        batch = docs[i:i + INGEST_BATCH_SIZE]
-        ops = []
-        for d in batch:
-            filt = {"sessionId": d["sessionId"], "timestampMs": d["timestampMs"]}
-            set_doc = {k: v for k, v in d.items() if k not in immutable_keys}
-            set_on_insert = {k: v for k, v in d.items() if k in immutable_keys}
-            update = {}
-            if set_doc:        update["$set"]         = set_doc
-            if set_on_insert:  update["$setOnInsert"] = set_on_insert
-            ops.append(UpdateOne(filt, update, upsert=True))
-        if not ops:
-            continue
-        res = coll.bulk_write(ops, ordered=False)
-        inserted  += res.upserted_count
-        modified  += res.modified_count
-        unchanged += res.matched_count - res.modified_count
-    return inserted, modified, unchanged
-
-
-# ---------- routes ----------------------------------------------------------
-
 @app.get("/health")
 def health():
+    """Liveness + Mongo reachability.
+
+    200 when the Mongo ping succeeds, 503 when it does not. The compose
+    healthcheck (curl -f on this route) and deploy.ps1 both gate on it, so a
+    degraded server must report 503, not a soft 200.
+    """
     try:
         app.state.mongo.admin.command("ping")
         mongo_ok = True
     except PyMongoError as e:
-        log.error("mongo ping failed: %s", e)
+        log.warning("health: mongo ping failed: %s", e)
         mongo_ok = False
-    return {
-        "status":   "healthy" if mongo_ok else "degraded",
-        "mongo":    mongo_ok,
-        "version":  API_VERSION,
-    }
+    return JSONResponse(
+        content={
+            "status":  "healthy" if mongo_ok else "degraded",
+            "mongo":   mongo_ok,
+            "version": API_VERSION,
+        },
+        status_code=200 if mongo_ok else 503,
+    )
 
 
 @app.get("/info")
 def info():
-    samples = app.state.samples
-    sessions = app.state.sessions
+    """Build info, collection names, and live document counts."""
     return {
-        "version":  API_VERSION,
+        "name":    "vega-tracker-ingest",
+        "version": API_VERSION,
         "mongo": {
-            "uri":       _redact_mongo_uri(MONGO_URI),
-            "db":        MONGO_DB,
-            "samples":   samples.estimated_document_count(),
-            "sessions":  sessions.estimated_document_count(),
-            "collections": [SAMPLES_COLL, SESSIONS_COLL],
+            "uri":         _redact_mongo_uri(MONGO_URI),
+            "db":          MONGO_DB,
+            "collections": [SAMPLES_COLL, SESSIONS_COLL, UPLOADS_COLL, BACKUPS_COLL],
+            "samples":     app.state.samples.estimated_document_count(),
+            "sessions":    app.state.sessions.estimated_document_count(),
         },
         "limits": {
             "max_body_bytes":    MAX_BODY_BYTES,
             "ingest_batch_size": INGEST_BATCH_SIZE,
+            "export_max_rows":   EXPORT_MAX_ROWS,
         },
     }
 
 
 @app.get("/sessions")
-def list_sessions(limit: int = 200, include_deleted: bool = Query(default=False)):
-    """List ingested sessions, newest first.
+def list_sessions(
+    limit: int           = Query(default=500, ge=1, le=5000),
+    skip: int            = Query(default=0, ge=0),
+    include_deleted: bool = Query(default=False),
+):
+    """List ingested sessions, newest first.  Response: {sessions, total}.
 
-    sizeBytes is an estimate: samples * avg_doc_storageSize from collStats.
-    Accurate to within ~10% for typical sessions.
+    sizeBytes is an estimate: samples * avg storageSize per sample from
+    collStats. Accurate to within ~10% for typical sessions.
 
     By default, soft-deleted sessions (deletedAt is set) are excluded.
     Pass ?include_deleted=true to include them.
     """
     try:
-        cs = app.state.samples.command("collStats", "tracker_samples")
+        cs = app.state.samples.command("collStats", SAMPLES_COLL)
         avg_bytes = (cs["storageSize"] / cs["count"]) if cs.get("count") else 150.0
     except Exception:
         avg_bytes = 150.0  # fallback estimate
 
     # deletedAt=None matches both missing field and explicit null — both mean "active".
     filter_q = {} if include_deleted else {"deletedAt": None}
-    cur = app.state.sessions.find(filter_q, sort=[("lastIngestMs", -1)], limit=limit)
+    total = app.state.sessions.count_documents(filter_q)
+    cur = app.state.sessions.find(filter_q, sort=[("lastIngestMs", -1)],
+                                  skip=skip, limit=limit)
     result = []
     for d in cur:
         samples = d.get("samples") or 0
@@ -438,7 +415,104 @@ def list_sessions(limit: int = 200, include_deleted: bool = Query(default=False)
             "deletedAt":     d.get("deletedAt"),
             "deletedBy":     d.get("deletedBy"),
         })
-    return result
+    return {"sessions": result, "total": total}
+
+
+@app.get("/sessions/area")
+def sessions_in_area(
+    min_lat: float = Query(..., description="South boundary (decimal degrees)"),
+    max_lat: float = Query(..., description="North boundary (decimal degrees)"),
+    min_lng: float = Query(..., description="West boundary (decimal degrees)"),
+    max_lng: float = Query(..., description="East boundary (decimal degrees)"),
+):
+    """Return all GPS samples inside a bounding box, grouped by session.
+
+    Uses the 2dsphere index on `loc` so this runs in sub-second time regardless
+    of total collection size.  Only returns samples that have a valid GPS fix
+    (loc field present); event rows without coordinates are excluded.
+
+    Response: { sessions: [{sessionId, meta, rows}], totalSamples }
+    Each row has the same fields as the /sessions/{id} endpoint so the viewer
+    can pass them straight through compactRows().
+    """
+    # GeoJSON polygon for the bbox.  For 2dsphere $geoWithin MongoDB picks the
+    # smaller interior automatically so winding order doesn't matter for small areas.
+    bbox_polygon = {
+        "type": "Polygon",
+        "coordinates": [[
+            [min_lng, min_lat],
+            [min_lng, max_lat],
+            [max_lng, max_lat],
+            [max_lng, min_lat],
+            [min_lng, min_lat],
+        ]],
+    }
+
+    # Only pull the fields compactRows() and the viewer need — keeps the
+    # response small and the 2dsphere index hot.
+    projection = {
+        "_id": 0,
+        "sessionId": 1,
+        "timestampMs": 1,
+        "latitude": 1,
+        "longitude": 1,
+        "uSvPerHour": 1,
+        "cps": 1,
+        "speedKph": 1,
+        "bearingDeg": 1,
+        "altitudeM": 1,
+        "hdop": 1,
+        "accuracyM": 1,
+    }
+
+    cursor = app.state.samples.find(
+        {"loc": {"$geoWithin": {"$geometry": bbox_polygon}}},
+        projection=projection,
+        sort=[("sessionId", 1), ("timestampMs", 1)],
+    )
+
+    # Group rows by sessionId.
+    by_session: dict[str, list] = {}
+    total = 0
+    for doc in cursor:
+        sid = doc.get("sessionId", "")
+        if sid not in by_session:
+            by_session[sid] = []
+        by_session[sid].append(doc)
+        total += 1
+
+    if not by_session:
+        return {"sessions": [], "totalSamples": 0,
+                "bbox": {"minLat": min_lat, "maxLat": max_lat,
+                         "minLng": min_lng, "maxLng": max_lng}}
+
+    # Fetch session metadata for every matched session in one query.
+    session_ids = list(by_session.keys())
+    session_metas: dict[str, dict] = {}
+    for sm in app.state.sessions.find(
+        {"sessionId": {"$in": session_ids}},
+        projection={"_id": 0},
+    ):
+        sm_id = sm.get("sessionId")
+        if sm_id:
+            session_metas[sm_id] = sm
+
+    # Build response, ordered by earliest sample in each session.
+    result_sessions = []
+    for sid, rows in by_session.items():
+        result_sessions.append({
+            "sessionId": sid,
+            "meta": session_metas.get(sid, {"sessionId": sid}),
+            "rows": rows,
+        })
+    result_sessions.sort(key=lambda x: x["rows"][0]["timestampMs"] if x["rows"] else 0)
+
+    return {
+        "sessions": result_sessions,
+        "totalSamples": total,
+        "bbox": {"minLat": min_lat, "maxLat": max_lat,
+                 "minLng": min_lng, "maxLng": max_lng},
+    }
 
 
 @app.get("/sessions/{session_id}")
@@ -599,6 +673,68 @@ def _has_gps(row: dict) -> bool:
         lat is not None and lng is not None
         and not (lat == 0 and lng == 0)
     )
+
+
+def _bulk_insert(collection, docs):
+    """Insert a list of documents and return (inserted, duplicates).
+
+    Duplicate-key writes (code 11000 on the (sessionId, timestampMs) unique
+    index) are idempotent re-uploads, NOT errors: they are counted as
+    duplicates so the response stays honest and session sample counts never
+    double. Any other failure propagates so the handler returns 500 and the
+    device retries — a 2xx is the only signal that the data is durably
+    stored, and the firmware deletes its file only after a 2xx.
+    """
+    if not docs:
+        return 0, 0
+    try:
+        # ordered=False: every doc is attempted independently, so a re-upload
+        # reports exactly which rows were new vs duplicate instead of
+        # failing the whole batch on the first duplicate.
+        result = collection.insert_many(docs, ordered=False)
+        return len(result.inserted_ids), 0
+    except BulkWriteError as bwe:
+        # pymongo 4: details is the raw write result; writeErrors is the list
+        # of per-doc errors ({'index': n, 'code': 11000, ...}).
+        dups = 0
+        for err in bwe.details.get("writeErrors", []):
+            if (err.get("code") or 0) != 11000:
+                raise
+            dups += 1
+        return len(docs) - dups, dups
+
+
+def _bulk_upsert_merge(coll, docs: list[dict[str, Any]]) -> tuple[int, int, int]:
+    """Upsert by {sessionId, timestampMs}, merging any new fields into existing
+    docs via $set / $setOnInsert. Used by /ingest/csv-merge so that re-imports
+    of historical data (e.g. the RadiaCode track files) can add new columns
+    like `accuracyM` to rows that were ingested before the schema knew about
+    them. Returns (inserted, modified, matched_unchanged)."""
+    from pymongo import UpdateOne
+    inserted  = 0
+    modified  = 0
+    unchanged = 0
+    # Fields that should only be written once (immutable identity / source-of-truth):
+    immutable_keys = {"sessionId", "timestampMs", "deviceId", "trackerId",
+                      "firmware", "loc"}
+    for i in range(0, len(docs), INGEST_BATCH_SIZE):
+        batch = docs[i:i + INGEST_BATCH_SIZE]
+        ops = []
+        for d in batch:
+            filt = {"sessionId": d["sessionId"], "timestampMs": d["timestampMs"]}
+            set_doc = {k: v for k, v in d.items() if k not in immutable_keys}
+            set_on_insert = {k: v for k, v in d.items() if k in immutable_keys}
+            update = {}
+            if set_doc:        update["$set"]         = set_doc
+            if set_on_insert:  update["$setOnInsert"] = set_on_insert
+            ops.append(UpdateOne(filt, update, upsert=True))
+        if not ops:
+            continue
+        res = coll.bulk_write(ops, ordered=False)
+        inserted  += res.upserted_count
+        modified  += res.modified_count
+        unchanged += res.matched_count - res.modified_count
+    return inserted, modified, unchanged
 
 
 def _session_to_radiacode_txt(rows: list[dict], gps_only: bool = False) -> str:
@@ -841,53 +977,59 @@ def merge_sessions(body: MergeBody):
     samples = app.state.samples
     sessions = app.state.sessions
 
-    # Ensure target session exists (upsert a skeleton if needed).
-    now_ms = int(time.time() * 1000)
-    sessions.update_one(
-        {"sessionId": body.targetId},
-        {"$setOnInsert": {
-            "sessionId":     body.targetId,
-            "createdMs":     now_ms,
-            "lastIngestMs":  now_ms,
-            "firstIngestMs": now_ms,
-        }},
-        upsert=True,
-    )
-
-    total_moved = 0
-    for src_id in body.sourceIds:
-        src_rows = list(samples.find({"sessionId": src_id}, projection={"_id": 0}))
-        # Re-tag all rows with targetId.
-        for r in src_rows:
-            r["sessionId"] = body.targetId
-        inserted, _ = _bulk_insert(samples, src_rows)
-        total_moved += inserted
-        # Delete source samples + session record.
-        samples.delete_many({"sessionId": src_id})
-        sessions.delete_one({"sessionId": src_id})
-        log.info("merge: moved %d rows from %s -> %s", inserted, src_id, body.targetId)
-
-    # Recompute target session metadata.
-    agg = list(samples.aggregate([
-        {"$match":  {"sessionId": body.targetId, "timestampMs": {"$gte": MIN_VALID_TS_MS}}},
-        {"$group":  {
-            "_id":       None,
-            "count":     {"$sum": 1},
-            "firstTsMs": {"$min": "$timestampMs"},
-            "lastTsMs":  {"$max": "$timestampMs"},
-        }},
-    ]))
-    if agg:
-        r = agg[0]
+    try:
+        # Ensure target session exists (upsert a skeleton if needed).
+        now_ms = int(time.time() * 1000)
         sessions.update_one(
             {"sessionId": body.targetId},
-            {"$set": {
-                "samples":      r["count"],
-                "firstTsMs":    r["firstTsMs"],
-                "lastTsMs":     r["lastTsMs"],
-                "lastIngestMs": now_ms,
+            {"$setOnInsert": {
+                "sessionId":     body.targetId,
+                "createdMs":     now_ms,
+                "lastIngestMs":  now_ms,
+                "firstIngestMs": now_ms,
             }},
+            upsert=True,
         )
+
+        total_moved = 0
+        for src_id in body.sourceIds:
+            src_rows = list(samples.find({"sessionId": src_id}, projection={"_id": 0}))
+            # Re-tag all rows with targetId.
+            for r in src_rows:
+                r["sessionId"] = body.targetId
+            inserted, _ = _bulk_insert(samples, src_rows)
+            total_moved += inserted
+            # Delete source samples + session record.
+            samples.delete_many({"sessionId": src_id})
+            sessions.delete_one({"sessionId": src_id})
+            log.info("merge: moved %d rows from %s -> %s", inserted, src_id, body.targetId)
+
+        # Recompute target session metadata.
+        agg = list(samples.aggregate([
+            {"$match":  {"sessionId": body.targetId, "timestampMs": {"$gte": MIN_VALID_TS_MS}}},
+            {"$group":  {
+                "_id":       None,
+                "count":     {"$sum": 1},
+                "firstTsMs": {"$min": "$timestampMs"},
+                "lastTsMs":  {"$max": "$timestampMs"},
+            }},
+        ]))
+        if agg:
+            r = agg[0]
+            sessions.update_one(
+                {"sessionId": body.targetId},
+                {"$set": {
+                    "samples":      r["count"],
+                    "firstTsMs":    r["firstTsMs"],
+                    "lastTsMs":     r["lastTsMs"],
+                    "lastIngestMs": now_ms,
+                }},
+            )
+    except HTTPException:
+        raise  # 400 validation errors must stay client errors, not 500s
+    except Exception as e:
+        log.error("merge-sessions FAILED: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"internal error: {e}")
 
     log.info("merge complete: target=%s sources=%s totalMoved=%d",
              body.targetId, body.sourceIds, total_moved)
@@ -1582,72 +1724,90 @@ async def ingest_csv(
     log.info("ingest request sessionId=%s tracker=%s firmware=%s bodyBytes=%d ip=%s user=%s",
              x_session_id, x_tracker_id, x_firmware, len(body), client_ip, username or "(none)")
 
-    text = body.decode("utf-8", errors="replace")
-    docs, rejected = _parse_csv(text, x_session_id, x_device_id, x_tracker_id, x_firmware)
-
-    if not docs and rejected > 0:
-        log.error("ingest sessionId=%s ALL %d rows rejected (pre-2020 timestamps); "
-                  "old firmware artifact -- not inserting", x_session_id, rejected)
-        raise HTTPException(
-            status_code=400,
-            detail=f"All {rejected} rows have pre-2020 timestamps (old firmware artifact). "
-                   "Flash updated firmware to stop recording millis()-since-boot as timestamps.",
-        )
-    if not docs:
-        raise HTTPException(status_code=400, detail="no parseable rows")
-
-    inserted, duplicates = _bulk_insert(app.state.samples, docs)
-
-    now_ms = int(time.time() * 1000)
-    # first_ts/last_ts computed ONLY from the validated (>= MIN_VALID_TS_MS) docs.
-    # This is critical: using $min on raw rows lets one bad row permanently
-    # corrupt firstTsMs for the session.
-    first_ts = min(d["timestampMs"] for d in docs)
-    last_ts  = max(d["timestampMs"] for d in docs)
-
-    # v0.5.1: derive deviceId from CSV row data, not just the X-Device-Id header.
-    # Firmware never sends that header -- it embeds the RadiaCode MAC in row
-    # column 6 -- so the session-metadata deviceId was always null. Pick the
-    # last non-empty value (rows are in timestamp order within the upload).
-    derived_device_id = x_device_id
-    for d in reversed(docs):
-        v = d.get("deviceId")
-        if v:
-            derived_device_id = v
-            break
-
-    # Upsert session metadata.  Use $min/$max only over valid timestamps.
-    # NOTE: firstTsMs uses $min which means a subsequent upload with a smaller
-    # but still-valid timestamp is fine (correct early boundary).  But we
-    # must never let pre-2020 values reach here -- filtered above.
-    app.state.sessions.update_one(
-        {"sessionId": x_session_id},
-        {
-            "$set": {
-                "sessionId":     x_session_id,
-                "deviceId":      derived_device_id,
-                "trackerId":     x_tracker_id,
-                "firmware":      x_firmware,
-                "lastIngestMs":  now_ms,
-            },
-            "$min": {"firstTsMs": first_ts, "firstIngestMs": now_ms},
-            "$max": {"lastTsMs":  last_ts},
-            "$inc": {"samples":  inserted, "uploads": 1},
-            "$setOnInsert": {"createdMs": now_ms},
-        },
-        upsert=True,
-    )
-
-    log.info(
-        "ingest OK sessionId=%s received=%d valid=%d rejected=%d inserted=%d dup=%d "
-        "firstTsMs=%d lastTsMs=%d ip=%s user=%s durationMs=%d",
-        x_session_id, len(docs) + rejected, len(docs), rejected,
-        inserted, duplicates, first_ts, last_ts, client_ip, username or "(none)",
-        int((time.monotonic() - _t0) * 1000),
-    )
-
-    # Record one document per upload call for the upload-history UI.
     try:
+        text = body.decode("utf-8", errors="replace")
+        docs, rejected = _parse_csv(text, x_session_id, x_device_id, x_tracker_id, x_firmware)
+
+        if not docs and rejected > 0:
+            log.error("ingest sessionId=%s ALL %d rows rejected (pre-2020 timestamps); "
+                      "old firmware artifact -- not inserting", x_session_id, rejected)
+            raise HTTPException(
+                status_code=400,
+                detail=f"All {rejected} rows have pre-2020 timestamps (old firmware artifact). "
+                       "Flash updated firmware to stop recording millis()-since-boot as timestamps.",
+            )
+        if not docs and rejected == 0:
+            # Header-only upload accepted: valid request with no data rows
+            # (e.g., a day file that was created but had zero GPS samples).
+            # This prevents the device from looping forever on a stuck 107-byte file.
+            log.info("ingest sessionId=%s header-only upload (0 data rows)", x_session_id)
+            return JSONResponse(
+                content={
+                    "sessionId": x_session_id,
+                    "received": 0,
+                    "valid": 0,
+                    "rejected": 0,
+                    "inserted": 0,
+                    "duplicates": 0,
+                    "firstTsMs": 0,
+                    "lastTsMs": 0,
+                },
+                status_code=200,
+            )
+        if not docs:
+            raise HTTPException(status_code=400, detail="no parseable rows")
+
+        inserted, duplicates = _bulk_insert(app.state.samples, docs)
+
+        now_ms = int(time.time() * 1000)
+        # first_ts/last_ts computed ONLY from the validated (>= MIN_VALID_TS_MS) docs.
+        # This is critical: using $min on raw rows lets one bad row permanently
+        # corrupt firstTsMs for the session.
+        first_ts = min(d["timestampMs"] for d in docs)
+        last_ts  = max(d["timestampMs"] for d in docs)
+
+        # v0.5.1: derive deviceId from CSV row data, not just the X-Device-Id header.
+        # Firmware never sends that header -- it embeds the RadiaCode MAC in row
+        # column 6 -- so the session-metadata deviceId was always null. Pick the
+        # last non-empty value (rows are in timestamp order within the upload).
+        derived_device_id = x_device_id
+        for d in reversed(docs):
+            v = d.get("deviceId")
+            if v:
+                derived_device_id = v
+                break
+
+        # Upsert session metadata.  Use $min/$max only over valid timestamps.
+        # NOTE: firstTsMs uses $min which means a subsequent upload with a smaller
+        # but still-valid timestamp is fine (correct early boundary).  But we
+        # must never let pre-2020 values reach here -- filtered above.
+        app.state.sessions.update_one(
+            {"sessionId": x_session_id},
+            {
+                "$set": {
+                    "sessionId":     x_session_id,
+                    "deviceId":      derived_device_id,
+                    "trackerId":     x_tracker_id,
+                    "firmware":      x_firmware,
+                    "lastIngestMs":  now_ms,
+                },
+                "$min": {"firstTsMs": first_ts, "firstIngestMs": now_ms},
+                "$max": {"lastTsMs":  last_ts},
+                "$inc": {"samples":  inserted, "uploads": 1},
+                "$setOnInsert": {"createdMs": now_ms},
+            },
+            upsert=True,
+        )
+
+        log.info(
+            "ingest OK sessionId=%s received=%d valid=%d rejected=%d inserted=%d dup=%d "
+            "firstTsMs=%d lastTsMs=%d ip=%s user=%s durationMs=%d",
+            x_session_id, len(docs) + rejected, len(docs), rejected,
+            inserted, duplicates, first_ts, last_ts, client_ip, username or "(none)",
+            int((time.monotonic() - _t0) * 1000),
+        )
+
+        # Record one document per upload call for the upload-history UI.
         app.state.uploads.insert_one({
             "sessionId":    x_session_id,
             "receivedAt":   now_ms,
@@ -1664,19 +1824,22 @@ async def ingest_csv(
             "durationMs":   int((time.monotonic() - _t0) * 1000),
             "httpStatus":   200,
         })
-    except Exception as _ue:
-        log.warning("uploads: failed to record upload log for %s: %s", x_session_id, _ue)
 
-    return JSONResponse({
-        "sessionId":   x_session_id,
-        "received":    len(docs) + rejected,
-        "valid":       len(docs),
-        "rejected":    rejected,
-        "inserted":    inserted,
-        "duplicates":  duplicates,
-        "firstTsMs":   first_ts,
-        "lastTsMs":    last_ts,
-    })
+        return JSONResponse({
+            "sessionId":   x_session_id,
+            "received":    len(docs) + rejected,
+            "valid":       len(docs),
+            "rejected":    rejected,
+            "inserted":    inserted,
+            "duplicates":  duplicates,
+            "firstTsMs":   first_ts,
+            "lastTsMs":    last_ts,
+        })
+    except HTTPException:
+        raise  # 400/413 payload errors must stay client errors, not 500s
+    except Exception as _e:
+        log.error("ingest sessionId=%s FAILED: %s", x_session_id, _e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"internal error: {_e}")
 
 
 @app.post("/ingest/csv-merge")
@@ -1709,12 +1872,29 @@ async def ingest_csv_merge(
     log.info("ingest-merge sessionId=%s tracker=%s firmware=%s bodyBytes=%d",
              x_session_id, x_tracker_id, x_firmware, len(body))
 
-    text = body.decode("utf-8", errors="replace")
-    docs, rejected = _parse_csv(text, x_session_id, x_device_id, x_tracker_id, x_firmware)
-    if not docs:
-        raise HTTPException(status_code=400, detail="no parseable rows")
+    try:
+        text = body.decode("utf-8", errors="replace")
+        docs, rejected = _parse_csv(text, x_session_id, x_device_id, x_tracker_id, x_firmware)
+        if not docs and rejected == 0:
+            # Header-only upload: valid request with no data rows.
+            log.info("ingest-merge sessionId=%s header-only upload (0 data rows)", x_session_id)
+            return JSONResponse({
+                "sessionId":  x_session_id,
+                "valid":      0,
+                "rejected":   0,
+                "inserted":   0,
+                "modified":   0,
+                "unchanged":  0,
+            })
+        if not docs:
+            raise HTTPException(status_code=400, detail="no parseable rows")
 
-    inserted, modified, unchanged = _bulk_upsert_merge(app.state.samples, docs)
+        inserted, modified, unchanged = _bulk_upsert_merge(app.state.samples, docs)
+    except HTTPException:
+        raise  # 400 payload errors must stay client errors, not 500s
+    except Exception as e:
+        log.error("ingest-merge sessionId=%s FAILED: %s", x_session_id, e, exc_info=True)
+        raise HTTPException(status_code=500, detail=f"internal error: {e}")
 
     log.info("ingest-merge OK sessionId=%s valid=%d inserted=%d modified=%d unchanged=%d rejected=%d",
              x_session_id, len(docs), inserted, modified, unchanged, rejected)
@@ -1751,7 +1931,7 @@ def export_time_range_preview(startMs: int, endMs: int, gpsOnly: bool = False):
     # Rough byte estimate: ~90 bytes per row for radiacode_txt, ~75 for CSV.
     # Use the larger estimate so we don't surprise users with an unexpected zip.
     est_bytes = count * 90
-    max_bytes = 10 * 1024 * 1024  # 10 MB
+    max_bytes = 9 * 1024 * 1024  # 9 MB
     # Ceiling division for number of files.
     est_files = max(1, (est_bytes + max_bytes - 1) // max_bytes)
 
@@ -1768,13 +1948,13 @@ def export_time_range_preview(startMs: int, endMs: int, gpsOnly: bool = False):
 @app.post("/export/time-range")
 async def export_time_range(request: Request):
     """Export all samples within a time window, auto-splitting into a ZIP when
-    any single file would exceed maxBytesPerFile (default 10 MB).
+    any single file would exceed maxBytesPerFile (default 9 MB).
 
     Request body (JSON):
         startMs          int   Unix epoch ms, inclusive
         endMs            int   Unix epoch ms, inclusive
         format           str   radiacode_txt | radiacode | internal
-        maxBytesPerFile  int   optional, default 10485760 (10 MB)
+        maxBytesPerFile  int   optional, default 9437184 (9 MB)
 
     Response:
         text/plain       — single .txt file when format=radiacode_txt and data <= limit
@@ -1785,7 +1965,7 @@ async def export_time_range(request: Request):
     start_ms  = body.get("startMs")
     end_ms    = body.get("endMs")
     fmt       = body.get("format", "radiacode_txt").lower()
-    max_bytes = int(body.get("maxBytesPerFile", 10 * 1024 * 1024))
+    max_bytes = int(body.get("maxBytesPerFile", 9 * 1024 * 1024))
     ui_label  = body.get("label", "")  # optional human-readable range name for filename
     gps_only  = bool(body.get("gpsOnly", False))
 
@@ -1797,11 +1977,20 @@ async def export_time_range(request: Request):
         raise HTTPException(status_code=400,
                             detail=f"unknown format {fmt!r}; use radiacode_txt, radiacode_trk, radiacode, or internal")
 
+    # Hard cap: fetch at most EXPORT_MAX_ROWS + 1 so a wide range cannot
+    # exhaust container memory (rows + content string + zip all live in RAM).
     rows = list(app.state.samples.find(
         {"timestampMs": {"$gte": start_ms, "$lte": end_ms}},
         sort=[("timestampMs", 1)],
         projection={"_id": 0},
+        limit=EXPORT_MAX_ROWS + 1,
     ))
+    if len(rows) > EXPORT_MAX_ROWS:
+        raise HTTPException(
+            status_code=413,
+            detail=f"range contains more than {EXPORT_MAX_ROWS} rows; "
+                   "narrow the window (check /export/time-range/preview first)",
+        )
 
     # Filter to GPS-locked rows client-requested (or always for radiacode_txt/radiacode_trk
     # which require coordinates to be meaningful).
@@ -1879,3 +2068,547 @@ async def export_time_range(request: Request):
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{zip_filename}"'},
     )
+
+
+# ===========================================================================
+# Explorer: Missions CRUD
+# ===========================================================================
+
+class MissionCreate(BaseModel):
+    name: str
+    polygon: dict          # GeoJSON Polygon
+    centroid: list         # [lng, lat]
+    areaKm2: float = 0.0
+    score: float = 0.0
+    notes: str = ""
+
+
+class MissionUpdate(BaseModel):
+    name: str | None = None
+    status: str | None = None   # planning | active | complete | abandoned
+    notes: str | None = None
+    polygon: dict | None = None
+
+
+@app.get("/missions")
+def list_missions(status: str | None = Query(default=None)):
+    """List all exploration missions, newest first."""
+    filt: dict = {}
+    if status:
+        filt["status"] = status
+    cur = app.state.missions.find(filt, projection={"_id": 0},
+                                   sort=[("createdAt", -1)])
+    return list(cur)
+
+
+@app.post("/missions", status_code=201)
+def create_mission(body: MissionCreate):
+    """Create a new exploration mission from a committed zone."""
+    now_ms = int(time.time() * 1000)
+    doc = {
+        "missionId":   str(uuid.uuid4()),
+        "name":        body.name.strip() or "Untitled Mission",
+        "status":      "planning",
+        "polygon":     body.polygon,
+        "centroid":    body.centroid,
+        "areaKm2":     body.areaKm2,
+        "score":       body.score,
+        "notes":       body.notes,
+        "createdAt":   now_ms,
+        "activatedAt": None,
+        "completedAt": None,
+    }
+    app.state.missions.insert_one(doc)
+    doc.pop("_id", None)
+    log.info("mission created: %s [%s]", doc["missionId"], doc["name"])
+    return doc
+
+
+@app.patch("/missions/{mission_id}")
+def update_mission(mission_id: str, body: MissionUpdate):
+    """Update mission name, status, notes, or polygon."""
+    now_ms  = int(time.time() * 1000)
+    updates: dict = {}
+    if body.name is not None:
+        updates["name"] = body.name.strip()
+    if body.status is not None:
+        allowed = {"planning", "active", "complete", "abandoned"}
+        if body.status not in allowed:
+            raise HTTPException(400, detail=f"status must be one of {sorted(allowed)}")
+        updates["status"] = body.status
+        if body.status == "active":
+            updates["activatedAt"] = now_ms
+        elif body.status in ("complete", "abandoned"):
+            updates["completedAt"] = now_ms
+    if body.notes is not None:
+        updates["notes"] = body.notes
+    if body.polygon is not None:
+        updates["polygon"] = body.polygon
+        coords = body.polygon.get("coordinates", [[]])[0]
+        if coords:
+            lngs_c = [c[0] for c in coords]
+            lats_c = [c[1] for c in coords]
+            updates["centroid"] = [
+                round(sum(lngs_c) / len(lngs_c), 6),
+                round(sum(lats_c) / len(lats_c), 6),
+            ]
+    if not updates:
+        raise HTTPException(400, detail="no fields to update")
+    result = app.state.missions.update_one({"missionId": mission_id}, {"$set": updates})
+    if result.matched_count == 0:
+        raise HTTPException(404, detail=f"mission {mission_id!r} not found")
+    doc = app.state.missions.find_one({"missionId": mission_id}, projection={"_id": 0})
+    return doc
+
+
+@app.delete("/missions/{mission_id}")
+def delete_mission(mission_id: str):
+    """Permanently delete a mission."""
+    result = app.state.missions.delete_one({"missionId": mission_id})
+    if result.deleted_count == 0:
+        raise HTTPException(404, detail=f"mission {mission_id!r} not found")
+    return {"deleted": mission_id}
+
+
+@app.get("/missions/{mission_id}/coverage-grid")
+def mission_coverage_grid(
+    mission_id:    str,
+    grid_deg:      float = Query(default=0.0005),  # ~50 m cells
+    max_speed_kph: float = Query(default=50.0),
+    max_hdop:      float = Query(default=3.0),
+    max_accuracy_m: float = Query(default=15.0),
+    max_cells:     int   = Query(default=8000),
+):
+    """Return a coarse grid of covered cells inside the mission polygon bbox.
+
+    Each cell has the lat/lng centroid, average dose rate, and sample count.
+    Used by the live-tracking map to show historical coverage without
+    streaming millions of individual sample points to the browser.
+    """
+    mission = app.state.missions.find_one({"missionId": mission_id}, projection={"_id": 0})
+    if not mission:
+        raise HTTPException(404, detail=f"mission {mission_id!r} not found")
+
+    coords = mission.get("polygon", {}).get("coordinates", [[]])[0]
+    if not coords:
+        return {"cells": [], "coveragePct": 0.0, "sampleCount": 0}
+
+    lngs = [c[0] for c in coords]
+    lats = [c[1] for c in coords]
+    min_lat, max_lat = min(lats), max(lats)
+    min_lng, max_lng = min(lngs), max(lngs)
+
+    quality_filter: dict = {
+        "latitude":  {"$exists": True, "$nin": [None, 0.0],
+                      "$gte": min_lat, "$lte": max_lat},
+        "longitude": {"$exists": True, "$nin": [None, 0.0],
+                      "$gte": min_lng, "$lte": max_lng},
+        "$and": [
+            {"$or": [{"speedKph":  {"$exists": False}}, {"speedKph":  None},
+                     {"speedKph":  {"$lte": max_speed_kph}}]},
+            {"$or": [{"hdop":      {"$exists": False}}, {"hdop":      None},
+                     {"hdop":      {"$lte": max_hdop}}]},
+            {"$or": [{"accuracyM": {"$exists": False}}, {"accuracyM": None},
+                     {"accuracyM": {"$lte": max_accuracy_m}}]},
+        ],
+    }
+
+    pipeline = [
+        {"$match": quality_filter},
+        {"$project": {
+            "lat_i": {"$toInt": {"$round": [{"$divide": ["$latitude",  grid_deg]}]}},
+            "lng_i": {"$toInt": {"$round": [{"$divide": ["$longitude", grid_deg]}]}},
+            "uSvPerHour": 1,
+        }},
+        {"$group": {
+            "_id":    {"lat_i": "$lat_i", "lng_i": "$lng_i"},
+            "count":  {"$sum": 1},
+            "avgDose": {"$avg": "$uSvPerHour"},
+        }},
+        {"$sort": {"count": -1}},
+        {"$limit": max_cells},
+        {"$project": {
+            "_id": 0,
+            "lat": {"$round": [{"$multiply": ["$_id.lat_i", grid_deg]}, 6]},
+            "lng": {"$round": [{"$multiply": ["$_id.lng_i", grid_deg]}, 6]},
+            "count": 1,
+            "avgDose": {"$ifNull": ["$avgDose", 0.0]},
+        }},
+    ]
+
+    cells = list(app.state.samples.aggregate(pipeline, allowDiskUse=True))
+
+    # coverage % vs total bbox cells
+    total_lat_cells = max(1, round((max_lat - min_lat) / grid_deg))
+    total_lng_cells = max(1, round((max_lng - min_lng) / grid_deg))
+    total_cells_count = total_lat_cells * total_lng_cells
+    coverage_pct = round(len(cells) / total_cells_count * 100, 1) if total_cells_count else 0.0
+
+    return {
+        "cells": cells,
+        "coveragePct": coverage_pct,
+        "sampleCount": sum(c["count"] for c in cells),
+        "gridDeg": grid_deg,
+    }
+
+
+# ===========================================================================
+# Explorer: Coverage Gap Analysis
+# ===========================================================================
+
+@app.get("/explorer/analyses/latest")
+def get_latest_analysis():
+    """Return the most recently stored coverage analysis result (for recall on page load)."""
+    doc = app.state.db[ANALYSES_COLL].find_one({}, sort=[("runAt", -1)], projection={"_id": 0})
+    if not doc:
+        raise HTTPException(404, detail="no analyses found")
+    return doc
+
+
+@app.get("/explorer/zone-coverage")
+def zone_coverage(
+    min_lat:       float = Query(...),
+    max_lat:       float = Query(...),
+    min_lng:       float = Query(...),
+    max_lng:       float = Query(...),
+    grid_deg:      float = Query(default=0.0005),
+    max_speed_kph: float = Query(default=50.0),
+    max_hdop:      float = Query(default=3.0),
+    max_accuracy_m: float = Query(default=15.0),
+    max_return:    int   = Query(default=8000),
+):
+    """Return covered/uncovered grid cells within a zone bounding box.
+
+    Covered cells contain ≥1 quality-filtered sample.  Uncovered cells are
+    empty grid squares in the same bounding box.  Used by the Explorer map
+    to show exactly what still needs to be visited inside a selected zone.
+    """
+    samples = app.state.samples
+    quality_filter: dict = {
+        "latitude":  {"$exists": True, "$nin": [None, 0.0],
+                      "$gte": min_lat, "$lte": max_lat},
+        "longitude": {"$exists": True, "$nin": [None, 0.0],
+                      "$gte": min_lng, "$lte": max_lng},
+        "$and": [
+            {"$or": [{"speedKph":  {"$exists": False}}, {"speedKph":  None},
+                     {"speedKph":  {"$lte": max_speed_kph}}]},
+            {"$or": [{"hdop":      {"$exists": False}}, {"hdop":      None},
+                     {"hdop":      {"$lte": max_hdop}}]},
+            {"$or": [{"accuracyM": {"$exists": False}}, {"accuracyM": None},
+                     {"accuracyM": {"$lte": max_accuracy_m}}]},
+        ],
+    }
+    pipeline = [
+        {"$match": quality_filter},
+        {"$project": {
+            "lat_i": {"$toInt": {"$round": [{"$divide": ["$latitude",  grid_deg]}]}},
+            "lng_i": {"$toInt": {"$round": [{"$divide": ["$longitude", grid_deg]}]}},
+        }},
+        {"$group": {"_id": {"lat_i": "$lat_i", "lng_i": "$lng_i"},
+                    "count": {"$sum": 1}}},
+        {"$project": {"_id": 0, "lat_i": "$_id.lat_i",
+                      "lng_i": "$_id.lng_i", "count": 1}},
+    ]
+    covered_docs = list(samples.aggregate(pipeline, allowDiskUse=True))
+    covered_set = {(d["lat_i"], d["lng_i"]) for d in covered_docs}
+
+    box_min_lat_i = int(_math.floor(min_lat / grid_deg))
+    box_max_lat_i = int(_math.ceil( max_lat / grid_deg))
+    box_min_lng_i = int(_math.floor(min_lng / grid_deg))
+    box_max_lng_i = int(_math.ceil( max_lng / grid_deg))
+    total_cells = (box_max_lat_i - box_min_lat_i + 1) * (box_max_lng_i - box_min_lng_i + 1)
+
+    uncovered: list[tuple[int, int]] = []
+    for lat_i in range(box_min_lat_i, box_max_lat_i + 1):
+        for lng_i in range(box_min_lng_i, box_max_lng_i + 1):
+            if (lat_i, lng_i) not in covered_set:
+                uncovered.append((lat_i, lng_i))
+
+    coverage_pct = round(len(covered_set) / total_cells * 100, 1) if total_cells else 0.0
+
+    def cell_ll(lat_i, lng_i):
+        return [round(lat_i * grid_deg, 6), round(lng_i * grid_deg, 6)]
+
+    return {
+        "coveredCells":   [cell_ll(d["lat_i"], d["lng_i"]) for d in covered_docs[:max_return]],
+        "uncoveredCells": [cell_ll(li, gi) for li, gi in uncovered[:max_return]],
+        "coveragePct":    coverage_pct,
+        "coveredCount":   len(covered_set),
+        "uncoveredCount": len(uncovered),
+        "totalCells":     total_cells,
+        "sampleCount":    sum(d.get("count", 0) for d in covered_docs),
+        "gridDeg":        grid_deg,
+    }
+
+
+@app.post("/explorer/analyze-coverage")
+def analyze_coverage(
+    max_speed_kph:     float = Query(default=50.0),
+    max_hdop:          float = Query(default=3.0),
+    max_accuracy_m:    float = Query(default=15.0),
+    grid_deg:          float = Query(default=0.002),
+    top_n:             int   = Query(default=15),
+    padding_factor:    float = Query(default=0.15),
+    min_cluster_cells: int   = Query(default=5),
+    max_zone_sq_mi:    float = Query(default=25.0),
+    min_zone_sq_mi:    float = Query(default=0.3),
+    dist_peak_km:      float = Query(default=5.0),
+):
+    """Compute coverage gap analysis over the quality-filtered sample set.
+
+    Each qualifying sample must satisfy:
+      speedKph  <= max_speed_kph  (or missing/null)
+      hdop      <= max_hdop       (or missing/null)
+      accuracyM <= max_accuracy_m (or missing/null)
+
+    The world is divided into a lat/lng grid of grid_deg resolution.  Covered
+    cells are those containing at least one qualifying sample.  Gap cells in the
+    padded bounding box are flood-filled into contiguous regions and ranked by
+    a Gaussian score rewarding zones near dist_peak_km from the data centre-of-mass.
+
+    max_zone_sq_mi / min_zone_sq_mi filter out zones that are too large (spanning
+    the whole map) or too small (irrelevant noise).
+
+    Result is stored to tracker_analyses so it can be recalled on page load.
+
+    Returns a GeoJSON FeatureCollection with metadata about the run.
+    """
+    samples = app.state.samples
+
+    quality_filter: dict = {
+        "latitude":  {"$exists": True, "$nin": [None, 0.0]},
+        "longitude": {"$exists": True, "$nin": [None, 0.0]},
+        "$and": [
+            {"$or": [{"speedKph":  {"$exists": False}}, {"speedKph":  None},
+                     {"speedKph":  {"$lte": max_speed_kph}}]},
+            {"$or": [{"hdop":      {"$exists": False}}, {"hdop":      None},
+                     {"hdop":      {"$lte": max_hdop}}]},
+            {"$or": [{"accuracyM": {"$exists": False}}, {"accuracyM": None},
+                     {"accuracyM": {"$lte": max_accuracy_m}}]},
+        ],
+    }
+
+    pipeline = [
+        {"$match": quality_filter},
+        {"$project": {
+            "lat_i": {"$toInt": {"$round": [{"$divide": ["$latitude",  grid_deg]}]}},
+            "lng_i": {"$toInt": {"$round": [{"$divide": ["$longitude", grid_deg]}]}},
+        }},
+        {"$group": {"_id": {"lat_i": "$lat_i", "lng_i": "$lng_i"}}},
+        {"$project": {"_id": 0, "lat_i": "$_id.lat_i", "lng_i": "$_id.lng_i"}},
+    ]
+
+    t0 = time.monotonic()
+    try:
+        covered_docs = list(samples.aggregate(pipeline, allowDiskUse=True))
+    except Exception as exc:
+        raise HTTPException(500, detail=f"coverage aggregation failed: {exc}")
+
+    elapsed_agg = round(time.monotonic() - t0, 2)
+    log.info("analyze-coverage: %d covered cells in %.2fs", len(covered_docs), elapsed_agg)
+
+    if not covered_docs:
+        return {
+            "type": "FeatureCollection", "features": [],
+            "metadata": {"coveredCells": 0, "gapRegions": 0,
+                         "message": "no qualifying samples found"},
+        }
+
+    # Build covered set and compute bbox in integer cell indices
+    covered_set: set[tuple[int, int]] = {(d["lat_i"], d["lng_i"]) for d in covered_docs}
+    lat_is = [d["lat_i"] for d in covered_docs]
+    lng_is = [d["lng_i"] for d in covered_docs]
+    min_lat_i, max_lat_i = min(lat_is), max(lat_is)
+    min_lng_i, max_lng_i = min(lng_is), max(lng_is)
+    center_lat_i = sum(lat_is) / len(lat_is)
+    center_lng_i = sum(lng_is) / len(lng_is)
+
+    # Padded bbox
+    lat_pad = max(int((max_lat_i - min_lat_i) * padding_factor), 10)
+    lng_pad = max(int((max_lng_i - min_lng_i) * padding_factor), 10)
+    box_min_lat = min_lat_i - lat_pad
+    box_max_lat = max_lat_i + lat_pad
+    box_min_lng = min_lng_i - lng_pad
+    box_max_lng = max_lng_i + lng_pad
+
+    # Safety: clamp to 2M candidate cells
+    total_cells = (box_max_lat - box_min_lat + 1) * (box_max_lng - box_min_lng + 1)
+    if total_cells > 2_000_000:
+        lat_pad = lng_pad = 30
+        box_min_lat = min_lat_i - lat_pad; box_max_lat = max_lat_i + lat_pad
+        box_min_lng = min_lng_i - lng_pad; box_max_lng = max_lng_i + lng_pad
+        log.warning("analyze-coverage: bbox clamped (%d -> %d cells)", total_cells,
+                    (box_max_lat - box_min_lat + 1) * (box_max_lng - box_min_lng + 1))
+
+    # Collect gap cells
+    gap_cells: set[tuple[int, int]] = set()
+    for lat_i in range(box_min_lat, box_max_lat + 1):
+        for lng_i in range(box_min_lng, box_max_lng + 1):
+            if (lat_i, lng_i) not in covered_set:
+                gap_cells.add((lat_i, lng_i))
+
+    # Flood-fill into contiguous regions (BFS)
+    visited: set[tuple[int, int]] = set()
+    regions: list[list[tuple[int, int]]] = []
+    DIRS = ((-1, 0), (1, 0), (0, -1), (0, 1))
+    for start in gap_cells:
+        if start in visited:
+            continue
+        cluster: list[tuple[int, int]] = []
+        queue = [start]
+        visited.add(start)
+        while queue:
+            cell = queue.pop(0)
+            cluster.append(cell)
+            for dl, dg in DIRS:
+                nb = (cell[0] + dl, cell[1] + dg)
+                if nb in gap_cells and nb not in visited:
+                    visited.add(nb)
+                    queue.append(nb)
+        regions.append(cluster)
+
+    log.info("analyze-coverage: %d gap regions after BFS (%.2fs total)",
+             len(regions), round(time.monotonic() - t0, 2))
+
+    # Convert to GeoJSON Features with scoring
+    center_lat_deg = center_lat_i * grid_deg
+    cos_lat = _math.cos(_math.radians(center_lat_deg))
+    deg_to_km_lat = 111.0
+    deg_to_km_lng = 111.0 * cos_lat
+
+    features: list[dict] = []
+    for cluster in regions:
+        if len(cluster) < min_cluster_cells:
+            continue
+
+        cen_lat_i = sum(c[0] for c in cluster) / len(cluster)
+        cen_lng_i = sum(c[1] for c in cluster) / len(cluster)
+        d_lat_km = (cen_lat_i - center_lat_i) * grid_deg * deg_to_km_lat
+        d_lng_km = (cen_lng_i - center_lng_i) * grid_deg * deg_to_km_lng
+        dist_km  = _math.sqrt(d_lat_km ** 2 + d_lng_km ** 2)
+        area_km2 = len(cluster) * (grid_deg * 111.0) ** 2
+
+        # Gaussian: peak at dist_peak_km from center-of-mass, width 8 km
+        dist_factor = _math.exp(-((dist_km - dist_peak_km) ** 2) / (2 * 8.0 ** 2))
+        score = area_km2 * (0.3 + 0.7 * dist_factor)
+
+        blat = min(c[0] for c in cluster)
+        tlat = max(c[0] for c in cluster)
+        blng = min(c[1] for c in cluster)
+        tlng = max(c[1] for c in cluster)
+        g0 = (blat - 0.5) * grid_deg
+        g1 = (tlat + 0.5) * grid_deg
+        g2 = (blng - 0.5) * grid_deg
+        g3 = (tlng + 0.5) * grid_deg
+
+        features.append({
+            "type": "Feature",
+            "geometry": {"type": "Polygon", "coordinates": [[
+                [g2, g0], [g3, g0], [g3, g1], [g2, g1], [g2, g0],
+            ]]},
+            "properties": {
+                "cellCount":        len(cluster),
+                "areaKm2":          round(area_km2, 3),
+                "areaSqMi":         round(area_km2 * 0.386102, 3),
+                "centroid":         [round(cen_lng_i * grid_deg, 6),
+                                     round(cen_lat_i * grid_deg, 6)],
+                "distFromCenterKm": round(dist_km, 2),
+                "score":            round(score, 4),
+                "bbox":             [round(g2, 6), round(g0, 6),
+                                     round(g3, 6), round(g1, 6)],
+            },
+        })
+
+    # --- Filter by zone size limits (sq mi) ---
+    KM2_PER_SQ_MI = 2.58999
+    features = [
+        f for f in features
+        if min_zone_sq_mi <= f["properties"]["areaSqMi"] <= max_zone_sq_mi
+    ]
+
+    features.sort(key=lambda f: f["properties"]["score"], reverse=True)
+    features = features[:top_n]
+    for i, f in enumerate(features):
+        f["properties"]["rank"] = i + 1
+
+    log.info("analyze-coverage: returning %d ranked zones (%.2fs total)",
+             len(features), round(time.monotonic() - t0, 2))
+
+    analysis_id = str(uuid.uuid4())
+    run_at_ms   = int(time.time() * 1000)
+
+    result = {
+        "type": "FeatureCollection",
+        "metadata": {
+            "analysisId":    analysis_id,
+            "runAt":         run_at_ms,
+            "gridDeg":       grid_deg,
+            "coveredCells":  len(covered_set),
+            "totalGapCells": len(gap_cells),
+            "gapRegions":    len(features),
+            "aggregationSec": elapsed_agg,
+            "totalSec":      round(time.monotonic() - t0, 2),
+            "centerOfMass":  [round(center_lng_i * grid_deg, 6),
+                              round(center_lat_i * grid_deg, 6)],
+            "boundingBox":   [min_lng_i * grid_deg, min_lat_i * grid_deg,
+                              max_lng_i * grid_deg, max_lat_i * grid_deg],
+            "params": {
+                "maxSpeedKph":   max_speed_kph,
+                "maxHdop":       max_hdop,
+                "maxAccuracyM":  max_accuracy_m,
+                "gridDeg":       grid_deg,
+                "topN":          top_n,
+                "maxZoneSqMi":  max_zone_sq_mi,
+                "minZoneSqMi":  min_zone_sq_mi,
+                "distPeakKm":   dist_peak_km,
+            },
+        },
+        "features": features,
+    }
+
+    # Persist for recall on page load (rolling 10)
+    try:
+        coll = app.state.db[ANALYSES_COLL]
+        coll.insert_one({"analysisId": analysis_id, "runAt": run_at_ms,
+                         **{k: v for k, v in result.items() if k != "_id"}})
+        all_ids = list(coll.find({}, {"_id": 1}, sort=[("runAt", -1)]))
+        if len(all_ids) > 10:
+            coll.delete_many({"_id": {"$in": [d["_id"] for d in all_ids[10:]]}})
+    except Exception as exc:
+        log.warning("analyze-coverage: failed to persist result: %s", exc)
+
+    return result
+
+
+# ===========================================================================
+# Explorer: Live Samples (real-time tracking feed)
+# ===========================================================================
+
+@app.get("/explorer/live-samples")
+def live_samples(
+    since_ms: int = Query(default=0),
+    limit:    int = Query(default=20, le=200),
+):
+    """Return the most recent radiation samples, newest-first.
+
+    Used by the live tracking panel to show new dose readings as the field
+    device uploads via its hotspot. The caller should poll every ~10s and
+    pass since_ms = previous latest timestampMs to get only new rows.
+    """
+    filt: dict = {
+        "latitude":    {"$exists": True, "$nin": [None, 0.0]},
+        "longitude":   {"$exists": True, "$nin": [None, 0.0]},
+        "uSvPerHour":  {"$exists": True, "$ne": None},
+    }
+    if since_ms:
+        filt["timestampMs"] = {"$gte": since_ms}
+
+    cur = app.state.samples.find(
+        filt,
+        projection={"_id": 0, "timestampMs": 1, "uSvPerHour": 1, "cps": 1,
+                    "latitude": 1, "longitude": 1, "speedKph": 1,
+                    "sessionId": 1, "accuracyM": 1},
+        sort=[("timestampMs", -1)],
+        limit=limit,
+    )
+    return list(cur)

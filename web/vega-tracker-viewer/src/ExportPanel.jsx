@@ -2,7 +2,7 @@
 import { useState } from 'react';
 import { fetchExportPreview, exportTimeRange } from './api.js';
 
-const MAX_BYTES_PER_FILE = 10 * 1024 * 1024; // 10 MB hard cap per file
+const MAX_BYTES_PER_FILE = 9 * 1024 * 1024; // 9 MB hard cap per file
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -331,7 +331,7 @@ export function ExportPanel() {
           <div className="export-notes">
             <div className="export-notes-title">Notes</div>
             <ul>
-              <li>Files larger than 10 MB are automatically split and packaged as a <code>.zip</code>.</li>
+              <li>Files larger than 9 MB are automatically split and packaged as a <code>.zip</code>.</li>
               <li><strong>RadiaCode (.txt)</strong> matches the native app export format exactly, including Windows FILETIME timestamps — compatible with RadiaCode upload sites.</li>
               <li>All timestamps are UTC.</li>
               <li>GPS event rows (GPS_LOST / GPS_REGAINED) are omitted from RadiaCode .txt exports.</li>
