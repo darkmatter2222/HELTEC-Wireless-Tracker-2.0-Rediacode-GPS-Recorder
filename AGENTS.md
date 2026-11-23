@@ -45,7 +45,7 @@ Commit types: `feat`, `fix`, `refactor`, `docs`, `chore`.
 
 **Never commit with a failing or ERRORED suite.** The gate is:
 
-1. `pio test -e native` → `192 test cases: 192 succeeded`
+1. `pio test -e native` → `203 test cases: 203 succeeded`
 2. `pio run -e heltec_tracker_v2` → SUCCESS (if any `src/` file changed)
 3. `pio run -e heltec_tracker_v2 -t upload --upload-port COM3`
 4. `python scripts\test_device.py --port COM3` → 0 failed (50 records)
@@ -91,6 +91,7 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 │   ├── secrets.h.example         # template for secrets.h
 │   ├── button.{h,cpp}            # debounced GPIO 0 + long-press engine
 │   ├── button_logic.h            # header-only press/screen/dose logic (v2.3)
+│   ├── disk_gate.h               # header-only disk-reserve gate + self-heal (v2.4)
 │   ├── gps_module.{h,cpp}        # UC6580 GNSS: auto-baud, bestEpochMs()
 │   ├── gps_epoch.h               # header-only UTC anchor + projection logic (v2.3)
 │   ├── event_log.{h,cpp}         # persistent /system.log ring + reset reasons
@@ -110,6 +111,7 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 │   ├── import_tracks.py          # bulk-import RadiaCode app track exports (--merge)
 │   ├── test_device.py            # on-device integration suite (50 records, COM3)
 │   ├── elf_decode.py             # firmware ELF: header/sections/sym/addr2line (v2.3)
+│   ├── lfs_rescue_read.py        # chunked raw flash reader (full-volume LFS rescue, v2.4)
 │   ├── sink_server.py            # fixed-rate TCP sink for WDT/chunk repros
 │   ├── test_api_ingest.py        # API smoke test: POST /ingest/csv round trip
 │   └── test_api_recompute.py     # API smoke test: /admin/recompute-sessions
@@ -117,6 +119,7 @@ heltec-tracker/                   <- repo root (was heltec_tracker/ in monorepo)
 │   ├── test_button_native/            # blogic:: press + screen/dose logic
 │   ├── test_battery_native/           # LiPo voltage-to-percent table
 │   ├── test_csv_schema_native/        # 12-column schema + timestamp gate
+│   ├── test_disk_gate_native/         # dgate:: disk-reserve gate + self-heal
 │   ├── test_dose_persistence_native/  # NVS write-gate decision
 │   ├── test_gps_epoch_native/         # gepoch:: anchor + projection
 │   ├── test_gps_transition_native/    # GPS fix transition detector
@@ -289,7 +292,7 @@ python scripts\drive.py listen 30
 ```
 
 **Firmware version**: tracked in `src/config.h` as `FW_VERSION`.
-Current: `2.3`.
+Current: `2.4`.
 
 ---
 
@@ -967,8 +970,8 @@ green and the docs carry the current totals.
 
 | # | Command | Expected |
 |---|---------|----------|
-| 1 | `pio test -e native` (with the `gcc`/`g++`/`ar` wrapper dir on `PATH`) | `192 test cases: 192 succeeded` across 13 suites |
-| 2 | `pio run -e heltec_tracker_v2` (only if any `src/` file changed) | `SUCCESS`, RAM ≈ 16.8 %, Flash ≈ 59.7 % |
+| 1 | `pio test -e native` (with the `gcc`/`g++`/`ar` wrapper dir on `PATH`) | `203 test cases: 203 succeeded` across 14 suites |
+| 2 | `pio run -e heltec_tracker_v2` (only if any `src/` file changed) | `SUCCESS`, RAM ≈ 16.8 %, Flash ≈ 59.9 % |
 | 3 | `pio run -e heltec_tracker_v2 -t upload --upload-port COM3` | `Hard resetting via RTS pin...` |
 | 4 | `python scripts\test_device.py --port COM3` | **0 failed** out of 50 records (skips are legitimate idle states, failures are not) |
 | 5 | `python scripts\test_api_ingest.py` then `python scripts\test_api_recompute.py` (only if `api/` changed) | both exit 0 — "All assertions PASSED" |
@@ -1025,7 +1028,7 @@ Every new record name belongs in the device-suite table below.
 
 ### Native unit tests (runs on host PC — no hardware required)
 
-Thirteen test suites live under `test/`:
+Fourteen test suites live under `test/`:
 
 | Suite                    | Tests | What it validates |
 |--------------------------|-------|-------------------|
@@ -1037,6 +1040,7 @@ Thirteen test suites live under `test/`:
 | `test_link_health_native`        |  7    | BLE link-stall watchdog, including millis() wraparound |
 | `test_wifi_network_select_native`| 14    | Dual-network profile enable/disable, HTTPS URL detection, Basic Auth cred check |
 | `test_lfs_geometry_native`       |  6    | LittleFS volume-geometry gate: `total != 0 && used <= total` (v2.1) |
+| `test_disk_gate_native`          | 11    | `dgate::` helpers: reserve arithmetic, append-row gate, `used >= total` guard, self-heal decision with boundary + zero-pending cases (v2.4) |
 | `test_wifi_gate_native`          | 40    | `wgate::` helpers: VBAT hysteresis latch, charge trend, connect budget model + guards, line-aligned chunk arithmetic, WDT window arithmetic, retry ladder + cap, cadence/self-heal choices, `WL_*` / phase / skip decoding (v2.3) |
 | `test_wifi_cycle_sim_native`     | 23    | Full-cycle device simulation with injected scenarios and chained events: gated ramp then drain, both-APs-absent budget, 5 s vs 25 s timeout A/B, home-preferred fallback, poke fast path, per-window WDT coverage, partial drain mid-chunk, dead-link then recovery, zero-byte debris, charge/unplug/recharge lifecycle, `no_pending` chains, deadline-edge association, phase-trace tables, long-outage ladder (v2.3) |
 | `test_button_native`             | 11    | `blogic::` helpers: debounce + press-length engine (short/long, bounce, `millis()` wraparound, chained holds), screen/picker cursor modulus, dose value/unit scaling ladder (v2.3) |
@@ -1046,10 +1050,10 @@ Thirteen test suites live under `test/`:
 Every one of those suites that covers a decision includes the firmware header
 directly instead of re-declaring the logic, so it cannot drift from the device
 code: `src/wifi_gate.h` (`wgate`), `src/button_logic.h` (`blogic`),
-`src/gps_epoch.h` (`gepoch`) and `src/session_paths.h` (`spath`). The firmware
-compiles the same headers — `button.cpp`/`ui.cpp`, `gps_module.cpp` and
-`session_store.cpp`/`main.cpp` delegate to them instead of carrying inline
-arithmetic.
+`src/gps_epoch.h` (`gepoch`), `src/session_paths.h` (`spath`) and
+`src/disk_gate.h` (`dgate`). The firmware compiles the same headers —
+`button.cpp`/`ui.cpp`, `gps_module.cpp`, `session_store.cpp`/`main.cpp`
+delegate to them instead of carrying inline arithmetic.
 
 **Prerequisites on Windows**: PlatformIO's native env calls `gcc`/`g++`/`ar` which
 are not in PATH by default. If VS Build Tools 2022 is installed, create one-time
@@ -1070,7 +1074,7 @@ Then run all thirteen host-side suites:
 
 ```powershell
 pio test -e native
-# Expected: 192 test cases: 192 succeeded
+# Expected: 203 test cases: 203 succeeded
 ```
 
 **Gotcha**: the `$env:PATH` edit and `pio test` must be in the **same** shell
@@ -1274,6 +1278,7 @@ All in `src/config.h` under `namespace cfg`. Edit here and recompile.
 | `VBAT_GATE_FLOOR`       | 3.45 V     | 3.45 V       | battery gate **re-block** level; hysteresis width is 150 mV (v2.3) |
 | `VBAT_CHARGE_DELTA_V`   | 0.010 V    | 0.010 V      | min per-cycle rise counted as "charging"; dead band above ADC noise |
 | `VBAT_CHARGE_RUN`       | 2          | 2            | consecutive rising samples required before `chg=1` (diagnostic only) |
+| `DISK_RESERVE_PCT`      | 15         | 15           | % of the LittleFS volume kept free at all times; when `free < reserve`, new CSV rows are dropped (`dgate::appendAllowed`) and boot self-heal deletes the oldest pending `.up.csv` (v2.4) |
 
 `secrets::WIFI_CONNECT_TIMEOUT_MS` is **25000** per SSID (both `secrets.h` and
 `secrets.h.example`). The two must match — the pre-2.3 local file had drifted to
@@ -2610,3 +2615,73 @@ self-tests must pass. All passed on the current build:
   3. When a doc lists routes or the mode bar, re-derive it from `openapi.json` and
      `App.jsx`'s `nav-mode-btn` list rather than from the previous doc text.
 
+
+### LittleFS Volume 100% Full: ENOSPC Log Line Divides By cfg->block_count == 0 (v2.4) — CRITICAL
+
+- **Symptom**: deterministic boot loop on 2026-11-23, same three-line signature
+  as the v2.1 crash but with *healthy* geometry:
+  ```
+  HTIT-Tracker firmware v2.3 starting...
+  [STORE] backend=LittleFS used=6160384 total=6160384
+  Guru Meditation Error: Core  1 panic'ed (IntegerDivideByZero). Exception was unhandled.
+  ```
+  `EXCCAUSE=0x6`, `PC=0x42062c44` (in `lfs_alloc`, lfs.c:689), `A3=0`. The
+  ELF hash `d50eb94d...` matched the local build, confirming the on-device binary.
+  Unlike v2.1 the volume was **not** mis-mounted: `used==total==6160384`
+  (752 x 8192-byte blocks) is genuine — the volume was simply 100% full, so the
+  v2.1 geometry gate (`total != 0 && used <= total`) passed.
+- **Root cause**: two facts about littlefs 2.9.1 (arduino-esp32 3.2.17 ships
+  joltwallet/esp_littlefs v1.14.1, IDF v5.1):
+  1. When a volume is full, the first commit that needs a fresh block hits
+     `LFS_ERR_NO_SPACE`, and littlefs 2.9.1's *only* ENOSPC log line in
+     `lfs_alloc` (lfs.c:689) computes `(start + next) % lfs->cfg->block_count`
+     — a modulo by the **config** block count, not the on-disk one.
+  2. On arduino-esp32's VFS mount `cfg->block_count` is the autodetect sentinel
+     **0**: `lfs_mount` autodetects the real count from the superblock into
+     `lfs->block_count` (lfs.c:4527) but leaves `cfg->block_count` untouched.
+     Every code path that reaches that log line while the config count is 0
+     does a `remu` by zero → `IntegerDivideByZero` panic. (The v2.1 crash was
+     the *same* instruction, reached a different way: a bad superblock.)
+- **Why the volume filled**: ~1 day of un-uploaded session CSVs at ~70 B/s
+  (1 Hz samples, ~70 B/row) ≈ 6 MB — exactly the partition size (`0x5E0000`).
+  The active `<day>.csv` + rotated `.up.csv` files left zero free blocks, and
+  `/system.log`'s first write (`event_log::beginBoot()`) is the first file
+  open after mount — so the panic landed before Wi-Fi/BLE init, every boot.
+- **Fix (v2.4)** in `src/disk_gate.h` (new, header-only `dgate::`) +
+  `src/session_store.{h,cpp}`:
+  - **Reserve**: `cfg::DISK_RESERVE_PCT = 15` — keep 15% of the volume free at
+    all times. `dgate::reserveBytes(total, pct)` and `dgate::freeBytes(total,
+    used, pct)`.
+  - **Append gate**: `dgate::appendAllowed(free, reserve, estRowBytes)` — when
+    free space drops to the reserve, new CSV rows (and event rows) are dropped
+    instead of written. A dropped row costs one sample; an ENOSPC panic costs
+    a boot loop.
+  - **Boot self-heal**: `dgate::selfHealNeeded(...)` — if the volume is still
+    over the reserve at boot and there are pending `.up.csv` files,
+    `SessionStore::selfHeal()` deletes the oldest one (filenames sort
+    chronologically by day prefix) until back under the reserve. Runs in
+    `gStore.begin()` **before** `event_log::beginBoot()` (main.cpp) — the
+    log's first write is the would-be first ENOSPC panic.
+  - `usedCache_` + `refreshUsedCache_()` in `SessionStore`: `LittleFS.usedBytes()`
+    (lfs_fs_size, counts used blocks) is cheap and trustworthy; the SdFat
+    backend's `usedBytes()` is slow so the gate is effectively a no-op there.
+    Cache refreshed on every `removePendingUpload` / `removeSession` /
+    `wipeAll` and seeded at all three `begin()` exits.
+  - New suite `test/test_disk_gate_native` (11 cases): reserve arithmetic,
+    append-row gate boundaries, `used >= total` guard, self-heal decision
+    with boundary + zero-pending cases.
+- **Why THIS device got erased instead of self-healed**: the volume was at
+  100% (free = 0), so *nothing* could be deleted safely — littlefs needs free
+  blocks to commit a delete. The rescue dump (`scripts/lfs_rescue_read.py`,
+  chunked esptool `read_flash`) captured the raw partition to
+  `data/littlefs_rescue_20261123.bin` first, then `erase_region 0x210000
+  0x5E0000` cleared the volume and the v2.4 boot recreated a fresh one.
+- **Rules for future code**:
+  1. Keep the LittleFS volume permanently below 100%: the ENOSPC log line is
+     the only fatal `cfg->block_count` use in littlefs 2.9.1, but it is
+     *unreachable* while blocks are free — full is fatal, 99% is fine.
+  2. Any new writer that opens a file on the volume before `event_log` must
+     account for the reserve; the append gate is the backstop.
+  3. `dgate::` decisions are header-only and compiled by both the firmware and
+     `test_disk_gate_native` — keep new disk-space logic there.
+  4. Native total is now **203/203** across 14 suites (was 192/192 across 13).

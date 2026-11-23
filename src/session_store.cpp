@@ -2,6 +2,7 @@
 #include "config.h"
 #include "session_paths.h"
 #include "gps_epoch.h"
+#include "disk_gate.h"
 
 #include <LittleFS.h>
 #include "event_log.h"
@@ -164,6 +165,8 @@ bool SessionStore::begin() {
                     if (!gSdFat.exists(cfg::SESSIONS_DIR)) {
                         gSdFat.mkdir(cfg::SESSIONS_DIR);
                     }
+                    refreshUsedCache_();
+                    selfHeal();
                     return true;
                 }
                 Serial.printf("[SdFat] %u Hz failed: errCode=0x%02X errData=0x%02X (attempt %u)\n",
@@ -294,6 +297,8 @@ bool SessionStore::begin() {
                 if (!SD.exists(cfg::SESSIONS_DIR)) {
                     SD.mkdir(cfg::SESSIONS_DIR);
                 }
+                refreshUsedCache_();
+                selfHeal();
                 return true;
             }
         } else {
@@ -353,6 +358,13 @@ bool SessionStore::begin() {
     }
     fs_ = &LittleFS;
     backend_ = Backend::LittleFs;
+    // Disk-capacity gate (v2.4): seed the usage cache, then heal a volume
+    // that a previous (pre-gate) fill left at/below the reserve. Must run
+    // before event_log::beginBoot() -- the log's first write is the first
+    // file open after mount, which on a full volume is exactly the commit
+    // that would ENOSPC-panic (2026-11-23 incident).
+    refreshUsedCache_();
+    selfHeal();
     return true;
 }
 
@@ -652,6 +664,25 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
     Lock lk(mutex_);
     event_log::markPhase("ST_APPEND");
 
+    // ---- Disk-reserve gate (v2.4) ---------------------------------------
+    // Drop the row BEFORE opening the day file: on a near-full volume the
+    // open is itself a metadata commit, and that is the operation that
+    // ENOSPC-panics (2026-11-23 incident). The estimate is the worst-case
+    // row size (conservative: triggers a hair early, never late) and the
+    // usage figure is the O(1) cache -- a live usedBytes() query walks every
+    // file's CTZ metadata, which is too heavy at 1 Hz.
+    if (!dgate::appendAllowed(totalBytes(), usedCache_,
+                              cfg::MAX_LINE_BYTES, cfg::DISK_RESERVE_PCT)) {
+        ++droppedByDisk_;
+        if ((droppedByDisk_ % 60) == 1) {
+            Serial.printf("[REC] skip: disk reserve (dropped=%u used=%u%% "
+                          "reserve=%d%%)\n",
+                          (unsigned)droppedByDisk_, (unsigned)percentUsed(),
+                          cfg::DISK_RESERVE_PCT);
+        }
+        return;
+    }
+
     // ---- Auto-rotate on day rollover / first sample ---------------------
     // Both decisions are spath:: helpers (session_paths.h) so the native suite
     // pins the "no UTC yet" and "boundary crossed" branches.
@@ -696,6 +727,7 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
         if (!f) { log_w("append: open failed"); return; }
         f.write((const uint8_t*)line, (size_t)len);
         f.close();
+        usedCache_ += (size_t)len;   // disk-reserve gate (v2.4), O(1) at 1 Hz
         ++sampleCount_;
         ++lifetimeSamples_;
         return;
@@ -714,6 +746,7 @@ void SessionStore::append(uint32_t /*tsLow*/, uint64_t timestampMsFull,
                       len, (unsigned)written, (unsigned)ESP.getFreeHeap());
         return;
     }
+    usedCache_ += (size_t)len;   // disk-reserve gate (v2.4), O(1) at 1 Hz
     ++sampleCount_;
     ++lifetimeSamples_;
     if ((sampleCount_ % 100) == 0) {
@@ -748,6 +781,14 @@ void SessionStore::appendEvent(uint64_t timestampMsFull,
     // event would just create an orphan day file.
     if (!recording_ || activeId_ != day) return;
 
+    // Disk-reserve gate (v2.4), same rationale as append(): on a near-full
+    // volume the open below is the commit that would ENOSPC-panic.
+    if (!dgate::appendAllowed(totalBytes(), usedCache_,
+                              cfg::MAX_LINE_BYTES, cfg::DISK_RESERVE_PCT)) {
+        ++droppedByDisk_;
+        return;
+    }
+
     // Schema: timestamp, uSv, cps, lat, lng, deviceId, speed, bearing, alt,
     // hdop, event, accuracyM. Numerics are 0/empty; deviceId is preserved so
     // the row can be associated with the same tracker. accuracyM trailing
@@ -772,6 +813,7 @@ void SessionStore::appendEvent(uint64_t timestampMsFull,
     } else {
         return;
     }
+    usedCache_ += (size_t)len;   // disk-reserve gate (v2.4)
     ++sampleCount_;
     ++lifetimeSamples_;
     Serial.printf("[EVT] %s ts=%llu day=%s\n",
@@ -800,6 +842,64 @@ int SessionStore::percentUsed() const {
     const size_t t = totalBytes();
     if (!t) return 0;
     return (int)((usedBytes() * 100ULL) / t);
+}
+
+void SessionStore::refreshUsedCache_() {
+    usedCache_ = usedBytes();
+}
+
+// =============================================================================
+// Public: disk-capacity gate (v2.4)
+//
+// The 2026-11-23 boot loop: the on-chip volume filled to 100 % during a long
+// upload outage; littlefs 2.9's ENOSPC log line divides by cfg->block_count
+// (the autodetect sentinel, 0) and panics with IntegerDivideByZero on every
+// boot. selfHeal() breaks that state by deleting the oldest pending uploads
+// until the reserve is free again; the append gate in append()/appendEvent()
+// keeps the volume from ever reaching 100 % again. Decision logic lives in
+// src/disk_gate.h (dgate::) and is pinned by test_disk_gate_native.
+// =============================================================================
+size_t SessionStore::selfHeal() {
+    const size_t total = totalBytes();
+    if (total == 0) return 0;
+    size_t deleted = 0;
+    for (;;) {
+        const size_t used = usedBytes();
+        if (!dgate::selfHealNeeded(total, used, cfg::DISK_RESERVE_PCT)) break;
+        std::vector<PendingUpload> pend = listPendingUploads();
+        if (pend.empty()) {
+            // Only the active day file is left; the append gate will stop it
+            // growing. A heal cannot make progress without deleting data.
+            Serial.printf("[STORE] heal: reserve low (used=%u%%) but no "
+                          "pending files; append gate will cap growth\n",
+                          (unsigned)percentUsed());
+            break;
+        }
+        // "<day>.<bootMs>.up.csv" sorts by day first -> oldest day first.
+        std::sort(pend.begin(), pend.end(),
+                  [](const PendingUpload& a, const PendingUpload& b) {
+                      return a.filename < b.filename;
+                  });
+        const PendingUpload victim = pend.front();
+        if (!removePendingUpload(victim.filename)) {
+            Serial.printf("[STORE] heal: remove failed for %s, stopping\n",
+                          victim.filename.c_str());
+            break;
+        }
+        ++deleted;
+        refreshUsedCache_();
+        Serial.printf("[STORE] heal: deleted %s (%u B, %u%% used)\n",
+                      victim.filename.c_str(),
+                      (unsigned)victim.sizeBytes,
+                      (unsigned)percentUsed());
+    }
+    if (deleted > 0) {
+        Serial.printf("[STORE] heal: %u file(s) deleted, used=%u%% "
+                      "(reserve=%d%%)\n",
+                      (unsigned)deleted, (unsigned)percentUsed(),
+                      cfg::DISK_RESERVE_PCT);
+    }
+    return deleted;
 }
 
 int SessionStore::sessionCount() const {
@@ -889,11 +989,14 @@ bool SessionStore::removePendingUpload(const String& filename) {
     if (filename.length() == 0 || !hasUsableBackend()) return false;
     if (!isPendingFilename(filename)) return false;
     String path = String(cfg::SESSIONS_DIR) + "/" + filename;
+    bool ok = false;
     if (backend_ == Backend::SdFat) {
-        return gSdFat.remove(path.c_str());
+        ok = gSdFat.remove(path.c_str());
+    } else if (fs_) {
+        ok = fs_->remove(path);
     }
-    if (!fs_) return false;
-    return fs_->remove(path);
+    if (ok) refreshUsedCache_();   // freed blocks -> disk-reserve gate (v2.4)
+    return ok;
 }
 
 Stream* SessionStore::openPendingUploadStream(const String& filename, size_t& outSizeBytes) {
@@ -1122,6 +1225,7 @@ uint32_t SessionStore::wipeAll() {
         for (const auto& p : paths) {
             if (gSdFat.remove(p.c_str())) ++removed;
         }
+        if (removed) refreshUsedCache_();
         return removed;
     }
     if (!fs_) return 0;
@@ -1139,6 +1243,7 @@ uint32_t SessionStore::wipeAll() {
     for (const auto& p : paths) {
         if (fs_->remove(p)) ++removed;
     }
+    if (removed) refreshUsedCache_();
     return removed;
 }
 
@@ -1146,9 +1251,14 @@ bool SessionStore::removeSession(const String& id) {
     if (id.length() == 0 || !hasUsableBackend()) return false;
     if (recording_ && activeId_ == id) return false;
     String path = String(cfg::SESSIONS_DIR) + "/" + id + ".csv";
-    if (backend_ == Backend::SdFat) return gSdFat.remove(path.c_str());
-    if (!fs_) return false;
-    return fs_->remove(path);
+    bool ok = false;
+    if (backend_ == Backend::SdFat) {
+        ok = gSdFat.remove(path.c_str());
+    } else if (fs_) {
+        ok = fs_->remove(path);
+    }
+    if (ok) refreshUsedCache_();
+    return ok;
 }
 
 bool SessionStore::readSessionToString(const String& id, size_t maxBytes, String& out) const {

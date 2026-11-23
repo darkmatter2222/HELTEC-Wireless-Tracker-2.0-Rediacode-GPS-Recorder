@@ -280,10 +280,11 @@ heltec-tracker/
 │   ├── sink_server.py            fixed-rate TCP sink for WDT/chunk repros
 │   ├── test_api_ingest.py        API smoke test: POST /ingest/csv round trip
 │   └── test_api_recompute.py     API smoke test: /admin/recompute-sessions
-├── test/                         Native (host-PC) Unity suites — 192 cases / 13 suites
+├── test/                         Native (host-PC) Unity suites — 203 cases / 14 suites
 │   ├── test_button_native/       blogic:: press + screen/dose logic (11)
 │   ├── test_battery_native/      LiPo voltage-to-percent interpolation (11)
 │   ├── test_csv_schema_native/   12-column schema + MIN_VALID_TS_MS gate (23)
+│   ├── test_disk_gate_native/    dgate:: disk-reserve gate + self-heal (11)
 │   ├── test_dose_persistence_native/  NVS write-gate decision logic (9)
 │   ├── test_gps_epoch_native/    gepoch:: anchor + projection (16)
 │   ├── test_gps_transition_native/    GPS fix transition detector (9)
@@ -307,10 +308,10 @@ heltec-tracker/
 └── README.md                     this file
 ```
 
-> The four `*_logic`-style headers (`button_logic.h`, `gps_epoch.h`, `session_paths.h`,
-> `wifi_gate.h`) are **header-only and compiled twice**: by the firmware *and* by the
-> host-side Unity suites. A test can therefore never drift from the code that runs on
-> the device — see [Testing](#testing).
+> The header-only decision headers (`button_logic.h`, `gps_epoch.h`,
+> `session_paths.h`, `wifi_gate.h`, `disk_gate.h`) are **compiled twice**: by the
+> firmware *and* by the host-side Unity suites. A test can therefore never drift
+> from the code that runs on the device — see [Testing](#testing).
 
 ---
 
@@ -629,8 +630,8 @@ change** — never deferred to a later session. A turn is only finished when ste
 
 | # | Command | Expected |
 |---|---------|----------|
-| 1 | `pio test -e native` | `192 test cases: 192 succeeded` across 13 suites |
-| 2 | `pio run -e heltec_tracker_v2` *(only if any `src/` file changed)* | `SUCCESS` — RAM ≈ 16.8 %, Flash ≈ 59.7 % |
+| 1 | `pio test -e native` | `203 test cases: 203 succeeded` across 14 suites |
+| 2 | `pio run -e heltec_tracker_v2` *(only if any `src/` file changed)* | `SUCCESS` — RAM ≈ 16.8 %, Flash ≈ 59.9 % |
 | 3 | `pio run -e heltec_tracker_v2 -t upload --upload-port COM3` | `Hard resetting via RTS pin...` |
 | 4 | `python scripts\test_device.py --port COM3` | **0 failed** out of 50 records |
 | 5 | `python scripts\test_api_ingest.py` + `python scripts\test_api_recompute.py` *(if `api/` changed)* | both exit 0 |
@@ -671,15 +672,16 @@ same commit.
 | `test_link_health_native` | 7 | BLE link-stall watchdog, incl. `millis()` wraparound |
 | `test_wifi_network_select_native` | 14 | Dual-profile enable/disable, HTTPS detection, Basic Auth check |
 | `test_lfs_geometry_native` | 6 | LittleFS volume-geometry gate (`total != 0 && used <= total`) |
+| `test_disk_gate_native` | 11 | `dgate::`: reserve math, append gate, boot self-heal predicate, fill→heal chain |
 | `test_wifi_gate_native` | 40 | `wgate::`: VBAT hysteresis latch, charge trend, connect budget, chunk + WDT arithmetic, retry ladder, phase/`WL_*`/skip decoding |
 | `test_wifi_cycle_sim_native` | 23 | Full-cycle simulation with injected scenarios and chained events |
 | `test_button_native` | 11 | `blogic::` debounce/press-length engine, screen + picker modulus, dose unit ladder |
 | `test_gps_epoch_native` | 16 | `gepoch::` anchor → project → re-anchor chain, drift sign, wraparound |
 | `test_session_paths_native` | 13 | `spath::` filename grammar, day/pending disjointness, rotation truth table |
-| **Total** | **192** | |
+| **Total** | **203** | |
 
-The four header-only logic files (`src/wifi_gate.h`, `src/button_logic.h`,
-`src/gps_epoch.h`, `src/session_paths.h`) are `#include`d **directly** by their
+The five header-only logic files (`src/wifi_gate.h`, `src/button_logic.h`,
+`src/gps_epoch.h`, `src/session_paths.h`, `src/disk_gate.h`) are `#include`d **directly** by their
 suites and compiled by the firmware too — so a test can never drift from the code
 that runs on the device. New decision logic follows the same pattern: pure
 functions in a short namespace, firmware calls them, the suite asserts every

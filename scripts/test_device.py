@@ -65,7 +65,23 @@ except ImportError:
 # Configuration
 # ---------------------------------------------------------------------------
 DEFAULT_PORT    = os.environ.get("TRACKER_PORT", "COM4")
-FW_EXPECTED     = "2.3"          # src/config.h FW_VERSION, checked in the boot banner
+
+def _fw_expected() -> str:
+    # Read FW_VERSION from src/config.h so the boot-banner check tracks
+    # firmware bumps without a manual edit here (v2.4: a hardcoded "2.3"
+    # made a healthy v2.4 device FAIL reboot_firmware_version).
+    cfg = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                       os.pardir, "src", "config.h")
+    try:
+        with open(cfg, encoding="utf-8") as f:
+            m = re.search(r'FW_VERSION\s*=\s*"([^"]+)"', f.read())
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    return "2.4"   # last known-good fallback
+
+FW_EXPECTED = _fw_expected()
 DEFAULT_BAUD    = 115200
 CMD_TIMEOUT_S   = 2.0   # individual command must respond within this many seconds
 HB_WINDOW_S     = 12.0  # collect heartbeats for this long

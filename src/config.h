@@ -132,7 +132,7 @@ constexpr uint32_t SD_SPI_HZ    = 20000000;     // 20 MHz; back off to 4 MHz on 
 // ---------------- App ---------------------------------------------------------
 constexpr uint32_t UI_TICK_MS = 100;
 constexpr uint32_t HEARTBEAT_MS = 3000;
-constexpr const char* FW_VERSION = "2.3";
+constexpr const char* FW_VERSION = "2.4";
 
 // ---------------- Battery / Wi-Fi safety gate (v0.4.2, hysteresis v2.3) ------
 // Skip the Wi-Fi upload cycle entirely if VBAT is below this threshold (V).
@@ -157,6 +157,19 @@ constexpr float    VBAT_GATE_FLOOR   = 3.45f;  // re-block level (must be < open
 // the divider (a 4-sample average of ~0.85 V sits near 1 LSB = 0.2 mV * 5.05).
 constexpr float    VBAT_CHARGE_DELTA_V = 0.010f;
 constexpr uint8_t  VBAT_CHARGE_RUN     = 2;
+
+// ---------------- Disk-capacity gate (v2.4) ----------------------------------
+// On-chip LittleFS is the only storage on V2 (~5.9 MB ~= 24 h of 1 Hz
+// recording). If a long upload outage fills it to 100 %, the next LFS commit
+// needing a block allocation hits ENOSPC, and littlefs 2.9's ENOSPC log line
+// divides by cfg->block_count -- the "autodetect" sentinel (0) on the
+// arduino-esp32 VFS mount -- panicking with IntegerDivideByZero on every boot
+// (2026-11-23 incident). DISK_RESERVE_PCT keeps that volume permanently
+// below full: appends are dropped once writing would push free space under
+// the reserve, and a boot-time self-heal deletes the oldest pending
+// .up.csv files until free space is back above it. Decision logic:
+// src/disk_gate.h (dgate::), tested by test_disk_gate_native.
+constexpr int DISK_RESERVE_PCT = 15;
 
 // ----------- Always-on autonomous recording (v0.4.0) ------------------------
 // Recording is no longer user-toggled. As long as the RadiaCode is connected

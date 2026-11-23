@@ -113,6 +113,16 @@ public:
     int    percentUsed() const;
     int    sessionCount() const;   // total .csv + .up.csv files
 
+    // Disk-capacity gate (v2.4, src/disk_gate.h): delete the oldest
+    // pending .up.csv files until free space is back above
+    // cfg::DISK_RESERVE_PCT of the volume. Called from begin() after
+    // mount; returns the number of files deleted (0 = nothing to heal).
+    // Oldest = lexicographically smallest name: "<day>.<bootMs>.up.csv"
+    // sorts by day first, so days heal in chronological order.
+    size_t selfHeal();
+    // Rows dropped by the append gate (disk reserve) this boot.
+    uint32_t droppedByDiskFull() const { return droppedByDisk_; }
+
     // ---------------------------------------------------------------------
     // Upload integration (called by WifiUploader on core 0).
     // ---------------------------------------------------------------------
@@ -169,10 +179,20 @@ private:
     String   activeId_;
     uint32_t sampleCount_ = 0;
     uint32_t lifetimeSamples_ = 0;   // monotonic since boot, never reset on rotate
+    uint32_t droppedByDisk_ = 0;     // rows dropped by the disk-reserve gate (v2.4)
+    // Cached used-bytes for the 1 Hz append gate: a live usedBytes() query
+    // walks every file's CTZ metadata, which is too heavy per sample. The
+    // cache is re-queried on boot and after structural changes (rotate /
+    // delete / wipe) and bumped by the written row length otherwise. It can
+    // only over-estimate (mtime-tag churn), which errs toward dropping rows
+    // early -- the safe direction for the ENOSPC gate.
+    size_t usedCache_ = 0;
     Backend  backend_     = Backend::None;
     fs::FS*  fs_          = nullptr;
     uint64_t cardSizeMb_  = 0;
     bool     sdFatPreflightOk_ = false;
     fs::File openedStreamFile_;
     SemaphoreHandle_t mutex_ = nullptr;
+
+    void refreshUsedCache_();   // live usedBytes() query into usedCache_
 };
